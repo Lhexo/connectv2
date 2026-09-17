@@ -1,0 +1,15 @@
+providers = ["node"]
+
+[variables]
+NODE_ENV = "production"
+NIXPACKS_NODE_VERSION = "20"
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "NODE_ENV=production node dist/server.js"
+

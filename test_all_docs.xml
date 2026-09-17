@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<EasyfattDocuments AppVersion="2" Creator="Danea Easyfatt Enterprise 2011.15" CreatorUrl="http://www.danea.it/software/easyfatt">
+<Company>
+<Name>Tuttobimbi Srl</Name>
+</Company>
+<Documents>
+<Document>
+<CustomerCode>0055</CustomerCode>
+<CustomerWebLogin/>
+<CustomerName>Il Puffetto</CustomerName>
+<CustomerAddress>Via Carducci, 4</CustomerAddress>
+<CustomerPostcode>27035</CustomerPostcode>
+<CustomerCity>Mede</CustomerCity>
+<CustomerProvince>PV</CustomerProvince>
+<CustomerCountry/>
+<CustomerVatCode>26899510269</CustomerVatCode>
+<CustomerTel>0384 865980</CustomerTel>
+<DocumentType>I</DocumentType>
+<Warehouse>Principale</Warehouse>
+<Date>2009-02-28</Date>
+<Number>69</Number>
+<PaymentName>R.B. 30-60 Giorni F.M.</PaymentName>
+<PaymentBank>Banca Etruria - CIN 9 ABI 98750 CAB 663 C/C 659812C</PaymentBank>
+</Document>
+<Document>
+<CustomerCode>0056</CustomerCode>
+<CustomerWebLogin/>
+<CustomerName>Mondo Felice</CustomerName>
+<CustomerAddress>Via Paolo Borsellino, 60</CustomerAddress>
+<CustomerPostcode>36050</CustomerPostcode>
+<CustomerCity>Bolzano Vicentino</CustomerCity>
+<CustomerProvince>VI</CustomerProvince>
+<CustomerCountry/>
+<CustomerVatCode>96321589329</CustomerVatCode>
+<CustomerTel>0444 345840</CustomerTel>
+<DocumentType>I</DocumentType>
+<Warehouse>Principale</Warehouse>
+<Date>2009-02-28</Date>
+<Number>70</Number>
+<PaymentName>R.B. 30-60 Giorni F.M.</PaymentName>
+<PaymentBank>Mediobanca - CIN 5 ABI 69821 CAB 659 C/C 3201598MM</PaymentBank>
+</Document>
+<Document>
+<CustomerCode>0057</CustomerCode>
+<CustomerWebLogin/>
+<CustomerName>L'isola Del Tesoro</CustomerName>
+<CustomerAddress>Via Raffaello, 28</CustomerAddress>
+<CustomerPostcode>33080</CustomerPostcode>
+<CustomerCity>Fiume Veneto</CustomerCity>
+<CustomerProvince>PN</CustomerProvince>
+<CustomerCountry/>
+<CustomerVatCode>96325874136</CustomerVatCode>
+<CustomerTel>0434 968992</CustomerTel>
+<DocumentType>I</DocumentType>
+<Warehouse>Principale</Warehouse>
+<Date>2009-02-28</Date>
+<Number>71</Number>
+<PaymentName>R.B. 30 Giorni F.M.</PaymentName>
+<PaymentBank>Banca di Vicenza - CIN H ABI 12987 CAB 12695 C/C 158723H</PaymentBank>
+</Document>
+<Document>
+<CustomerCode>0058</CustomerCode>
+<CustomerWebLogin/>
+<CustomerName>Amici del Gioco</CustomerName>
+<CustomerAddress>Via Ctr. Di Suio, 56</CustomerAddress>
+<CustomerPostcode>04021</CustomerPostcode>
+<CustomerCity>Castelforte</CustomerCity>
+<CustomerProvince>LT</CustomerProvince>
+<CustomerCountry/>
+<CustomerVatCode>66982157196</CustomerVatCode>
+<CustomerTel>0771 656890</CustomerTel>
+<DocumentType>I</DocumentType>
+<Warehouse>Principale</Warehouse>
+<Date>2009-02-28</Date>
+<Number>72</Number>
+<PaymentName>Bonifico 30-60 gg F.M.</PaymentName>
+<PaymentBank>Cassa di Risparmio - IBAN IT83 H062 2562 9610 7404 2366 76W</PaymentBank>
+</Document>
+<Document>
+<CustomerCode>0059</CustomerCode>
+<CustomerWebLogin/>
+<CustomerName>Apriti Sesamo</CustomerName>
+<CustomerAddress>Via Villecco, 10</CustomerAddress>
+<CustomerPostcode>8409</CustomerPostcode>
+<CustomerCity>Battipaglia</CustomerCity>
+<CustomerProvince>SA</CustomerProvince>
+<CustomerCountry/>
+<CustomerVatCode>15983021548</CustomerVatCode>
+<CustomerTel>0828 387541</CustomerTel>
+<DocumentType>I</DocumentType>
+<Warehouse>Principale</Warehouse>
+<Date>2009-02-28</Date>
+<Number>73</Number>
+<PaymentName>R.B. 30-60-90 Giorni F.M.</PaymentName>
+<PaymentBank>Banca Nazionale del Lavoro - CIN 9 ABI 32985 CAB 187 C/C 98206044P</PaymentBank>
+</Document>
+</Documents>
+</EasyfattDocuments>

@@ -1,0 +1,1462 @@
+[
+  {
+    "line": 32,
+    "text": "db.exec('PRAGMA foreign_keys = ON');"
+  },
+  {
+    "line": 35,
+    "text": "db.exec(`"
+  },
+  {
+    "line": 308,
+    "text": "try { db.prepare(`ALTER TABLE clients ADD COLUMN ${col} TEXT`).run(); } catch(e) {}"
+  },
+  {
+    "line": 311,
+    "text": "try { db.prepare(`ALTER TABLE users ADD COLUMN ical_token TEXT`).run(); } catch(e) {}"
+  },
+  {
+    "line": 312,
+    "text": "try { db.prepare(`ALTER TABLE orders ADD COLUMN is_imported INTEGER DEFAULT 0`).run(); } catch(e) {}"
+  },
+  {
+    "line": 355,
+    "text": "db.prepare(`ALTER TABLE products ADD COLUMN ${col}`).run();"
+  },
+  {
+    "line": 368,
+    "text": "db.prepare(`ALTER TABLE client_sales_history ADD COLUMN ${col}`).run();"
+  },
+  {
+    "line": 373,
+    "text": "db.exec(`"
+  },
+  {
+    "line": 382,
+    "text": "db.prepare('ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP').run();"
+  },
+  {
+    "line": 385,
+    "text": "db.prepare('ALTER TABLE tasks ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP').run();"
+  },
+  {
+    "line": 388,
+    "text": "db.prepare('ALTER TABLE calls ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP').run();"
+  },
+  {
+    "line": 391,
+    "text": "db.prepare('ALTER TABLE attachments ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP').run();"
+  },
+  {
+    "line": 394,
+    "text": "db.prepare('ALTER TABLE backups ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP').run();"
+  },
+  {
+    "line": 397,
+    "text": "db.prepare('ALTER TABLE user_notifications ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP').run();"
+  },
+  {
+    "line": 400,
+    "text": "db.prepare('ALTER TABLE user_notifications ADD COLUMN is_read BOOLEAN DEFAULT 0').run();"
+  },
+  {
+    "line": 403,
+    "text": "db.prepare('ALTER TABLE user_notifications ADD COLUMN id INTEGER PRIMARY KEY AUTOINCREMENT').run();"
+  },
+  {
+    "line": 406,
+    "text": "db.prepare('ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT \\'Media\\'').run();"
+  },
+  {
+    "line": 409,
+    "text": "db.prepare('ALTER TABLE tasks ADD COLUMN supplier_id INTEGER').run();"
+  },
+  {
+    "line": 412,
+    "text": "db.prepare('ALTER TABLE tasks ADD COLUMN internal_notes TEXT').run();"
+  },
+  {
+    "line": 415,
+    "text": "db.prepare(\"ALTER TABLE calls ADD COLUMN caller_type TEXT CHECK(caller_type IN ('cliente', 'fornitore', 'esterno'))\").run();"
+  },
+  {
+    "line": 418,
+    "text": "db.prepare('ALTER TABLE calls ADD COLUMN duration INTEGER').run();"
+  },
+  {
+    "line": 421,
+    "text": "db.prepare('ALTER TABLE calls ADD COLUMN category_id INTEGER').run();"
+  },
+  {
+    "line": 424,
+    "text": "db.prepare('ALTER TABLE calls ADD COLUMN client_id INTEGER').run();"
+  },
+  {
+    "line": 427,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN agente TEXT').run();"
+  },
+  {
+    "line": 430,
+    "text": "db.prepare('ALTER TABLE calls ADD COLUMN supplier_id INTEGER').run();"
+  },
+  {
+    "line": 433,
+    "text": "db.prepare(\"ALTER TABLE users ADD COLUMN password TEXT NOT NULL DEFAULT 'password123'\").run();"
+  },
+  {
+    "line": 436,
+    "text": "db.prepare('ALTER TABLE users ADD COLUMN avatar TEXT').run();"
+  },
+  {
+    "line": 439,
+    "text": "db.prepare('ALTER TABLE tasks ADD COLUMN duration_minutes INTEGER DEFAULT 0').run();"
+  },
+  {
+    "line": 442,
+    "text": "db.prepare('ALTER TABLE calls ADD COLUMN duration_minutes INTEGER DEFAULT 0').run();"
+  },
+  {
+    "line": 445,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN code TEXT').run();"
+  },
+  {
+    "line": 448,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN address TEXT').run();"
+  },
+  {
+    "line": 451,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN city TEXT').run();"
+  },
+  {
+    "line": 454,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN contact TEXT').run();"
+  },
+  {
+    "line": 457,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN phone TEXT').run();"
+  },
+  {
+    "line": 460,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN email TEXT').run();"
+  },
+  {
+    "line": 463,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN notes TEXT').run();"
+  },
+  {
+    "line": 466,
+    "text": "db.prepare('ALTER TABLE clients ADD COLUMN agente TEXT').run();"
+  },
+  {
+    "line": 471,
+    "text": "db.exec(`"
+  },
+  {
+    "line": 483,
+    "text": "try { db.prepare(\"ALTER TABLE easyfatt_settings ADD COLUMN default_payment TEXT DEFAULT 'Bonifico bancario'\").run(); } catch(e){}"
+  },
+  {
+    "line": 484,
+    "text": "try { db.prepare(\"ALTER TABLE easyfatt_settings ADD COLUMN min_order_total REAL DEFAULT 0.0\").run(); } catch(e){}"
+  },
+  {
+    "line": 485,
+    "text": "try { db.prepare(\"ALTER TABLE easyfatt_settings ADD COLUMN default_notes TEXT DEFAULT ''\").run(); } catch(e){}"
+  },
+  {
+    "line": 486,
+    "text": "try { db.prepare(\"ALTER TABLE easyfatt_settings ADD COLUMN default_vat TEXT DEFAULT '22'\").run(); } catch(e){}"
+  },
+  {
+    "line": 487,
+    "text": "try { db.prepare(\"ALTER TABLE easyfatt_settings ADD COLUMN prices_include_vat INTEGER DEFAULT 0\").run(); } catch(e){}"
+  },
+  {
+    "line": 488,
+    "text": "try { db.prepare(\"ALTER TABLE easyfatt_settings ADD COLUMN product_link_filter TEXT DEFAULT 'all'\").run(); } catch(e){}"
+  },
+  {
+    "line": 489,
+    "text": "try { db.prepare(\"ALTER TABLE easyfatt_settings ADD COLUMN product_commission_filter TEXT DEFAULT 'all'\").run(); } catch(e){}"
+  },
+  {
+    "line": 491,
+    "text": "const existing = db.prepare('SELECT id FROM easyfatt_settings WHERE id = 1').get();"
+  },
+  {
+    "line": 493,
+    "text": "db.prepare(\"INSERT INTO easyfatt_settings (id, username, password, default_payment, min_order_total, default_notes, default_vat, prices_include_vat, product_link_filter, product_commission_filter) VALUES (1, 'admin@connect.com', 'password123', 'Bonifico bancario', 0.0, '', '22', 0, 'all', 'all')\").run();"
+  },
+  {
+    "line": 501,
+    "text": "db.exec(`"
+  },
+  {
+    "line": 520,
+    "text": "const existingCH = db.prepare('SELECT id FROM company_header WHERE id = 1').get();"
+  },
+  {
+    "line": 522,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 540,
+    "text": "db.exec(`"
+  },
+  {
+    "line": 553,
+    "text": "db.exec(`ALTER TABLE payment_methods ADD COLUMN fine_mese INTEGER DEFAULT 0;`);"
+  },
+  {
+    "line": 559,
+    "text": "db.exec(`ALTER TABLE payment_methods ADD COLUMN custom_offsets TEXT DEFAULT NULL;`);"
+  },
+  {
+    "line": 564,
+    "text": "const existingPM = db.prepare('SELECT COUNT(*) as count FROM payment_methods').get() as { count: number };"
+  },
+  {
+    "line": 566,
+    "text": "const insertPM = db.prepare(\"INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets) VALUES (?, ?, ?, ?, ?)\");"
+  },
+  {
+    "line": 646,
+    "text": "const existing = db.prepare('SELECT * FROM payment_methods WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(clean) as any;"
+  },
+  {
+    "line": 653,
+    "text": "const result = db.prepare('INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets) VALUES (?, ?, ?, ?, ?)').run("
+  },
+  {
+    "line": 667,
+    "text": "const fallback = db.prepare('SELECT * FROM payment_methods WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(clean) as any;"
+  },
+  {
+    "line": 674,
+    "text": "const usersToMigrate = db.prepare(\"SELECT id, email FROM users WHERE email LIKE '%@masterbeautyitalia.com' OR email LIKE '%@masterbeauty.com'\").all() as { id: number, email: string }[];"
+  },
+  {
+    "line": 679,
+    "text": "const exists = db.prepare(\"SELECT id FROM users WHERE LOWER(email) = LOWER(?)\").get(newEmail);"
+  },
+  {
+    "line": 681,
+    "text": "db.prepare(\"UPDATE users SET email = ? WHERE id = ?\").run(newEmail, u.id);"
+  },
+  {
+    "line": 691,
+    "text": "const userCount = (db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number })?.count || 0;"
+  },
+  {
+    "line": 692,
+    "text": "const clientCount = (db.prepare('SELECT COUNT(*) as count FROM clients').get() as { count: number })?.count || 0;"
+  },
+  {
+    "line": 693,
+    "text": "const prodCount = (db.prepare('SELECT COUNT(*) as count FROM products').get() as { count: number })?.count || 0;"
+  },
+  {
+    "line": 694,
+    "text": "const taskCount = (db.prepare('SELECT COUNT(*) as count FROM tasks').get() as { count: number })?.count || 0;"
+  },
+  {
+    "line": 695,
+    "text": "const orderCount = (db.prepare('SELECT COUNT(*) as count FROM orders').get() as { count: number })?.count || 0;"
+  },
+  {
+    "line": 696,
+    "text": "const supplierCount = (db.prepare('SELECT COUNT(*) as count FROM suppliers').get() as { count: number })?.count || 0;"
+  },
+  {
+    "line": 707,
+    "text": "const insertUser = db.prepare('INSERT INTO users (name, email, password, department, role) VALUES (?, ?, ?, ?, ?)');"
+  },
+  {
+    "line": 713,
+    "text": "const insertTag = db.prepare('INSERT OR IGNORE INTO tags (name, color) VALUES (?, ?)');"
+  },
+  {
+    "line": 719,
+    "text": "const insertSupplier = db.prepare('INSERT INTO suppliers (name, contact, phone, email, category, notes) VALUES (?, ?, ?, ?, ?, ?)');"
+  },
+  {
+    "line": 723,
+    "text": "const insertCategory = db.prepare('INSERT INTO categories (name, parent_id) VALUES (?, ?)');"
+  },
+  {
+    "line": 761,
+    "text": "const insertProduct = db.prepare('INSERT INTO products (code, description, price, vat_code, um, stock) VALUES (?, ?, ?, ?, ?, ?)');"
+  },
+  {
+    "line": 772,
+    "text": "const insertClient = db.prepare(`"
+  },
+  {
+    "line": 784,
+    "text": "const mario = db.prepare(\"SELECT id FROM users WHERE name = 'Mario Rossi'\").get() as { id: number } | undefined;"
+  },
+  {
+    "line": 785,
+    "text": "const luigi = db.prepare(\"SELECT id FROM users WHERE name = 'Luigi Bianchi'\").get() as { id: number } | undefined;"
+  },
+  {
+    "line": 787,
+    "text": "const client1 = db.prepare(\"SELECT id FROM clients WHERE name = 'Centro Estetico BellaVita'\").get() as { id: number } | undefined;"
+  },
+  {
+    "line": 788,
+    "text": "const client3 = db.prepare(\"SELECT id FROM clients WHERE name = 'Spa Relax & Beauty'\").get() as { id: number } | undefined;"
+  },
+  {
+    "line": 793,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 800,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 811,
+    "text": "const existingAdmin = (db.prepare('SELECT * FROM users WHERE email = ?').get('info@connectitalia.com') ||"
+  },
+  {
+    "line": 812,
+    "text": "db.prepare('SELECT * FROM users WHERE email = ?').get('info@masterbeautyitalia.com')) as any;"
+  },
+  {
+    "line": 814,
+    "text": "db.prepare('UPDATE users SET email = ?, password = ?, role = ? WHERE id = ?')"
+  },
+  {
+    "line": 817,
+    "text": "db.prepare('INSERT INTO users (name, email, password, department, role) VALUES (?, ?, ?, ?, ?)')"
+  },
+  {
+    "line": 877,
+    "text": "user = db.prepare('SELECT * FROM users WHERE id = ? OR LOWER(email) = LOWER(?) OR LOWER(name) = LOWER(?)').get(userId, userId, userId);"
+  },
+  {
+    "line": 882,
+    "text": "user = db.prepare('SELECT * FROM users WHERE role = ? LIMIT 1').get('admin') ||"
+  },
+  {
+    "line": 883,
+    "text": "db.prepare('SELECT * FROM users LIMIT 1').get();"
+  },
+  {
+    "line": 928,
+    "text": "let settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(userId) as any;"
+  },
+  {
+    "line": 930,
+    "text": "db.prepare('INSERT INTO user_notification_settings (user_id) VALUES (?)').run(userId);"
+  },
+  {
+    "line": 931,
+    "text": "settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(userId) as any;"
+  },
+  {
+    "line": 939,
+    "text": "db.prepare('INSERT INTO user_notifications (user_id, type, title, message, related_id) VALUES (?, ?, ?, ?, ?)')"
+  },
+  {
+    "line": 958,
+    "text": "let user = db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?) AND password = ?').get(searchEmail, password) as any;"
+  },
+  {
+    "line": 960,
+    "text": "user = db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?) AND password = ?').get(email, password) as any;"
+  },
+  {
+    "line": 989,
+    "text": "const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;"
+  },
+  {
+    "line": 999,
+    "text": "const users = db.prepare('SELECT id, name, email, department, role, avatar, created_at FROM users').all();"
+  },
+  {
+    "line": 1011,
+    "text": "const existing = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email);"
+  },
+  {
+    "line": 1020,
+    "text": "const result = db.prepare('INSERT INTO users (name, email, password, department, role, avatar) VALUES (?, ?, ?, ?, ?, ?)')"
+  },
+  {
+    "line": 1032,
+    "text": "const current = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 1043,
+    "text": "const existing = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id != ?').get(updatedEmail, req.params.id);"
+  },
+  {
+    "line": 1050,
+    "text": "db.prepare('UPDATE users SET name = ?, email = ?, department = ?, role = ?, password = ?, avatar = ? WHERE id = ?')"
+  },
+  {
+    "line": 1061,
+    "text": "db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 1083,
+    "text": "const specificClients = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(agente)) = LOWER(TRIM(?)) ORDER BY name ASC').all(userName);"
+  },
+  {
+    "line": 1091,
+    "text": "const clients = db.prepare('SELECT * FROM clients ORDER BY name ASC').all();"
+  },
+  {
+    "line": 1096,
+    "text": "const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 1099,
+    "text": "const activities = db.prepare(`"
+  },
+  {
+    "line": 1131,
+    "text": "const history = db.prepare('SELECT * FROM client_sales_history WHERE client_id = ? ORDER BY id DESC').all(clientId) as any[];"
+  },
+  {
+    "line": 1132,
+    "text": "const catalogProducts = db.prepare('SELECT * FROM products').all() as any[];"
+  },
+  {
+    "line": 1206,
+    "text": "const systemOrders = db.prepare(`"
+  },
+  {
+    "line": 1214,
+    "text": "const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id) as any[];"
+  },
+  {
+    "line": 1277,
+    "text": "const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId);"
+  },
+  {
+    "line": 1537,
+    "text": "const catalogProducts = db.prepare('SELECT * FROM products').all() as any[];"
+  },
+  {
+    "line": 1603,
+    "text": "const insertStmt = db.prepare(`"
+  },
+  {
+    "line": 1611,
+    "text": "const insertMany = db.transaction((rows: any[]) => {"
+  },
+  {
+    "line": 1635,
+    "text": "const updatedHistory = db.prepare('SELECT * FROM client_sales_history WHERE client_id = ? ORDER BY id DESC').all(clientId);"
+  },
+  {
+    "line": 1642,
+    "text": "db.prepare('DELETE FROM client_sales_history WHERE client_id = ?').run(clientId);"
+  },
+  {
+    "line": 1689,
+    "text": "const user = db.prepare('SELECT ical_token FROM users WHERE id = ?').get(userId) as any;"
+  },
+  {
+    "line": 1694,
+    "text": "db.prepare('UPDATE users SET ical_token = ? WHERE id = ?').run(newToken, userId);"
+  },
+  {
+    "line": 1760,
+    "text": "db.prepare('UPDATE users SET ical_token = ? WHERE id = ?').run(newToken, userId);"
+  },
+  {
+    "line": 1788,
+    "text": "const agent = db.prepare('SELECT id, name, email, role FROM users WHERE ical_token = ?').get(rawToken) as any;"
+  },
+  {
+    "line": 1794,
+    "text": "const rawVisits = db.prepare(`"
+  },
+  {
+    "line": 1912,
+    "text": "rawVisits = db.prepare(`"
+  },
+  {
+    "line": 1931,
+    "text": "rawVisits = db.prepare(`"
+  },
+  {
+    "line": 1955,
+    "text": "rawVisits = db.prepare(`"
+  },
+  {
+    "line": 1992,
+    "text": "const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(client_id) as any;"
+  },
+  {
+    "line": 2004,
+    "text": "const stmt = db.prepare(`"
+  },
+  {
+    "line": 2010,
+    "text": "const rawVisit = db.prepare(`"
+  },
+  {
+    "line": 2033,
+    "text": "const visit = db.prepare('SELECT v.*, c.name as client_name FROM agent_visits v LEFT JOIN clients c ON v.client_id = c.id WHERE v.id = ?').get(visitId) as any;"
+  },
+  {
+    "line": 2042,
+    "text": "const guestInvite = db.prepare(`"
+  },
+  {
+    "line": 2049,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 2056,
+    "text": "const remainingAccepted = db.prepare(`"
+  },
+  {
+    "line": 2061,
+    "text": "db.prepare('UPDATE agent_visits SET is_joint = 0 WHERE id = ?').run(visitId);"
+  },
+  {
+    "line": 2081,
+    "text": "const acceptedInvites = db.prepare(`"
+  },
+  {
+    "line": 2095,
+    "text": "db.prepare('DELETE FROM agent_visits WHERE id = ?').run(visitId);"
+  },
+  {
+    "line": 2096,
+    "text": "db.prepare('DELETE FROM co_visit_invites WHERE visit_id = ?').run(visitId);"
+  },
+  {
+    "line": 2108,
+    "text": "const colleagues = db.prepare(`"
+  },
+  {
+    "line": 2138,
+    "text": "const guestUser = db.prepare('SELECT id, name, role FROM users WHERE id = ?').get(guest_agent_id) as any;"
+  },
+  {
+    "line": 2148,
+    "text": "const visit = db.prepare('SELECT v.*, c.name as client_name FROM agent_visits v LEFT JOIN clients c ON v.client_id = c.id WHERE v.id = ?').get(visit_id) as any;"
+  },
+  {
+    "line": 2161,
+    "text": "const existingInvite = db.prepare(`"
+  },
+  {
+    "line": 2170,
+    "text": "const stmt = db.prepare(`"
+  },
+  {
+    "line": 2184,
+    "text": "const createdInvite = db.prepare(`"
+  },
+  {
+    "line": 2209,
+    "text": "const rawInvites = db.prepare(`"
+  },
+  {
+    "line": 2232,
+    "text": "const rawInvites = db.prepare(`"
+  },
+  {
+    "line": 2262,
+    "text": "const invite = db.prepare(`"
+  },
+  {
+    "line": 2281,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 2288,
+    "text": "db.prepare('UPDATE agent_visits SET is_joint = 1 WHERE id = ?').run(invite.visit_id);"
+  },
+  {
+    "line": 2299,
+    "text": "const remainingAccepted = db.prepare(`"
+  },
+  {
+    "line": 2304,
+    "text": "db.prepare('UPDATE agent_visits SET is_joint = 0 WHERE id = ?').run(invite.visit_id);"
+  },
+  {
+    "line": 2316,
+    "text": "const updatedInvite = db.prepare(`"
+  },
+  {
+    "line": 2336,
+    "text": "const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 2339,
+    "text": "const activities = db.prepare(`"
+  },
+  {
+    "line": 2378,
+    "text": "const result = db.prepare(`"
+  },
+  {
+    "line": 2400,
+    "text": "const created = db.prepare('SELECT * FROM clients WHERE id = ?').get(result.lastInsertRowid);"
+  },
+  {
+    "line": 2418,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 2435,
+    "text": "const updated = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id);"
+  },
+  {
+    "line": 2440,
+    "text": "db.prepare('DELETE FROM clients WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 2445,
+    "text": "const suppliers = db.prepare('SELECT * FROM suppliers ORDER BY name ASC').all();"
+  },
+  {
+    "line": 2451,
+    "text": "const result = db.prepare('INSERT INTO suppliers (name, contact, phone, email, category, notes) VALUES (?, ?, ?, ?, ?, ?)').run(name, contact, phone, email, category, notes);"
+  },
+  {
+    "line": 2457,
+    "text": "db.prepare('UPDATE suppliers SET name = ?, contact = ?, phone = ?, email = ?, category = ?, notes = ? WHERE id = ?')"
+  },
+  {
+    "line": 2463,
+    "text": "db.prepare('DELETE FROM suppliers WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 2468,
+    "text": "const tags = db.prepare('SELECT * FROM tags').all();"
+  },
+  {
+    "line": 2474,
+    "text": "const result = db.prepare('INSERT INTO tags (name, color) VALUES (?, ?)').run(name, color);"
+  },
+  {
+    "line": 2510,
+    "text": "const totalTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks ${whereStr}`).get(...params) as any;"
+  },
+  {
+    "line": 2511,
+    "text": "const completedTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks WHERE status = 'Completato' ${whereAndStr}`).get(...params) as any;"
+  },
+  {
+    "line": 2512,
+    "text": "const pendingTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks WHERE status NOT IN ('Completato', 'Annullato') ${whereAndStr}`).get(...params) as any;"
+  },
+  {
+    "line": 2514,
+    "text": "const overdueTasks = db.prepare(`"
+  },
+  {
+    "line": 2524,
+    "text": "const expiredTasks = db.prepare(`"
+  },
+  {
+    "line": 2533,
+    "text": "const todayTasks = db.prepare(`"
+  },
+  {
+    "line": 2541,
+    "text": "const todayCalls = db.prepare(`"
+  },
+  {
+    "line": 2550,
+    "text": "const latestCalls = db.prepare(`"
+  },
+  {
+    "line": 2567,
+    "text": "const tasksByStatus = db.prepare(`SELECT status, COUNT(*) as count FROM tasks ${whereStr} GROUP BY status`).all(...params);"
+  },
+  {
+    "line": 2568,
+    "text": "const tasksByPriority = db.prepare(`SELECT priority, COUNT(*) as count FROM tasks ${whereStr} GROUP BY priority`).all(...params);"
+  },
+  {
+    "line": 2569,
+    "text": "const tasksByDepartment = db.prepare(`"
+  },
+  {
+    "line": 2594,
+    "text": "const insert = db.prepare('INSERT INTO clients (name, contact, phone, email, city, notes) VALUES (?, ?, ?, ?, ?, ?)');"
+  },
+  {
+    "line": 2595,
+    "text": "const transaction = db.transaction((data) => {"
+  },
+  {
+    "line": 2607,
+    "text": "const insert = db.prepare('INSERT INTO suppliers (name, contact, phone, email, category, notes) VALUES (?, ?, ?, ?, ?, ?)');"
+  },
+  {
+    "line": 2608,
+    "text": "const transaction = db.transaction((data) => {"
+  },
+  {
+    "line": 2620,
+    "text": "const backups = db.prepare(`"
+  },
+  {
+    "line": 2632,
+    "text": "db.prepare('INSERT INTO backups (file_name, file_path, user_id) VALUES (?, ?, ?)').run(file_name, file_path, req.user.id);"
+  },
+  {
+    "line": 2638,
+    "text": "const tasks = db.prepare(`"
+  },
+  {
+    "line": 2748,
+    "text": "tasks = db.prepare(tasksQuery + ` WHERE date(t.created_at) >= date(?) AND date(t.created_at) <= date(?)`).all(startDate, endDate);"
+  },
+  {
+    "line": 2749,
+    "text": "calls = db.prepare(callsQuery + ` WHERE date(c.created_at) >= date(?) AND date(c.created_at) <= date(?)`).all(startDate, endDate);"
+  },
+  {
+    "line": 2750,
+    "text": "notes = db.prepare(notesQuery + ` WHERE date(t.created_at) >= date(?) AND date(t.created_at) <= date(?)`).all(startDate, endDate);"
+  },
+  {
+    "line": 2752,
+    "text": "tasks = db.prepare(tasksQuery).all();"
+  },
+  {
+    "line": 2753,
+    "text": "calls = db.prepare(callsQuery).all();"
+  },
+  {
+    "line": 2754,
+    "text": "notes = db.prepare(notesQuery).all();"
+  },
+  {
+    "line": 2784,
+    "text": "const dbTransaction = db.transaction(() => {"
+  },
+  {
+    "line": 2785,
+    "text": "const tasksResult = db.prepare(\"DELETE FROM tasks WHERE date(created_at) <= date(?)\").run(beforeDate);"
+  },
+  {
+    "line": 2786,
+    "text": "const callsResult = db.prepare(\"DELETE FROM calls WHERE date(created_at) <= date(?)\").run(beforeDate);"
+  },
+  {
+    "line": 2813,
+    "text": "const tasks = db.prepare(`SELECT * FROM tasks WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)`).all(startDate, endDate) as any[];"
+  },
+  {
+    "line": 2817,
+    "text": "const calls = db.prepare(`SELECT * FROM calls WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)`).all(startDate, endDate) as any[];"
+  },
+  {
+    "line": 2818,
+    "text": "const notes = taskIds.length > 0 ? db.prepare(`SELECT * FROM task_notes WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [];"
+  },
+  {
+    "line": 2819,
+    "text": "const attachments = taskIds.length > 0 ? db.prepare(`SELECT * FROM attachments WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [] as any[];"
+  },
+  {
+    "line": 2820,
+    "text": "const history = taskIds.length > 0 ? db.prepare(`SELECT * FROM task_history WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [];"
+  },
+  {
+    "line": 2821,
+    "text": "const taskTags = taskIds.length > 0 ? db.prepare(`SELECT * FROM task_tags WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [];"
+  },
+  {
+    "line": 2879,
+    "text": "const dbTransaction = db.transaction(() => {"
+  },
+  {
+    "line": 2881,
+    "text": "db.prepare(\"DELETE FROM task_tags\").run();"
+  },
+  {
+    "line": 2882,
+    "text": "db.prepare(\"DELETE FROM task_notes\").run();"
+  },
+  {
+    "line": 2883,
+    "text": "db.prepare(\"DELETE FROM attachments\").run();"
+  },
+  {
+    "line": 2884,
+    "text": "db.prepare(\"DELETE FROM task_history\").run();"
+  },
+  {
+    "line": 2885,
+    "text": "db.prepare(\"DELETE FROM calls\").run();"
+  },
+  {
+    "line": 2886,
+    "text": "db.prepare(\"DELETE FROM tasks\").run();"
+  },
+  {
+    "line": 2889,
+    "text": "const insertTask = db.prepare(`"
+  },
+  {
+    "line": 2914,
+    "text": "const insertCall = db.prepare(`"
+  },
+  {
+    "line": 2935,
+    "text": "const insertNote = db.prepare(`"
+  },
+  {
+    "line": 2951,
+    "text": "const insertAttachment = db.prepare(`"
+  },
+  {
+    "line": 2976,
+    "text": "const insertHistory = db.prepare(`"
+  },
+  {
+    "line": 2992,
+    "text": "const insertTaskTag = db.prepare(`"
+  },
+  {
+    "line": 3024,
+    "text": "const upcomingTasks = db.prepare(`"
+  },
+  {
+    "line": 3034,
+    "text": "const existing = db.prepare('SELECT id FROM user_notifications WHERE user_id = ? AND type = ? AND related_id = ?')"
+  },
+  {
+    "line": 3038,
+    "text": "db.prepare('INSERT INTO user_notifications (user_id, type, title, message, related_id) VALUES (?, ?, ?, ?, ?)')"
+  },
+  {
+    "line": 3044,
+    "text": "const notifications = db.prepare('SELECT * FROM user_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50').all(userId);"
+  },
+  {
+    "line": 3053,
+    "text": "db.prepare('UPDATE user_notifications SET is_read = 1 WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);"
+  },
+  {
+    "line": 3061,
+    "text": "const result = db.prepare('DELETE FROM user_notifications WHERE user_id = ? AND DATE(created_at) <= DATE(?)').run(req.user.id, date);"
+  },
+  {
+    "line": 3070,
+    "text": "let settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(req.user.id) as any;"
+  },
+  {
+    "line": 3072,
+    "text": "db.prepare('INSERT INTO user_notification_settings (user_id) VALUES (?)').run(req.user.id);"
+  },
+  {
+    "line": 3073,
+    "text": "settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(req.user.id);"
+  },
+  {
+    "line": 3080,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 3095,
+    "text": "const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3102,
+    "text": "db.prepare('DELETE FROM calls WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 3107,
+    "text": "const categories = db.prepare('SELECT * FROM categories').all();"
+  },
+  {
+    "line": 3115,
+    "text": "const result = db.prepare('INSERT INTO calls (caller_name, caller_type, reason, duration, task_id, category_id, client_id, supplier_id, user_id, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run("
+  },
+  {
+    "line": 3129,
+    "text": "db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run("
+  },
+  {
+    "line": 3145,
+    "text": "const result = db.prepare('INSERT INTO categories (name, parent_id) VALUES (?, ?)').run(name, parent_id || null);"
+  },
+  {
+    "line": 3152,
+    "text": "const tasks = db.prepare('SELECT COUNT(*) as count FROM tasks WHERE category_id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3157,
+    "text": "db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 3259,
+    "text": "const tasks = db.prepare(`"
+  },
+  {
+    "line": 3331,
+    "text": "const tags = db.prepare(`"
+  },
+  {
+    "line": 3343,
+    "text": "const task = db.prepare(`"
+  },
+  {
+    "line": 3355,
+    "text": "const history = db.prepare('SELECT th.*, u.name as user_name FROM task_history th LEFT JOIN users u ON th.user_id = u.id WHERE task_id = ? ORDER BY timestamp DESC').all(req.params.id);"
+  },
+  {
+    "line": 3356,
+    "text": "const attachments = db.prepare('SELECT * FROM attachments WHERE task_id = ?').all(req.params.id);"
+  },
+  {
+    "line": 3357,
+    "text": "const tags = db.prepare(`"
+  },
+  {
+    "line": 3369,
+    "text": "const insertTask = db.prepare(`"
+  },
+  {
+    "line": 3379,
+    "text": "const insertTag = db.prepare('INSERT INTO task_tags (task_id, tag_id) VALUES (?, ?)');"
+  },
+  {
+    "line": 3385,
+    "text": "db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(taskId, req.user.id, 'creazione', 'Task creato');"
+  },
+  {
+    "line": 3397,
+    "text": "const currentTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3407,
+    "text": "db.prepare('UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);"
+  },
+  {
+    "line": 3408,
+    "text": "db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, statusAction, statusDetails);"
+  },
+  {
+    "line": 3417,
+    "text": "const newUser = db.prepare('SELECT name FROM users WHERE id = ?').get(assignee_id) as any;"
+  },
+  {
+    "line": 3419,
+    "text": "db.prepare('UPDATE tasks SET assignee_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(assignee_id, req.params.id);"
+  },
+  {
+    "line": 3420,
+    "text": "db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, 'riassegnazione', reassignmentDetails);"
+  },
+  {
+    "line": 3429,
+    "text": "db.prepare('UPDATE tasks SET internal_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(internal_notes, req.params.id);"
+  },
+  {
+    "line": 3435,
+    "text": "db.prepare('UPDATE tasks SET deadline = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(deadline || null, req.params.id);"
+  },
+  {
+    "line": 3436,
+    "text": "db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, 'scadenza', deadlineDetails);"
+  },
+  {
+    "line": 3441,
+    "text": "db.prepare('UPDATE tasks SET duration_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(duration_minutes, req.params.id);"
+  },
+  {
+    "line": 3442,
+    "text": "db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, 'aggiornamento_tempo', durationDetails);"
+  },
+  {
+    "line": 3450,
+    "text": "const notes = db.prepare(`"
+  },
+  {
+    "line": 3464,
+    "text": "const result = db.prepare('INSERT INTO task_notes (task_id, user_id, content) VALUES (?, ?, ?)').run(req.params.id, req.user.id, content);"
+  },
+  {
+    "line": 3468,
+    "text": "db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run("
+  },
+  {
+    "line": 3476,
+    "text": "const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3490,
+    "text": "const note = db.prepare('SELECT * FROM task_notes WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3494,
+    "text": "db.prepare('UPDATE task_notes SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(content, req.params.id);"
+  },
+  {
+    "line": 3499,
+    "text": "const note = db.prepare('SELECT * FROM task_notes WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3503,
+    "text": "db.prepare('DELETE FROM task_notes WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 3508,
+    "text": "const currentTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3515,
+    "text": "db.prepare('DELETE FROM tasks WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 3522,
+    "text": "const result = db.prepare(`"
+  },
+  {
+    "line": 3533,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 3534,
+    "text": "db.prepare('DELETE FROM attachments').run();"
+  },
+  {
+    "line": 3535,
+    "text": "db.prepare('DELETE FROM task_history').run();"
+  },
+  {
+    "line": 3536,
+    "text": "db.prepare('DELETE FROM task_tags').run();"
+  },
+  {
+    "line": 3537,
+    "text": "db.prepare('DELETE FROM calls').run();"
+  },
+  {
+    "line": 3538,
+    "text": "db.prepare('DELETE FROM tasks').run();"
+  },
+  {
+    "line": 3539,
+    "text": "db.prepare('DELETE FROM clients').run();"
+  },
+  {
+    "line": 3540,
+    "text": "db.prepare('DELETE FROM suppliers').run();"
+  },
+  {
+    "line": 3550,
+    "text": "const attachment = db.prepare('SELECT * FROM attachments WHERE id = ? AND task_id = ?').get(req.params.attachmentId, req.params.id) as any;"
+  },
+  {
+    "line": 3554,
+    "text": "db.prepare('DELETE FROM attachments WHERE id = ?').run(req.params.attachmentId);"
+  },
+  {
+    "line": 3623,
+    "text": "const products = db.prepare('SELECT * FROM products ORDER BY created_at DESC').all();"
+  },
+  {
+    "line": 3645,
+    "text": "const existing = db.prepare('SELECT id FROM products WHERE code = ?').get(code);"
+  },
+  {
+    "line": 3649,
+    "text": "const result = db.prepare(`"
+  },
+  {
+    "line": 3692,
+    "text": "const product = db.prepare('SELECT id FROM products WHERE id = ?').get(req.params.id) as any;"
+  },
+  {
+    "line": 3698,
+    "text": "const existing = db.prepare('SELECT id FROM products WHERE code = ? AND id != ?').get(code, req.params.id);"
+  },
+  {
+    "line": 3703,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 3731,
+    "text": "db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);"
+  },
+  {
+    "line": 3741,
+    "text": "const order = db.prepare(`"
+  },
+  {
+    "line": 3781,
+    "text": "let orders = db.prepare(query).all(...params) as any[];"
+  },
+  {
+    "line": 3785,
+    "text": "orders = db.prepare(`"
+  },
+  {
+    "line": 3796,
+    "text": "order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);"
+  },
+  {
+    "line": 3815,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 3817,
+    "text": "const lastOrder = db.prepare('SELECT id FROM orders ORDER BY id DESC LIMIT 1').get() as any;"
+  },
+  {
+    "line": 3827,
+    "text": "const orderResult = db.prepare(`"
+  },
+  {
+    "line": 3845,
+    "text": "const insertItem = db.prepare(`"
+  },
+  {
+    "line": 3863,
+    "text": "db.prepare('UPDATE products SET stock = MAX(0, stock - ?) WHERE code = ?').run(Number(item.qty) || 0, item.product_code);"
+  },
+  {
+    "line": 3889,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 3891,
+    "text": "const existingOrder = db.prepare('SELECT status FROM orders WHERE id = ?').get(id) as any;"
+  },
+  {
+    "line": 3901,
+    "text": "const oldItems = db.prepare('SELECT product_code, qty FROM order_items WHERE order_id = ?').all(id) as any[];"
+  },
+  {
+    "line": 3903,
+    "text": "db.prepare('UPDATE products SET stock = stock + ? WHERE code = ?').run(Number(oldItem.qty) || 0, oldItem.product_code);"
+  },
+  {
+    "line": 3908,
+    "text": "db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);"
+  },
+  {
+    "line": 3917,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 3933,
+    "text": "const insertItem = db.prepare(`"
+  },
+  {
+    "line": 3950,
+    "text": "db.prepare('UPDATE products SET stock = MAX(0, stock - ?) WHERE code = ?').run(Number(item.qty) || 0, item.product_code);"
+  },
+  {
+    "line": 3975,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 3976,
+    "text": "const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(id) as any;"
+  },
+  {
+    "line": 3985,
+    "text": "const items = db.prepare('SELECT product_code, qty FROM order_items WHERE order_id = ?').all(id) as any[];"
+  },
+  {
+    "line": 3987,
+    "text": "db.prepare('UPDATE products SET stock = MAX(0, stock - ?) WHERE code = ?').run(Number(item.qty) || 0, item.product_code);"
+  },
+  {
+    "line": 3993,
+    "text": "const items = db.prepare('SELECT product_code, qty FROM order_items WHERE order_id = ?').all(id) as any[];"
+  },
+  {
+    "line": 3995,
+    "text": "db.prepare('UPDATE products SET stock = stock + ? WHERE code = ?').run(Number(item.qty) || 0, item.product_code);"
+  },
+  {
+    "line": 3999,
+    "text": "db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(status, id);"
+  },
+  {
+    "line": 4015,
+    "text": "const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(id) as any;"
+  },
+  {
+    "line": 4022,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 4023,
+    "text": "db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);"
+  },
+  {
+    "line": 4024,
+    "text": "db.prepare('DELETE FROM orders WHERE id = ?').run(id);"
+  },
+  {
+    "line": 4035,
+    "text": "const products = db.prepare('SELECT * FROM products').all() as any[];"
+  },
+  {
+    "line": 4204,
+    "text": "clients = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(agente)) = LOWER(TRIM(?)) ORDER BY name ASC').all(req.user.name) as any[];"
+  },
+  {
+    "line": 4206,
+    "text": "clients = db.prepare('SELECT * FROM clients ORDER BY name ASC').all() as any[];"
+  },
+  {
+    "line": 4209,
+    "text": "clients = db.prepare('SELECT * FROM clients ORDER BY name ASC').all() as any[];"
+  },
+  {
+    "line": 4376,
+    "text": "const settings = db.prepare('SELECT * FROM easyfatt_settings WHERE id = 1').get() as any;"
+  },
+  {
+    "line": 4456,
+    "text": "const pm = db.prepare('SELECT * FROM payment_methods WHERE name = ?').get(o.payment_name) as any;"
+  },
+  {
+    "line": 4505,
+    "text": "db.prepare(\"UPDATE orders SET status = 'Esportato' WHERE id = ?\").run(o.id);"
+  },
+  {
+    "line": 4551,
+    "text": "const ordersList = db.prepare(query).all(...params) as any[];"
+  },
+  {
+    "line": 4555,
+    "text": "order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);"
+  },
+  {
+    "line": 4651,
+    "text": "const ordersList = db.prepare(query).all(params) as any[];"
+  },
+  {
+    "line": 4655,
+    "text": "order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);"
+  },
+  {
+    "line": 4680,
+    "text": "const settings = db.prepare('SELECT * FROM easyfatt_settings WHERE id = 1').get() as any || {"
+  },
+  {
+    "line": 4709,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 4732,
+    "text": "const header = db.prepare('SELECT * FROM company_header WHERE id = 1').get() || {"
+  },
+  {
+    "line": 4769,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 4851,
+    "text": "const paymentMethods = db.prepare(`"
+  },
+  {
+    "line": 4908,
+    "text": "const stmt = db.prepare('INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets) VALUES (?, ?, ?, ?, ?)');"
+  },
+  {
+    "line": 4937,
+    "text": "const existing = db.prepare('SELECT name FROM payment_methods WHERE id = ?').get(id) as any;"
+  },
+  {
+    "line": 4958,
+    "text": "const stmt = db.prepare('UPDATE payment_methods SET name = ?, offset_days = ?, installments = ?, fine_mese = ?, custom_offsets = ? WHERE id = ?');"
+  },
+  {
+    "line": 4976,
+    "text": "const resOrders = db.prepare('UPDATE orders SET payment_name = ? WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').run(newName, oldName);"
+  },
+  {
+    "line": 4979,
+    "text": "const resClients = db.prepare('UPDATE clients SET payment_name = ? WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').run(newName, oldName);"
+  },
+  {
+    "line": 4982,
+    "text": "db.prepare('UPDATE easyfatt_settings SET default_payment = ? WHERE LOWER(TRIM(default_payment)) = LOWER(TRIM(?))').run(newName, oldName);"
+  },
+  {
+    "line": 5011,
+    "text": "const existing = db.prepare('SELECT name FROM payment_methods WHERE id = ?').get(id) as any;"
+  },
+  {
+    "line": 5016,
+    "text": "const orderUsage = db.prepare('SELECT COUNT(*) as count FROM orders WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').get(existing.name) as any;"
+  },
+  {
+    "line": 5017,
+    "text": "const clientUsage = db.prepare('SELECT COUNT(*) as count FROM clients WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').get(existing.name) as any;"
+  },
+  {
+    "line": 5019,
+    "text": "const result = db.prepare('DELETE FROM payment_methods WHERE id = ?').run(id);"
+  },
+  {
+    "line": 5038,
+    "text": "const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.cookies.userId);"
+  },
+  {
+    "line": 5113,
+    "text": "const settings = db.prepare('SELECT username, password FROM easyfatt_settings WHERE id = 1').get() as any;"
+  },
+  {
+    "line": 5126,
+    "text": "const user = db.prepare('SELECT id, role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?').get(email, password) as any;"
+  },
+  {
+    "line": 5256,
+    "text": "const currentDbCodes = db.prepare('SELECT code FROM products WHERE online_customized = 0').all().map((r: any) => r.code);"
+  },
+  {
+    "line": 5275,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 5317,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 5320,
+    "text": "const deleteProductStmt = db.prepare('DELETE FROM products WHERE code = ?');"
+  },
+  {
+    "line": 5327,
+    "text": "const selectMatchingProducts = db.prepare('SELECT id, code FROM products WHERE LOWER(TRIM(code)) = LOWER(TRIM(?))');"
+  },
+  {
+    "line": 5328,
+    "text": "const deleteVariantsStmt = db.prepare('DELETE FROM product_variants WHERE product_id = ?');"
+  },
+  {
+    "line": 5329,
+    "text": "const insertVariantStmt = db.prepare('INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES (?, ?, ?, ?, ?)');"
+  },
+  {
+    "line": 5330,
+    "text": "const deleteExtraBarcodesStmt = db.prepare('DELETE FROM product_extra_barcodes WHERE product_id = ?');"
+  },
+  {
+    "line": 5331,
+    "text": "const insertExtraBarcodeStmt = db.prepare('INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES (?, ?, ?)');"
+  },
+  {
+    "line": 5333,
+    "text": "const updateProductStmt = db.prepare(`"
+  },
+  {
+    "line": 5343,
+    "text": "const insertProductStmt = db.prepare(`"
+  },
+  {
+    "line": 5374,
+    "text": "const deleteExtraProductStmt = db.prepare('DELETE FROM products WHERE id = ?');"
+  },
+  {
+    "line": 5375,
+    "text": "const deleteExtraVariantsStmt = db.prepare('DELETE FROM product_variants WHERE product_id = ?');"
+  },
+  {
+    "line": 5376,
+    "text": "const deleteExtraBarcodesStmt = db.prepare('DELETE FROM product_extra_barcodes WHERE product_id = ?');"
+  },
+  {
+    "line": 5550,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 5568,
+    "text": "clientMatch = db.prepare('SELECT * FROM clients WHERE code = ? OR code = ?').get(cCode, rawCodeClean);"
+  },
+  {
+    "line": 5572,
+    "text": "clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(vat_code)) = LOWER(TRIM(?)) OR notes LIKE ?').get(cVat, `%${cVat}%`);"
+  },
+  {
+    "line": 5576,
+    "text": "clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(fiscal_code)) = LOWER(TRIM(?)) OR notes LIKE ?').get(cFiscal, `%${cFiscal}%`);"
+  },
+  {
+    "line": 5580,
+    "text": "clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))').get(cEmail);"
+  },
+  {
+    "line": 5584,
+    "text": "clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(cName);"
+  },
+  {
+    "line": 5623,
+    "text": "productMatch = db.prepare('SELECT * FROM products WHERE code = ? OR barcode = ? OR supplier_code = ?').get(pCode, pCode, pCode);"
+  },
+  {
+    "line": 5627,
+    "text": "productMatch = db.prepare('SELECT * FROM products WHERE LOWER(TRIM(description)) = LOWER(TRIM(?))').get(pDesc);"
+  },
+  {
+    "line": 5678,
+    "text": "const insertOrderResult = db.prepare(`"
+  },
+  {
+    "line": 5695,
+    "text": "const insertItemStmt = db.prepare(`"
+  },
+  {
+    "line": 6057,
+    "text": "const selectClientByCode = db.prepare('SELECT id FROM clients WHERE LOWER(code) = LOWER(?)');"
+  },
+  {
+    "line": 6058,
+    "text": "const selectClientByEmail = db.prepare('SELECT id FROM clients WHERE LOWER(email) = LOWER(?)');"
+  },
+  {
+    "line": 6059,
+    "text": "const selectClientByName = db.prepare('SELECT id FROM clients WHERE LOWER(name) = LOWER(?)');"
+  },
+  {
+    "line": 6076,
+    "text": "db.prepare(`"
+  },
+  {
+    "line": 6092,
+    "text": "const result = db.prepare(`"
+  },
+  {
+    "line": 6247,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 6276,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 6320,
+    "text": "const tableInfo = db.prepare(\"PRAGMA table_info(products)\").all() as any[];"
+  },
+  {
+    "line": 6477,
+    "text": "db.exec(`ALTER TABLE products ADD COLUMN \"${sanitizedCol}\" TEXT DEFAULT ''`);"
+  },
+  {
+    "line": 6491,
+    "text": "const selectMatchingProduct = db.prepare('SELECT id FROM products WHERE LOWER(TRIM(code)) = LOWER(TRIM(?))');"
+  },
+  {
+    "line": 6493,
+    "text": "db.transaction(() => {"
+  },
+  {
+    "line": 6562,
+    "text": "db.prepare(updateSql).run(...updateValues);"
+  }
+]

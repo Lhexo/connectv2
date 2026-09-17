@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Cleanly suppress benign Vite WebSocket and dev server connection errors in sandbox
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event.reason;
+        var msg = String(typeof reason === 'string' ? reason : (reason && reason.message ? reason.message : ''));
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('websocket') !== -1 || msg.indexOf('failed to connect') !== -1 || msg.indexOf('closed without opened') !== -1 || msg.indexOf('Failed to fetch') !== -1) {
+          event.preventDefault();
+          if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+          return false;
+        }
+      }, true);
+      window.addEventListener('error', function (event) {
+        var msg = String(event.message || (event.error && event.error.message) || '');
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('websocket') !== -1 || msg.indexOf('failed to connect') !== -1 || msg.indexOf('closed without opened') !== -1 || msg.indexOf('Failed to fetch') !== -1) {
+          event.preventDefault();
+          if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+          return false;
+        }
+      }, true);
+    </script>
+    <meta name="description" content="Piattaforma interna per la gestione di task, clienti e coordinamento tra reparti per distributori del settore estetico." />
+    <meta property="og:title" content="Connect" />
+    <meta property="og:description" content="Piattaforma interna per la gestione di task, clienti e coordinamento tra reparti per distributori del settore estetico." />
+    <title>Connect</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;600&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<EasyfattCustomers AppVersion="2" Mode="full">
+  <Customers>
+    <Customer>
+      <Code>001</Code>
+      <Name>Mario Rossi Test</Name>
+      <Address>Via Roma 1</Address>
+      <City>Milano</City>
+      <Province>MI</Province>
+      <Postcode>20100</Postcode>
+      <FiscalCode>RSSMRA80A01F205X</FiscalCode>
+      <VatCode>12345678901</VatCode>
+      <Email>mario.rossi.test@example.com</Email>
+      <Tel>021234567</Tel>
+    </Customer>
+  </Customers>
+</EasyfattCustomers>

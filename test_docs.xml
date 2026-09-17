@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<EasyfattDocuments AppVersion="2" Creator="Danea Easyfatt Enterprise 2011.15" CreatorUrl="http://www.danea.it/software/easyfatt">
+<Company>
+<Name>Tuttobimbi Srl</Name>
+</Company>
+<Documents>
+<Document>
+<CustomerCode>0055</CustomerCode>
+<CustomerWebLogin/>
+<CustomerName>Il Puffetto</CustomerName>
+<CustomerAddress>Via Carducci, 4</CustomerAddress>
+<CustomerPostcode>27035</CustomerPostcode>
+<CustomerCity>Mede</CustomerCity>
+<CustomerProvince>PV</CustomerProvince>
+<CustomerCountry/>
+<CustomerVatCode>26899510269</CustomerVatCode>
+<CustomerTel>0384 865980</CustomerTel>
+<DocumentType>I</DocumentType>
+<Warehouse>Principale</Warehouse>
+<Date>2009-02-28</Date>
+<Number>69</Number>
+<Rows>
+<Row>
+<Code>0047</Code>
+<Description>Barriera letto</Description>
+<Qty>10</Qty>
+<Price>74.29</Price>
+</Row>
+</Rows>
+</Document>
+</Documents>
+</EasyfattDocuments>
