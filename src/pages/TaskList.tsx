@@ -197,7 +197,7 @@ export default function TaskList({ user: currentUser }: { user: UserType | null 
           <div className="flex items-center gap-3 bg-[#F9FAFB] px-4 py-2 rounded-2xl border border-[#E5E7EB]">
             <Filter size={18} className="text-[#5A5A40]" />
             <select 
-              value={statusFilter}
+              value={statusFilter || 'Tutti'}
               onChange={(e) => setStatusFilter(e.target.value as any)}
               className="bg-transparent border-none outline-none text-sm font-bold text-[#111827] cursor-pointer pr-8"
             >
@@ -213,7 +213,7 @@ export default function TaskList({ user: currentUser }: { user: UserType | null 
           <div className="flex items-center gap-3 bg-[#F9FAFB] px-4 py-2 rounded-2xl border border-[#E5E7EB]">
             <Briefcase size={18} className="text-[#5A5A40]" />
             <select 
-              value={macroCategoryFilter}
+              value={macroCategoryFilter ?? 'Tutti'}
               onChange={(e) => setMacroCategoryFilter(e.target.value === 'Tutti' ? 'Tutti' : Number(e.target.value))}
               className="bg-transparent border-none outline-none text-sm font-bold text-[#111827] cursor-pointer pr-8"
             >
@@ -227,7 +227,7 @@ export default function TaskList({ user: currentUser }: { user: UserType | null 
           <div className="flex items-center gap-3 bg-[#F9FAFB] px-4 py-2 rounded-2xl border border-[#E5E7EB]">
             <User size={18} className="text-[#5A5A40]" />
             <select 
-              value={userFilter}
+              value={userFilter ?? 'Tutti'}
               onChange={(e) => setUserFilter(e.target.value === 'Tutti' ? 'Tutti' : Number(e.target.value))}
               className="bg-transparent border-none outline-none text-sm font-bold text-[#111827] cursor-pointer pr-8"
             >

@@ -178,7 +178,7 @@ export default function TaskForm({ user }: TaskFormProps) {
             <label className="text-xs font-black uppercase tracking-widest text-[#9CA3AF]">Categoria *</label>
             <select 
               required
-              value={formData.category_id}
+              value={formData.category_id || ''}
               onChange={(e) => setFormData({...formData, category_id: e.target.value})}
               className="w-full bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl p-4 text-sm font-bold text-[#111827] focus:ring-4 focus:ring-[#5A5A40]/10 outline-none"
             >
@@ -198,7 +198,7 @@ export default function TaskForm({ user }: TaskFormProps) {
             <label className="text-xs font-black uppercase tracking-widest text-[#9CA3AF]">Assegnato a *</label>
             <select 
               required
-              value={formData.assignee_id}
+              value={formData.assignee_id || ''}
               onChange={(e) => setFormData({...formData, assignee_id: e.target.value})}
               className="w-full bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl p-4 text-sm font-bold text-[#111827] focus:ring-4 focus:ring-[#5A5A40]/10 outline-none"
             >
@@ -213,7 +213,7 @@ export default function TaskForm({ user }: TaskFormProps) {
             <label className="text-xs font-black uppercase tracking-widest text-[#9CA3AF]">Priorità *</label>
             <select 
               required
-              value={formData.priority}
+              value={formData.priority || 'Media'}
               onChange={(e) => setFormData({...formData, priority: e.target.value as TaskPriority})}
               className={cn(
                 "w-full bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl p-4 text-sm font-bold outline-none",
@@ -266,7 +266,7 @@ export default function TaskForm({ user }: TaskFormProps) {
               <label className="text-xs font-black uppercase tracking-widest text-[#9CA3AF]">Cliente Associato *</label>
               <select 
                 required
-                value={formData.client_id}
+                value={formData.client_id || ''}
                 onChange={(e) => setFormData({...formData, client_id: e.target.value})}
                 className="w-full bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl p-4 text-sm font-bold text-[#111827] focus:ring-4 focus:ring-[#5A5A40]/10 outline-none"
               >
@@ -289,7 +289,7 @@ export default function TaskForm({ user }: TaskFormProps) {
               <label className="text-xs font-black uppercase tracking-widest text-[#9CA3AF]">Fornitore Associato *</label>
               <select 
                 required
-                value={formData.supplier_id}
+                value={formData.supplier_id || ''}
                 onChange={(e) => setFormData({...formData, supplier_id: e.target.value})}
                 className="w-full bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl p-4 text-sm font-bold text-[#111827] focus:ring-4 focus:ring-[#5A5A40]/10 outline-none"
               >

@@ -126,6 +126,55 @@ export async function withTransaction<T>(
   }
 }
 
+export interface ProductUpsertPayload {
+  code: string;
+  description: string;
+  price: number;
+  vat_code?: string | null;
+  um?: string | null;
+  stock?: number | null;
+  barcode?: string | null;
+  category?: string | null;
+  subcategory?: string | null;
+  description_html?: string | null;
+  producer_name?: string | null;
+  link?: string | null;
+  notes?: string | null;
+  image_file_name?: string | null;
+  supplier_code?: string | null;
+  supplier_name?: string | null;
+  supplier_product_code?: string | null;
+  supplier_net_price?: number | null;
+  supplier_gross_price?: number | null;
+  supplier_notes?: string | null;
+  manage_warehouse?: boolean | null;
+  warehouse_location?: string | null;
+  min_stock?: number | null;
+  ordered_qty?: number | null;
+  weight_um?: string | null;
+  net_weight?: number | null;
+  gross_weight?: number | null;
+  size_um?: string | null;
+  net_size_x?: number | null;
+  net_size_y?: number | null;
+  net_size_z?: number | null;
+  custom_field1?: string | null;
+  custom_field2?: string | null;
+  custom_field3?: string | null;
+  custom_field4?: string | null;
+  online_customized?: boolean | null;
+  variants?: Array<{
+    size?: string | null;
+    color?: string | null;
+    barcode?: string | null;
+    available_qty?: number | null;
+  }>;
+  extra_barcodes?: Array<{
+    barcode: string;
+    package_qty?: number | null;
+  }>;
+}
+
 export interface ClientUpsertPayload {
   code?: string | null;
   name: string;
@@ -286,6 +335,248 @@ export async function upsertClientInPostgres(
     console.log(`[NEON PG CLIENT UPSERT] Client inserted: "${name}" (New ID: ${newId}, Code: ${code || 'N/A'}) into table "clients"`);
     return { status: 'inserted', id: newId, name, code };
   }
+}
+
+export async function upsertProductsBatchInPostgres(
+  products: ProductUpsertPayload[],
+  clientOrPool: pg.PoolClient | pg.Pool = pool
+): Promise<{ inserted: number; updated: number; total: number }> {
+  if (!products || products.length === 0) {
+    return { inserted: 0, updated: 0, total: 0 };
+  }
+
+  const validProducts = products.filter(p => p && p.code && String(p.code).trim());
+  if (validProducts.length === 0) {
+    return { inserted: 0, updated: 0, total: 0 };
+  }
+
+  let totalInserted = 0;
+  let totalUpdated = 0;
+
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < validProducts.length; i += BATCH_SIZE) {
+    const batch = validProducts.slice(i, i + BATCH_SIZE);
+    try {
+      // Check existing codes in this batch to accurately report inserted vs updated
+      const batchCodes = batch.map(p => String(p.code).trim());
+      const existingRes = await clientOrPool.query(
+        'SELECT code FROM products WHERE code = ANY($1)',
+        [batchCodes]
+      );
+      const existingCodeSet = new Set(existingRes.rows.map(r => r.code));
+
+      const valueRows: string[] = [];
+      const queryParams: any[] = [];
+      let paramIdx = 1;
+
+      for (const p of batch) {
+        const code = String(p.code).trim();
+        const description = (p.description || '').trim();
+        const price = Number(p.price) || 0.0;
+        const vat_code = p.vat_code || '22';
+        const um = p.um || 'pz';
+        const stock = Number(p.stock) || 0.0;
+        const barcode = p.barcode ? String(p.barcode).trim() : null;
+        const category = p.category ? String(p.category).trim() : null;
+        const subcategory = p.subcategory ? String(p.subcategory).trim() : null;
+        const description_html = p.description_html ? String(p.description_html).trim() : null;
+        const producer_name = p.producer_name ? String(p.producer_name).trim() : null;
+        const link = p.link ? String(p.link).trim() : null;
+        const notes = p.notes ? String(p.notes).trim() : null;
+        const image_file_name = p.image_file_name ? String(p.image_file_name).trim() : null;
+        const supplier_code = p.supplier_code ? String(p.supplier_code).trim() : null;
+        const supplier_name = p.supplier_name ? String(p.supplier_name).trim() : null;
+        const supplier_product_code = p.supplier_product_code ? String(p.supplier_product_code).trim() : null;
+        const supplier_net_price = Number(p.supplier_net_price) || 0.0;
+        const supplier_gross_price = Number(p.supplier_gross_price) || 0.0;
+        const supplier_notes = p.supplier_notes ? String(p.supplier_notes).trim() : null;
+        const manage_warehouse = p.manage_warehouse === false ? false : true;
+        const warehouse_location = p.warehouse_location ? String(p.warehouse_location).trim() : null;
+        const min_stock = Number(p.min_stock) || 0.0;
+        const ordered_qty = Number(p.ordered_qty) || 0.0;
+        const weight_um = p.weight_um ? String(p.weight_um).trim() : null;
+        const net_weight = Number(p.net_weight) || 0.0;
+        const gross_weight = Number(p.gross_weight) || 0.0;
+        const size_um = p.size_um ? String(p.size_um).trim() : null;
+        const net_size_x = Number(p.net_size_x) || 0.0;
+        const net_size_y = Number(p.net_size_y) || 0.0;
+        const net_size_z = Number(p.net_size_z) || 0.0;
+        const custom_field1 = p.custom_field1 ? String(p.custom_field1).trim() : null;
+        const custom_field2 = p.custom_field2 ? String(p.custom_field2).trim() : null;
+        const custom_field3 = p.custom_field3 ? String(p.custom_field3).trim() : null;
+        const custom_field4 = p.custom_field4 ? String(p.custom_field4).trim() : null;
+        const online_customized = Boolean(p.online_customized) === true;
+
+        const rowPlaceholders = [];
+        const rowVals = [
+          code, description, price, vat_code, um, stock,
+          barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
+          supplier_code, supplier_name, supplier_product_code, supplier_net_price, supplier_gross_price, supplier_notes,
+          manage_warehouse, warehouse_location, min_stock, ordered_qty, weight_um, net_weight, gross_weight,
+          size_um, net_size_x, net_size_y, net_size_z, custom_field1, custom_field2, custom_field3, custom_field4,
+          online_customized
+        ];
+
+        for (const val of rowVals) {
+          rowPlaceholders.push(`$${paramIdx++}`);
+          queryParams.push(val);
+        }
+        valueRows.push(`(${rowPlaceholders.join(', ')})`);
+      }
+
+      const sql = `
+        INSERT INTO products (
+          code, description, price, vat_code, um, stock,
+          barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
+          supplier_code, supplier_name, supplier_product_code, supplier_net_price, supplier_gross_price, supplier_notes,
+          manage_warehouse, warehouse_location, min_stock, ordered_qty, weight_um, net_weight, gross_weight,
+          size_um, net_size_x, net_size_y, net_size_z, custom_field1, custom_field2, custom_field3, custom_field4,
+          online_customized
+        )
+        VALUES ${valueRows.join(', ')}
+        ON CONFLICT (code) DO UPDATE SET
+          description = EXCLUDED.description,
+          price = EXCLUDED.price,
+          vat_code = EXCLUDED.vat_code,
+          um = EXCLUDED.um,
+          stock = EXCLUDED.stock,
+          barcode = EXCLUDED.barcode,
+          category = EXCLUDED.category,
+          subcategory = EXCLUDED.subcategory,
+          description_html = EXCLUDED.description_html,
+          producer_name = EXCLUDED.producer_name,
+          link = EXCLUDED.link,
+          notes = EXCLUDED.notes,
+          image_file_name = EXCLUDED.image_file_name,
+          supplier_code = EXCLUDED.supplier_code,
+          supplier_name = EXCLUDED.supplier_name,
+          supplier_product_code = EXCLUDED.supplier_product_code,
+          supplier_net_price = EXCLUDED.supplier_net_price,
+          supplier_gross_price = EXCLUDED.supplier_gross_price,
+          supplier_notes = EXCLUDED.supplier_notes,
+          manage_warehouse = EXCLUDED.manage_warehouse,
+          warehouse_location = EXCLUDED.warehouse_location,
+          min_stock = EXCLUDED.min_stock,
+          ordered_qty = EXCLUDED.ordered_qty,
+          weight_um = EXCLUDED.weight_um,
+          net_weight = EXCLUDED.net_weight,
+          gross_weight = EXCLUDED.gross_weight,
+          size_um = EXCLUDED.size_um,
+          net_size_x = EXCLUDED.net_size_x,
+          net_size_y = EXCLUDED.net_size_y,
+          net_size_z = EXCLUDED.net_size_z,
+          custom_field1 = EXCLUDED.custom_field1,
+          custom_field2 = EXCLUDED.custom_field2,
+          custom_field3 = EXCLUDED.custom_field3,
+          custom_field4 = EXCLUDED.custom_field4,
+          online_customized = EXCLUDED.online_customized
+        RETURNING id, code;
+      `;
+
+      const res = await clientOrPool.query(sql, queryParams);
+      const returnedRows = res.rows || [];
+      const codeToIdMap = new Map<string, number>();
+      for (const r of returnedRows) {
+        codeToIdMap.set(r.code, r.id);
+        if (existingCodeSet.has(r.code)) {
+          totalUpdated++;
+        } else {
+          totalInserted++;
+        }
+      }
+
+      // Handle variants & extra barcodes in PostgreSQL
+      for (const p of batch) {
+        const prodId = codeToIdMap.get(String(p.code).trim());
+        if (!prodId) continue;
+
+        if (p.variants && p.variants.length > 0) {
+          try {
+            await clientOrPool.query('DELETE FROM product_variants WHERE product_id = $1', [prodId]);
+            for (const v of p.variants) {
+              await clientOrPool.query(
+                'INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES ($1, $2, $3, $4, $5)',
+                [prodId, v.size || null, v.color || null, v.barcode || null, Number(v.available_qty) || 0.0]
+              );
+            }
+          } catch (vErr: any) {
+            console.error(`[PostgreSQL Variants Warning] Error for product ${p.code}:`, vErr?.message || vErr);
+          }
+        }
+
+        if (p.extra_barcodes && p.extra_barcodes.length > 0) {
+          try {
+            await clientOrPool.query('DELETE FROM product_extra_barcodes WHERE product_id = $1', [prodId]);
+            for (const eb of p.extra_barcodes) {
+              await clientOrPool.query(
+                'INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES ($1, $2, $3)',
+                [prodId, eb.barcode, eb.package_qty !== null && eb.package_qty !== undefined ? Number(eb.package_qty) : null]
+              );
+            }
+          } catch (ebErr: any) {
+            console.error(`[PostgreSQL ExtraBarcodes Warning] Error for product ${p.code}:`, ebErr?.message || ebErr);
+          }
+        }
+      }
+    } catch (batchErr: any) {
+      console.error(`[PostgreSQL Batch Products ERROR] Failed batch chunk starting at index ${i}:`, batchErr?.message || batchErr);
+    }
+  }
+
+  return { inserted: totalInserted, updated: totalUpdated, total: validProducts.length };
+}
+
+export async function deleteProductsByCodesInPostgres(
+  codes: string[],
+  clientOrPool: pg.PoolClient | pg.Pool = pool
+): Promise<number> {
+  if (!codes || codes.length === 0) return 0;
+  const cleanCodes = codes.map(c => String(c).trim()).filter(Boolean);
+  if (cleanCodes.length === 0) return 0;
+
+  try {
+    const res = await clientOrPool.query(
+      'DELETE FROM products WHERE code = ANY($1) AND (online_customized = false OR online_customized IS NULL)',
+      [cleanCodes]
+    );
+    return res.rowCount || 0;
+  } catch (err: any) {
+    console.error('[PostgreSQL Delete Products ERROR]', err?.message || err);
+    return 0;
+  }
+}
+
+export async function upsertClientsBatchInPostgres(
+  clients: ClientUpsertPayload[],
+  clientOrPool: pg.PoolClient | pg.Pool = pool
+): Promise<{ inserted: number; updated: number; total: number }> {
+  if (!clients || clients.length === 0) {
+    return { inserted: 0, updated: 0, total: 0 };
+  }
+
+  const validClients = clients.filter(c => c && c.name && c.name.trim());
+  if (validClients.length === 0) {
+    return { inserted: 0, updated: 0, total: 0 };
+  }
+
+  let totalInserted = 0;
+  let totalUpdated = 0;
+
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < validClients.length; i += BATCH_SIZE) {
+    const batch = validClients.slice(i, i + BATCH_SIZE);
+    try {
+      for (const c of batch) {
+        const res = await upsertClientInPostgres(c, clientOrPool);
+        if (res.status === 'inserted') totalInserted++;
+        if (res.status === 'updated') totalUpdated++;
+      }
+    } catch (batchErr: any) {
+      console.error(`[PostgreSQL Batch Clients ERROR] Failed batch chunk starting at index ${i}:`, batchErr?.message || batchErr);
+    }
+  }
+
+  return { inserted: totalInserted, updated: totalUpdated, total: validClients.length };
 }
 
 export function formatQuery(sql: string): string {

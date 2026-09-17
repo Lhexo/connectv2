@@ -22,7 +22,10 @@ import {
   createOrderInPostgres,
   updateOrderInPostgres,
   deleteOrderInPostgres,
-  getDatabaseStatus
+  getDatabaseStatus,
+  upsertProductsBatchInPostgres,
+  deleteProductsByCodesInPostgres,
+  upsertClientsBatchInPostgres
 } from './src/lib/db.ts';
 import { pgDb as db } from './src/lib/pgSyncDriver.ts';
 
@@ -5459,130 +5462,129 @@ const handleEasyfattImport = async (req: any, res: any) => {
     let updatedCount = 0;
     let deletedCount = codesToDelete.length;
 
-    db.transaction(() => {
-      // 1. Delete requested codes
-      if (codesToDelete.length > 0) {
+    // 1. Delete requested codes in Postgres and local DB
+    if (codesToDelete.length > 0) {
+      try {
+        await deleteProductsByCodesInPostgres(codesToDelete);
+      } catch (err: any) {
+        console.error('[Easyfatt Neon Delete Error]', err?.message || err);
+      }
+
+      try {
         const deleteProductStmt = db.prepare('DELETE FROM products WHERE code = ?');
         for (const code of codesToDelete) {
           deleteProductStmt.run(code);
         }
+      } catch (err: any) {
+        console.warn('[Easyfatt Local Delete Warning]', err?.message || err);
+      }
+    }
+
+    // 2. Map all products to standard typed payload
+    const mappedProducts: any[] = [];
+    for (const raw of productsToUpsert) {
+      const p = mapProductNode(raw);
+      if (p && p.code) {
+        mappedProducts.push(p);
+      }
+    }
+
+    // 3. Process in batches (chunks of 50) for PostgreSQL (Neon) and local database without monolithic transactions
+    const PRODUCT_CHUNK_SIZE = 50;
+    for (let i = 0; i < mappedProducts.length; i += PRODUCT_CHUNK_SIZE) {
+      const chunk = mappedProducts.slice(i, i + PRODUCT_CHUNK_SIZE);
+      try {
+        const batchRes = await upsertProductsBatchInPostgres(chunk);
+        importedCount += batchRes.inserted;
+        updatedCount += batchRes.updated;
+      } catch (err: any) {
+        console.error(`[Easyfatt Neon Product Batch Error chunk ${i}-${i + chunk.length}]`, err?.message || err);
       }
 
-      // 2. Insert or Update remaining products
-      const selectMatchingProducts = db.prepare('SELECT id, code FROM products WHERE LOWER(TRIM(code)) = LOWER(TRIM(?))');
-      const deleteVariantsStmt = db.prepare('DELETE FROM product_variants WHERE product_id = ?');
-      const insertVariantStmt = db.prepare('INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES (?, ?, ?, ?, ?)');
-      const deleteExtraBarcodesStmt = db.prepare('DELETE FROM product_extra_barcodes WHERE product_id = ?');
-      const insertExtraBarcodeStmt = db.prepare('INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES (?, ?, ?)');
+      // Sync local SQLite mirror per item with isolated try/catch
+      for (const p of chunk) {
+        try {
+          const matching = db.prepare('SELECT id FROM products WHERE LOWER(TRIM(code)) = LOWER(TRIM(?))').all(p.code) as any[];
+          if (matching && matching.length > 0) {
+            const primaryId = matching[0].id;
+            db.prepare(`
+              UPDATE products SET 
+                code = ?, description = ?, price = ?, vat_code = ?, um = ?, stock = ?,
+                barcode = ?, category = ?, subcategory = ?, description_html = ?, producer_name = ?, link = ?, notes = ?, image_file_name = ?,
+                supplier_code = ?, supplier_name = ?, supplier_product_code = ?, supplier_net_price = ?, supplier_gross_price = ?, supplier_notes = ?,
+                manage_warehouse = ?, warehouse_location = ?, min_stock = ?, ordered_qty = ?, weight_um = ?, net_weight = ?, gross_weight = ?,
+                size_um = ?, net_size_x = ?, net_size_y = ?, net_size_z = ?, custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?
+              WHERE id = ?
+            `).run(
+              p.code, p.description, p.price, p.vat_code, p.um, p.stock,
+              p.barcode, p.category, p.subcategory, p.description_html, p.producer_name, p.link, p.notes, p.image_file_name,
+              p.supplier_code, p.supplier_name, p.supplier_product_code, p.supplier_net_price, p.supplier_gross_price, p.supplier_notes,
+              p.manage_warehouse ? 1 : 0, p.warehouse_location, p.min_stock, p.ordered_qty, p.weight_um, p.net_weight, p.gross_weight,
+              p.size_um, p.net_size_x, p.net_size_y, p.net_size_z, p.custom_field1, p.custom_field2, p.custom_field3, p.custom_field4,
+              primaryId
+            );
 
-      const updateProductStmt = db.prepare(`
-        UPDATE products SET 
-          code = ?, description = ?, price = ?, vat_code = ?, um = ?, stock = ?,
-          barcode = ?, category = ?, subcategory = ?, description_html = ?, producer_name = ?, link = ?, notes = ?, image_file_name = ?,
-          supplier_code = ?, supplier_name = ?, supplier_product_code = ?, supplier_net_price = ?, supplier_gross_price = ?, supplier_notes = ?,
-          manage_warehouse = ?, warehouse_location = ?, min_stock = ?, ordered_qty = ?, weight_um = ?, net_weight = ?, gross_weight = ?,
-          size_um = ?, net_size_x = ?, net_size_y = ?, net_size_z = ?, custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?
-        WHERE id = ?
-      `);
+            // Re-sync variants
+            db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(primaryId);
+            if (p.variants && p.variants.length > 0) {
+              const insertVariantStmt = db.prepare('INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES (?, ?, ?, ?, ?)');
+              for (const v of p.variants) {
+                insertVariantStmt.run(primaryId, v.size || null, v.color || null, v.barcode || null, v.available_qty);
+              }
+            }
 
-      const insertProductStmt = db.prepare(`
-        INSERT INTO products (
-          code, description, price, vat_code, um, stock,
-          barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
-          supplier_code, supplier_name, supplier_product_code, supplier_net_price, supplier_gross_price, supplier_notes,
-          manage_warehouse, warehouse_location, min_stock, ordered_qty, weight_um, net_weight, gross_weight,
-          size_um, net_size_x, net_size_y, net_size_z, custom_field1, custom_field2, custom_field3, custom_field4,
-          online_customized
-        ) VALUES (
-          ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?, ?, ?,
-          false
-        )
-      `);
-      
-      for (const raw of productsToUpsert) {
-        const p = mapProductNode(raw);
-        if (!p.code) continue;
+            // Re-sync extra barcodes
+            db.prepare('DELETE FROM product_extra_barcodes WHERE product_id = ?').run(primaryId);
+            if (p.extra_barcodes && p.extra_barcodes.length > 0) {
+              const insertExtraBarcodeStmt = db.prepare('INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES (?, ?, ?)');
+              for (const eb of p.extra_barcodes) {
+                insertExtraBarcodeStmt.run(primaryId, eb.barcode, eb.package_qty);
+              }
+            }
+          } else {
+            const insertResult = db.prepare(`
+              INSERT INTO products (
+                code, description, price, vat_code, um, stock,
+                barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
+                supplier_code, supplier_name, supplier_product_code, supplier_net_price, supplier_gross_price, supplier_notes,
+                manage_warehouse, warehouse_location, min_stock, ordered_qty, weight_um, net_weight, gross_weight,
+                size_um, net_size_x, net_size_y, net_size_z, custom_field1, custom_field2, custom_field3, custom_field4,
+                online_customized
+              ) VALUES (
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?,
+                false
+              )
+            `).run(
+              p.code, p.description, p.price, p.vat_code, p.um, p.stock,
+              p.barcode, p.category, p.subcategory, p.description_html, p.producer_name, p.link, p.notes, p.image_file_name,
+              p.supplier_code, p.supplier_name, p.supplier_product_code, p.supplier_net_price, p.supplier_gross_price, p.supplier_notes,
+              p.manage_warehouse ? 1 : 0, p.warehouse_location, p.min_stock, p.ordered_qty, p.weight_um, p.net_weight, p.gross_weight,
+              p.size_um, p.net_size_x, p.net_size_y, p.net_size_z, p.custom_field1, p.custom_field2, p.custom_field3, p.custom_field4
+            );
 
-        const matching = selectMatchingProducts.all(p.code) as any[];
-        if (matching && matching.length > 0) {
-          // Keep the first existing match
-          const primaryProduct = matching[0];
-          const productId = primaryProduct.id;
-
-          // If there are other products with the same code, delete them to guarantee absolute uniqueness
-          if (matching.length > 1) {
-            const extraIds = matching.slice(1).map(m => m.id);
-            const deleteExtraProductStmt = db.prepare('DELETE FROM products WHERE id = ?');
-            const deleteExtraVariantsStmt = db.prepare('DELETE FROM product_variants WHERE product_id = ?');
-            const deleteExtraBarcodesStmt = db.prepare('DELETE FROM product_extra_barcodes WHERE product_id = ?');
-            for (const id of extraIds) {
-              deleteExtraProductStmt.run(id);
-              deleteExtraVariantsStmt.run(id);
-              deleteExtraBarcodesStmt.run(id);
+            const primaryId = insertResult.lastInsertRowid;
+            if (p.variants && p.variants.length > 0) {
+              const insertVariantStmt = db.prepare('INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES (?, ?, ?, ?, ?)');
+              for (const v of p.variants) {
+                insertVariantStmt.run(primaryId, v.size || null, v.color || null, v.barcode || null, v.available_qty);
+              }
+            }
+            if (p.extra_barcodes && p.extra_barcodes.length > 0) {
+              const insertExtraBarcodeStmt = db.prepare('INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES (?, ?, ?)');
+              for (const eb of p.extra_barcodes) {
+                insertExtraBarcodeStmt.run(primaryId, eb.barcode, eb.package_qty);
+              }
             }
           }
-
-          // Update standard fields on the primary product (updating code to match the exact casing)
-          updateProductStmt.run(
-            p.code, p.description, p.price, p.vat_code, p.um, p.stock,
-            p.barcode, p.category, p.subcategory, p.description_html, p.producer_name, p.link, p.notes, p.image_file_name,
-            p.supplier_code, p.supplier_name, p.supplier_product_code, p.supplier_net_price, p.supplier_gross_price, p.supplier_notes,
-            p.manage_warehouse, p.warehouse_location, p.min_stock, p.ordered_qty, p.weight_um, p.net_weight, p.gross_weight,
-            p.size_um, p.net_size_x, p.net_size_y, p.net_size_z, p.custom_field1, p.custom_field2, p.custom_field3, p.custom_field4,
-            productId
-          );
-          
-          // Re-insert variants
-          deleteVariantsStmt.run(productId);
-          if (p.variants && p.variants.length > 0) {
-            for (const v of p.variants) {
-              insertVariantStmt.run(productId, v.size || null, v.color || null, v.barcode || null, v.available_qty);
-            }
-          }
-
-          // Re-insert extra barcodes
-          deleteExtraBarcodesStmt.run(productId);
-          if (p.extra_barcodes && p.extra_barcodes.length > 0) {
-            for (const eb of p.extra_barcodes) {
-              insertExtraBarcodeStmt.run(productId, eb.barcode, eb.package_qty);
-            }
-          }
-
-          updatedCount++;
-        } else {
-          // INSERT new product
-          const result = insertProductStmt.run(
-            p.code, p.description, p.price, p.vat_code, p.um, p.stock,
-            p.barcode, p.category, p.subcategory, p.description_html, p.producer_name, p.link, p.notes, p.image_file_name,
-            p.supplier_code, p.supplier_name, p.supplier_product_code, p.supplier_net_price, p.supplier_gross_price, p.supplier_notes,
-            p.manage_warehouse, p.warehouse_location, p.min_stock, p.ordered_qty, p.weight_um, p.net_weight, p.gross_weight,
-            p.size_um, p.net_size_x, p.net_size_y, p.net_size_z, p.custom_field1, p.custom_field2, p.custom_field3, p.custom_field4
-          );
-
-          const productId = result.lastInsertRowid;
-
-          // Insert variants
-          if (p.variants && p.variants.length > 0) {
-            for (const v of p.variants) {
-              insertVariantStmt.run(productId, v.size || null, v.color || null, v.barcode || null, v.available_qty);
-            }
-          }
-
-          // Insert extra barcodes
-          if (p.extra_barcodes && p.extra_barcodes.length > 0) {
-            for (const eb of p.extra_barcodes) {
-              insertExtraBarcodeStmt.run(productId, eb.barcode, eb.package_qty);
-            }
-          }
-
-          importedCount++;
+        } catch (localErr: any) {
+          console.warn('[Easyfatt Local Product Sync Warning]', localErr?.message || localErr);
         }
       }
-    })();
+    }
 
     // Cleanup uploaded file
     try { if (tempFilePathToUnlink) fs.unlinkSync(tempFilePathToUnlink); } catch (e) {}
@@ -5608,14 +5610,30 @@ const handleEasyfattImport = async (req: any, res: any) => {
   }
 };
 
-// Robust endpoint for product import (supports GET test and POST uploads with any field name)
+// Robust endpoint for product and customer import (supports GET test and POST uploads with any field name)
 const easyfattImportProductsPaths = [
   '/api/easyfatt/import-products',
   '/api/easyfatt/import-products.php',
+  '/api/easyfatt/upload-products',
+  '/api/easyfatt/upload-products.php',
+  '/api/easyfatt/uploadarticoli',
+  '/api/easyfatt/uploadarticoli.php',
+  '/api/easyfatt/uploadclienti',
+  '/api/easyfatt/uploadclienti.php',
+  '/api/easyfatt/import-clients',
+  '/api/easyfatt/import-clients.php',
   '/easyfatt/import-products',
   '/easyfatt/import-products.php',
+  '/easyfatt/upload-products',
+  '/easyfatt/upload-products.php',
+  '/easyfatt/uploadarticoli',
+  '/easyfatt/uploadarticoli.php',
+  '/easyfatt/uploadclienti',
+  '/easyfatt/uploadclienti.php',
   '/uploadarticoli.php',
-  '/articoli.xml'
+  '/uploadclienti.php',
+  '/articoli.xml',
+  '/clienti.xml'
 ];
 
 app.all(easyfattImportProductsPaths, (req: any, res: any) => {
@@ -6290,8 +6308,21 @@ async function upsertClientInDb(c: ReturnType<typeof mapCustomerNode>, pgClient?
 const easyfattUploadImagePaths = [
   '/api/easyfatt/upload-image',
   '/api/easyfatt/upload-image.php',
+  '/api/easyfatt/upload-images',
+  '/api/easyfatt/upload-images.php',
+  '/api/easyfatt/uploadImmagini.php',
+  '/api/easyfatt/uploadimmagini.php',
   '/easyfatt/upload-image',
-  '/easyfatt/upload-image.php'
+  '/easyfatt/upload-image.php',
+  '/easyfatt/upload-images',
+  '/easyfatt/upload-images.php',
+  '/easyfatt/uploadImmagini.php',
+  '/upload-image',
+  '/upload-images',
+  '/upload-image.php',
+  '/upload-images.php',
+  '/uploadImmagini.php',
+  '/uploadimmagini.php'
 ];
 
 app.all(easyfattUploadImagePaths, (req: any, res: any) => {
@@ -6308,7 +6339,7 @@ app.all(easyfattUploadImagePaths, (req: any, res: any) => {
       if (!file) {
         return res.status(400).send("ERROR: Nessun file caricato.");
       }
-      const fileName = req.body.fileName || file.originalname;
+      const fileName = req.body.fileName || req.body.filename || file.originalname;
       if (fileName && file) {
         const targetPath = path.join(uploadDir, fileName);
         fs.copyFileSync(file.path, targetPath);
@@ -6326,8 +6357,18 @@ app.all(easyfattUploadImagePaths, (req: any, res: any) => {
 const easyfattUploadImageFinishedPaths = [
   '/api/easyfatt/upload-image-finished',
   '/api/easyfatt/upload-image-finished.php',
+  '/api/easyfatt/sync-finish',
+  '/api/easyfatt/sync-finish.php',
+  '/api/easyfatt/invio_terminato.php',
+  '/api/easyfatt/invio_terminato.asp',
   '/easyfatt/upload-image-finished',
-  '/easyfatt/upload-image-finished.php'
+  '/easyfatt/upload-image-finished.php',
+  '/easyfatt/sync-finish',
+  '/upload-image-finished',
+  '/upload-image-finished.php',
+  '/sync-finish',
+  '/invio_terminato.php',
+  '/invio_terminato.asp'
 ];
 
 app.all(easyfattUploadImageFinishedPaths, (req: any, res: any) => {
@@ -6661,12 +6702,12 @@ app.post('/api/easyfatt/import-products-xlsx', authMiddleware, upload.single('fi
         // If this column doesn't exist in `products`, add it dynamically!
         if (!existingColumns.has(sanitizedCol)) {
           try {
-            db.exec(`ALTER TABLE products ADD COLUMN "${sanitizedCol}" TEXT DEFAULT ''`);
+            db.exec(`ALTER TABLE products ADD COLUMN IF NOT EXISTS "${sanitizedCol}" TEXT DEFAULT ''`);
             existingColumns.add(sanitizedCol);
             newColumnsCreated.push(cleanHeader);
-            console.log(`[DYNAMIC SCHEMA] Created new column '${sanitizedCol}' (from header '${cleanHeader}') in products table.`);
+            console.log(`[DYNAMIC SCHEMA] Created or ensured column '${sanitizedCol}' (from header '${cleanHeader}') in products table.`);
           } catch (alterErr: any) {
-            console.error(`Failed to alter table products for column '${sanitizedCol}':`, alterErr);
+            console.error(`Failed to alter table products for column '${sanitizedCol}':`, alterErr?.message || alterErr);
           }
         }
       }

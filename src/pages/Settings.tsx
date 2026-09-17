@@ -457,7 +457,7 @@ export default function Settings({ user, onUpdateUser, initialTab = 'profilo' }:
                       className="w-full px-4 py-3 bg-white border border-[#E5E7EB] rounded-xl outline-none focus:ring-2 focus:ring-[#5A5A40]/20 transition-all"
                     />
                     <select 
-                      value={newCategoryParent}
+                      value={newCategoryParent || ''}
                       onChange={(e) => setNewCategoryParent(e.target.value)}
                       className="w-full px-4 py-3 bg-white border border-[#E5E7EB] rounded-xl outline-none focus:ring-2 focus:ring-[#5A5A40]/20 transition-all"
                     >

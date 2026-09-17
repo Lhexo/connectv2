@@ -18,7 +18,15 @@ export function formatQuery(sql: string): string {
 
 export function sanitizeSql(sql: string): string {
   let s = sql.trim();
+  const pragmaTableInfo = s.match(/^PRAGMA\s+table_info\s*\(\s*["`]?(\w+)["`]?\s*\)/i);
+  if (pragmaTableInfo) {
+    const tbl = pragmaTableInfo[1].toLowerCase();
+    return `SELECT column_name AS name FROM information_schema.columns WHERE table_name = '${tbl}'`;
+  }
   if (/^PRAGMA/i.test(s)) return 'SELECT 1';
+
+  // Ensure ALTER TABLE ADD COLUMN has IF NOT EXISTS for PostgreSQL idempotency
+  s = s.replace(/ALTER\s+TABLE\s+(["`\w]+)\s+ADD\s+COLUMN\s+(?!IF\s+NOT\s+EXISTS)/gi, 'ALTER TABLE $1 ADD COLUMN IF NOT EXISTS ');
 
   s = s.replace(/datetime\s*\(\s*'now'\s*,\s*'-30 hours'\s*\)/gi, "(NOW() - INTERVAL '30 hours')");
   s = s.replace(/datetime\s*\(\s*'now'\s*\)/gi, "NOW()");
@@ -118,8 +126,19 @@ const workerScript = `
       int32[2] = encoded.length;
       Atomics.store(int32, 0, 2);
       Atomics.notify(int32, 0, 1);
-    } catch (err) {
-      const errRes = JSON.stringify({ ok: false, error: err?.message || String(err) });
+    } catch (err: any) {
+      // Gracefully ignore duplicate column / already exists errors during dynamic schema alterations
+      const errMsg = err?.message || String(err);
+      if (/already exists/i.test(errMsg) && (/ALTER\s+TABLE/i.test(req.sql) || /ADD\s+COLUMN/i.test(req.sql))) {
+        const result = { ok: true, rows: [], rowCount: 0, lastInsertRowid: 0 };
+        const encoded = Buffer.from(JSON.stringify(result));
+        encoded.copy(uint8);
+        int32[2] = encoded.length;
+        Atomics.store(int32, 0, 2);
+        Atomics.notify(int32, 0, 1);
+        return;
+      }
+      const errRes = JSON.stringify({ ok: false, error: errMsg });
       const encoded = Buffer.from(errRes);
       encoded.copy(uint8);
       int32[2] = encoded.length;
@@ -150,7 +169,8 @@ function getWorker(): Worker {
 
 function executeSync(type: 'all' | 'get' | 'run' | 'exec', rawSql: string, params: any[] = []): any {
   const trimmed = rawSql.trim();
-  if (/^PRAGMA/i.test(trimmed)) {
+  const isPragmaTableInfo = /^PRAGMA\s+table_info/i.test(trimmed);
+  if (!isPragmaTableInfo && /^PRAGMA/i.test(trimmed)) {
     if (type === 'get') return undefined;
     if (type === 'all') return [];
     return { changes: 0, lastInsertRowid: 0 };

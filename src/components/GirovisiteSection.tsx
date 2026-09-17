@@ -1193,7 +1193,7 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
                     Seleziona Cliente (I Tuoi Clienti Assegnati): *
                   </label>
                   <select
-                    value={newVisitClientId}
+                    value={newVisitClientId || ''}
                     onChange={(e) => setNewVisitClientId(e.target.value)}
                     className="w-full bg-gray-50 border border-gray-300 rounded-xl p-3 font-medium text-sm text-gray-900 focus:outline-none focus:border-[#5A5A40]"
                     required
@@ -1316,7 +1316,7 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
                     Seleziona Collega (Agente o Admin): *
                   </label>
                   <select
-                    value={selectedGuestAgentId}
+                    value={selectedGuestAgentId || ''}
                     onChange={(e) => setSelectedGuestAgentId(e.target.value)}
                     className="w-full bg-gray-50 border border-gray-300 rounded-xl p-3 font-medium text-sm text-gray-900 focus:outline-none focus:border-[#5A5A40]"
                     required

@@ -2849,7 +2849,7 @@ export default function PosteGenerator() {
                                             </label>
                                             {field.type === 'select' ? (
                                               <select
-                                                value={value}
+                                                value={value || ''}
                                                 onChange={(e) => handleRowFieldChange(row.id, field.key as keyof DestinationRow, e.target.value)}
                                                 className="w-full bg-white border border-[#E5E7EB] rounded-lg px-2 py-1.5 text-xs focus:border-[#5A5A40] outline-none"
                                               >

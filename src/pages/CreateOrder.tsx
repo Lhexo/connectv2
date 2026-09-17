@@ -667,7 +667,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
               Metodo di Pagamento
             </label>
             <select
-              value={paymentName}
+              value={paymentName || ''}
               onChange={e => setPaymentName(e.target.value)}
               className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 outline-none focus:border-[#5A5A40]"
             >

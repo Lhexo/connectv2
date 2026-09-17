@@ -4351,7 +4351,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <Calendar size={14} className="text-[#5A5A40]" />
                       <span className="text-[10px] font-bold text-gray-500 uppercase">Periodo:</span>
                       <select
-                        value={statsTimeRange}
+                        value={statsTimeRange || 'all'}
                         onChange={(e) => setStatsTimeRange(e.target.value as any)}
                         className="bg-transparent text-xs font-bold text-[#111827] outline-none cursor-pointer"
                       >
@@ -4367,7 +4367,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <Filter size={14} className="text-[#5A5A40]" />
                       <span className="text-[10px] font-bold text-gray-500 uppercase">Stato:</span>
                       <select
-                        value={statsStatusFilter}
+                        value={statsStatusFilter || 'all'}
                         onChange={(e) => setStatsStatusFilter(e.target.value as any)}
                         className="bg-transparent text-xs font-bold text-[#111827] outline-none cursor-pointer"
                       >
@@ -4383,7 +4383,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                         <Users size={14} className="text-[#5A5A40]" />
                         <span className="text-[10px] font-bold text-gray-500 uppercase">Agente:</span>
                         <select
-                          value={statsAgentFilter}
+                          value={statsAgentFilter || 'all'}
                           onChange={(e) => setStatsAgentFilter(e.target.value)}
                           className="bg-transparent text-xs font-bold text-[#111827] outline-none cursor-pointer"
                         >
@@ -5289,7 +5289,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                     <div className="space-y-2">
                       <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 block">Metodo di Pagamento Predefinito</label>
                       <select 
-                        value={defaultPayment}
+                        value={defaultPayment || ''}
                         onChange={(e) => setDefaultPayment(e.target.value)}
                         className="w-full bg-[#F8F9FA] border border-[#E5E7EB] px-4 py-3 rounded-xl font-bold text-xs text-[#111827] shadow-xs focus:ring-2 focus:ring-[#5A5A40]/10 focus:border-[#5A5A40] outline-none transition-all cursor-pointer"
                       >
@@ -5315,7 +5315,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                     <div className="space-y-2">
                       <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 block">Aliquota IVA Predefinita per Articoli</label>
                       <select 
-                        value={defaultVat}
+                        value={defaultVat || '22'}
                         onChange={(e) => setDefaultVat(e.target.value)}
                         className="w-full bg-[#F8F9FA] border border-[#E5E7EB] px-4 py-3 rounded-xl font-bold text-xs text-[#111827] shadow-xs focus:ring-2 focus:ring-[#5A5A40]/10 focus:border-[#5A5A40] outline-none transition-all cursor-pointer"
                       >
@@ -7240,7 +7240,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 ml-1">Seleziona Cliente *</label>
                       <select
                         required
-                        value={orderForm.client_id}
+                        value={orderForm.client_id || ''}
                         onChange={(e) => setOrderForm({ ...orderForm, client_id: e.target.value })}
                         className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-[#5A5A40]/20 text-sm font-bold"
                       >
@@ -7268,7 +7268,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                     <div className="space-y-1">
                       <label className="text-[10px] font-black uppercase tracking-wider text-gray-500 ml-1">Modalità Pagamento</label>
                       <select
-                        value={orderForm.payment_name}
+                        value={orderForm.payment_name || ''}
                         onChange={(e) => setOrderForm({ ...orderForm, payment_name: e.target.value })}
                         className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-[#5A5A40]/20 text-sm font-bold"
                       >
@@ -7306,7 +7306,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <div className="sm:col-span-1">
                         <label className="text-[9px] uppercase text-gray-400 font-bold ml-1">Prodotto</label>
                         <select
-                          value={selectedProductCode}
+                          value={selectedProductCode || ''}
                           onChange={(e) => {
                             setSelectedProductCode(e.target.value);
                             const prod = products.find(p => p.code === e.target.value);
@@ -8817,7 +8817,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                   </label>
 
                   <select
-                    value={orderForm.client_id}
+                    value={orderForm.client_id || ''}
                     onChange={(e) => {
                       const selectedClientId = e.target.value;
                       const selectedClientObj = clients.find(c => String(c.id) === String(selectedClientId));
@@ -8975,7 +8975,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                   <div className="space-y-1.5">
                     <label className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">Modalità di Pagamento</label>
                     <select
-                      value={orderForm.payment_name}
+                      value={orderForm.payment_name || ''}
                       onChange={(e) => setOrderForm(prev => ({ ...prev, payment_name: e.target.value }))}
                       className="w-full px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/30 cursor-pointer"
                     >

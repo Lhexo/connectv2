@@ -312,7 +312,7 @@ export default function UserManagement() {
                 <select 
                   required
                   className="w-full px-4 py-2.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl outline-none focus:ring-2 focus:ring-[#5A5A40]/20 transition-all capitalize"
-                  value={formData.department}
+                  value={formData.department || ''}
                   onChange={(e) => setFormData({...formData, department: e.target.value})}
                 >
                   <option value="">Seleziona Reparto</option>
@@ -329,7 +329,7 @@ export default function UserManagement() {
                 <label className="block text-sm font-semibold text-[#374151] mb-1.5">Ruolo</label>
                 <select 
                   className="w-full px-4 py-2.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl outline-none focus:ring-2 focus:ring-[#5A5A40]/20 transition-all font-medium text-sm text-[#111827]"
-                  value={formData.role}
+                  value={formData.role || 'user'}
                   onChange={(e) => setFormData({...formData, role: e.target.value})}
                 >
                   <option value="user">User (Utente generico)</option>

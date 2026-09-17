@@ -844,7 +844,7 @@ export default function App() {
                     ) : callData.caller_type === 'cliente' ? (
                       <select
                         required
-                        value={callData.clientId}
+                        value={callData.clientId || ''}
                         onChange={(e) => {
                           const client = clients.find(c => c.id.toString() === e.target.value);
                           setCallData({
@@ -863,7 +863,7 @@ export default function App() {
                     ) : (
                       <select
                         required
-                        value={callData.supplierId}
+                        value={callData.supplierId || ''}
                         onChange={(e) => {
                           const supplierList = Array.isArray(suppliers) ? suppliers : [];
                           const supplier = supplierList.find(s => s && s.id && s.id.toString() === e.target.value);
@@ -894,7 +894,7 @@ export default function App() {
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-black uppercase tracking-widest text-[#9CA3AF] ml-1">Categoria Chiamata</label>
                     <select 
-                      value={callData.categoryId}
+                      value={callData.categoryId || ''}
                       onChange={(e) => setCallData({...callData, categoryId: e.target.value})}
                       className="w-full px-5 py-3.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl outline-none focus:ring-2 focus:ring-rose-500/20 transition-all font-bold"
                     >
