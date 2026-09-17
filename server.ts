@@ -3544,9 +3544,9 @@ app.post('/api/easyfatt/products', authMiddleware, (req, res) => {
       code, description, Number(price) || 0, vat_code || '22', um || 'pz', Number(stock) || 0,
       barcode || null, category || null, subcategory || null, description_html || null, producer_name || null, link || null, notes || null, image_file_name || null,
       supplier_code || null, supplier_name || null, supplier_product_code || null, Number(supplier_net_price) || 0, Number(supplier_gross_price) || 0, supplier_notes || null,
-      Number(manage_warehouse) || 0, warehouse_location || null, Number(min_stock) || 0, Number(ordered_qty) || 0, weight_um || null, Number(net_weight) || 0, Number(gross_weight) || 0,
+      manage_warehouse ? true : false, warehouse_location || null, Number(min_stock) || 0, Number(ordered_qty) || 0, weight_um || null, Number(net_weight) || 0, Number(gross_weight) || 0,
       size_um || null, Number(net_size_x) || 0, Number(net_size_y) || 0, Number(net_size_z) || 0, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null,
-      online_promo || null, online_warranty || null, online_category_image || null, online_notes || null, Number(online_customized) || 0
+      online_promo || null, online_warranty || null, online_category_image || null, online_notes || null, online_customized ? true : false
     );
     
     res.json({ id: result.lastInsertRowid, success: true });
@@ -3591,9 +3591,9 @@ app.put('/api/easyfatt/products/:id', authMiddleware, (req, res) => {
       code, description, Number(price) || 0, vat_code || '22', um || 'pz', Number(stock) || 0,
       barcode || null, category || null, subcategory || null, description_html || null, producer_name || null, link || null, notes || null, image_file_name || null,
       supplier_code || null, supplier_name || null, supplier_product_code || null, Number(supplier_net_price) || 0, Number(supplier_gross_price) || 0, supplier_notes || null,
-      Number(manage_warehouse) || 0, warehouse_location || null, Number(min_stock) || 0, Number(ordered_qty) || 0, weight_um || null, Number(net_weight) || 0, Number(gross_weight) || 0,
+      manage_warehouse ? true : false, warehouse_location || null, Number(min_stock) || 0, Number(ordered_qty) || 0, weight_um || null, Number(net_weight) || 0, Number(gross_weight) || 0,
       size_um || null, Number(net_size_x) || 0, Number(net_size_y) || 0, Number(net_size_z) || 0, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null,
-      online_promo || null, online_warranty || null, online_category_image || null, online_notes || null, Number(online_customized) || 0,
+      online_promo || null, online_warranty || null, online_category_image || null, online_notes || null, online_customized ? true : false,
       req.params.id
     );
 
@@ -5389,9 +5389,9 @@ const handleEasyfattImport = async (req: any, res: any) => {
         }
 
         // In full mode, delete products that are completely absent in the XML file,
-        // but preserve any custom items created online (online_customized = 1).
+        // but preserve any custom items created online (online_customized = true).
         const incomingCodes = new Set(productsToUpsert.map(p => String(getVal(p, ['Code', 'code', 'CODE'], '')).trim()).filter(Boolean));
-        const currentDbCodes = db.prepare('SELECT code FROM products WHERE online_customized = 0').all().map((r: any) => r.code);
+        const currentDbCodes = db.prepare('SELECT code FROM products WHERE online_customized = false OR online_customized IS NULL').all().map((r: any) => r.code);
         codesToDelete = currentDbCodes.filter(c => !incomingCodes.has(c));
       }
     } 
@@ -5499,7 +5499,7 @@ const handleEasyfattImport = async (req: any, res: any) => {
           ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?,
-          0
+          false
         )
       `);
       

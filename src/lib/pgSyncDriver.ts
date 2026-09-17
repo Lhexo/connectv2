@@ -29,6 +29,16 @@ export function sanitizeSql(sql: string): string {
   s = s.replace(/DATE\s*\(\s*deadline\s*\)/gi, "deadline::date");
   s = s.replace(/MAX\s*\(\s*0\s*,\s*stock\s*-\s*\?\s*\)/gi, 'GREATEST(0, stock - ?)');
 
+  // Boolean column sanitization for PostgreSQL compatibility
+  s = s.replace(/\bonline_customized\s*=\s*0\b/gi, 'online_customized = false');
+  s = s.replace(/\bonline_customized\s*=\s*1\b/gi, 'online_customized = true');
+  s = s.replace(/\bmanage_warehouse\s*=\s*0\b/gi, 'manage_warehouse = false');
+  s = s.replace(/\bmanage_warehouse\s*=\s*1\b/gi, 'manage_warehouse = true');
+  s = s.replace(/\bis_imported\s*=\s*0\b/gi, 'is_imported = false');
+  s = s.replace(/\bis_imported\s*=\s*1\b/gi, 'is_imported = true');
+  s = s.replace(/\bis_read\s*=\s*0\b/gi, 'is_read = false');
+  s = s.replace(/\bis_read\s*=\s*1\b/gi, 'is_read = true');
+
   if (/INSERT\s+OR\s+IGNORE\s+INTO\s+/i.test(s)) {
     s = s.replace(/INSERT\s+OR\s+IGNORE\s+INTO\s+/gi, 'INSERT INTO ');
     if (!/ON\s+CONFLICT/i.test(s)) {
