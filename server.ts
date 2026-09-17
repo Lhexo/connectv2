@@ -2205,12 +2205,12 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
   }
 
   if (startDate) {
-    whereClauses.push('DATE(created_at) >= DATE(?)');
+    whereClauses.push('created_at::date >= ?::date');
     params.push(startDate);
   }
 
   if (endDate) {
-    whereClauses.push('DATE(created_at) <= DATE(?)');
+    whereClauses.push('created_at::date <= ?::date');
     params.push(endDate);
   }
 
@@ -2225,8 +2225,8 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
     SELECT COUNT(*) as count 
     FROM tasks 
     WHERE deadline IS NOT NULL AND deadline != '' 
-    AND DATE(deadline) >= DATE('now') 
-    AND DATE(deadline) <= DATE('now', '+1 day')
+    AND deadline::date >= CURRENT_DATE 
+    AND deadline::date <= (CURRENT_DATE + INTERVAL '1 day')
     AND status NOT IN ('Completato', 'Annullato')
     ${whereAndStr}
   `).get(...params) as any;
@@ -2235,7 +2235,7 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
     SELECT COUNT(*) as count 
     FROM tasks 
     WHERE deadline IS NOT NULL AND deadline != '' 
-    AND DATE(deadline) < DATE('now') 
+    AND deadline::date < CURRENT_DATE 
     AND status NOT IN ('Completato', 'Annullato')
     ${whereAndStr}
   `).get(...params) as any;
@@ -2244,14 +2244,14 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
     SELECT COUNT(*) as count 
     FROM tasks 
     WHERE ((status IN ('In Corso', 'In Attesa'))
-    OR (deadline IS NOT NULL AND deadline != '' AND DATE(deadline) = DATE('now') AND status NOT IN ('Completato', 'Annullato')))
+    OR (deadline IS NOT NULL AND deadline != '' AND deadline::date = CURRENT_DATE AND status NOT IN ('Completato', 'Annullato')))
     ${whereAndStr}
   `).get(...params) as any;
 
   const todayCalls = db.prepare(`
     SELECT COUNT(*) as count 
     FROM calls 
-    WHERE DATE(created_at) = DATE('now')
+    WHERE created_at::date = CURRENT_DATE
     ${filterUserId ? 'AND user_id = ?' : ''}
   `).get(...(filterUserId ? [filterUserId] : [])) as any;
 
@@ -2264,8 +2264,8 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
     LEFT JOIN users u ON c.user_id = u.id
     WHERE 1=1
     ${filterUserId ? 'AND c.user_id = ?' : ''}
-    ${startDate ? 'AND DATE(c.created_at) >= DATE(?)' : ''}
-    ${endDate ? 'AND DATE(c.created_at) <= DATE(?)' : ''}
+    ${startDate ? 'AND c.created_at::date >= ?::date' : ''}
+    ${endDate ? 'AND c.created_at::date <= ?::date' : ''}
     ORDER BY c.created_at DESC
     LIMIT 5
   `).all(...[
@@ -2776,8 +2776,9 @@ app.get('/api/notifications', authMiddleware, (req: any, res) => {
     WHERE assignee_id = ? 
     AND status != 'Completato' 
     AND deadline IS NOT NULL 
-    AND DATE(deadline) <= DATE('now', '+1 day')
-    AND DATE(deadline) >= DATE('now')
+    AND deadline != ''
+    AND deadline::date <= (CURRENT_DATE + INTERVAL '1 day')
+    AND deadline::date >= CURRENT_DATE
   `).all(userId) as any[];
 
   for (const task of upcomingTasks) {
@@ -2808,7 +2809,7 @@ app.delete('/api/notifications/clear-before', authMiddleware, (req: any, res) =>
   const { date } = req.body;
   if (!date) return res.status(400).json({ error: 'Data non specificata' });
   try {
-    const result = db.prepare('DELETE FROM user_notifications WHERE user_id = ? AND DATE(created_at) <= DATE(?)').run(req.user.id, date);
+    const result = db.prepare('DELETE FROM user_notifications WHERE user_id = ? AND created_at::date <= ?::date').run(req.user.id, date);
     res.json({ success: true, deletedCount: result.changes });
   } catch (error) {
     console.error('Error clearing notifications:', error);
@@ -2930,12 +2931,12 @@ app.get('/api/tasks', authMiddleware, (req: any, res) => {
   }
 
   if (startDate) {
-    whereClauses.push('DATE(t.created_at) >= DATE(?)');
+    whereClauses.push('t.created_at::date >= ?::date');
     params.push(startDate);
   }
 
   if (endDate) {
-    whereClauses.push('DATE(t.created_at) <= DATE(?)');
+    whereClauses.push('t.created_at::date <= ?::date');
     params.push(endDate);
   }
 
@@ -2985,11 +2986,11 @@ app.get('/api/tasks', authMiddleware, (req: any, res) => {
     callParams.push(filterUserId);
   }
   if (startDate) {
-    callWhereClauses.push('DATE(c.created_at) >= DATE(?)');
+    callWhereClauses.push('c.created_at::date >= ?::date');
     callParams.push(startDate);
   }
   if (endDate) {
-    callWhereClauses.push('DATE(c.created_at) <= DATE(?)');
+    callWhereClauses.push('c.created_at::date <= ?::date');
     callParams.push(endDate);
   }
   if (clientId) {

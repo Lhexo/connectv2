@@ -22,6 +22,11 @@ export function sanitizeSql(sql: string): string {
 
   s = s.replace(/datetime\s*\(\s*'now'\s*,\s*'-30 hours'\s*\)/gi, "(NOW() - INTERVAL '30 hours')");
   s = s.replace(/datetime\s*\(\s*'now'\s*\)/gi, "NOW()");
+  s = s.replace(/DATE\s*\(\s*'now'\s*,\s*'\+1 day'\s*\)/gi, "(CURRENT_DATE + INTERVAL '1 day')");
+  s = s.replace(/DATE\s*\(\s*'now'\s*,\s*'-?(\d+)\s+day[s]?'\s*\)/gi, "(CURRENT_DATE + INTERVAL '$1 day')");
+  s = s.replace(/DATE\s*\(\s*'now'\s*\)/gi, "CURRENT_DATE");
+  s = s.replace(/DATE\s*\(\s*deadline\s*,\s*'\+1 day'\s*\)/gi, "(deadline::date + INTERVAL '1 day')");
+  s = s.replace(/DATE\s*\(\s*deadline\s*\)/gi, "deadline::date");
   s = s.replace(/MAX\s*\(\s*0\s*,\s*stock\s*-\s*\?\s*\)/gi, 'GREATEST(0, stock - ?)');
 
   if (/INSERT\s+OR\s+IGNORE\s+INTO\s+/i.test(s)) {

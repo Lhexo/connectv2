@@ -543,6 +543,7 @@ export async function initDatabase(): Promise<void> {
       vat_code TEXT DEFAULT '22',
       um TEXT DEFAULT 'pz',
       stock REAL DEFAULT 0,
+      classe_provvigione TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -703,11 +704,13 @@ export async function initDatabase(): Promise<void> {
     'net_size_x REAL DEFAULT 0.0', 'net_size_y REAL DEFAULT 0.0', 'net_size_z REAL DEFAULT 0.0',
     'custom_field1 TEXT', 'custom_field2 TEXT', 'custom_field3 TEXT', 'custom_field4 TEXT',
     'online_promo TEXT', 'online_warranty TEXT', 'online_category_image TEXT', 'online_notes TEXT',
-    'online_customized BOOLEAN DEFAULT FALSE'
+    'online_customized BOOLEAN DEFAULT FALSE',
+    'classe_provvigione TEXT'
   ];
   try {
     const productAddCols = productCols.map(c => `ADD COLUMN IF NOT EXISTS ${c}`).join(', ');
     await pool.query(`ALTER TABLE products ${productAddCols}`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS classe_provvigione TEXT`);
   } catch (e) {
     console.error('[PostgreSQL Engine ERROR] productCols alter table error:', e);
   }
