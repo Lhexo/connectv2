@@ -66,6 +66,10 @@ const workerScript = `
     idleTimeoutMillis: 30000
   });
 
+  pool.on('error', (err) => {
+    console.error('[PG Pool Idle Client Error]', err?.message || err);
+  });
+
   parentPort.on('message', async (req) => {
     try {
       let querySql = req.sql;

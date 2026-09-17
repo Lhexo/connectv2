@@ -5410,15 +5410,22 @@ const handleEasyfattImport = async (req: any, res: any) => {
       let importedCount = 0;
       let updatedCount = 0;
 
-      await withTransaction(async (pgClient) => {
-        for (const raw of customersToUpsert) {
-          const c = mapCustomerNode(raw);
-          if (!c.name) continue;
-          const res = await upsertClientInDb(c, pgClient);
-          if (res.status === 'inserted') importedCount++;
-          if (res.status === 'updated') updatedCount++;
+      // Process in batches / chunks without a monolithic transaction to prevent pooler timeouts
+      const CHUNK_SIZE = 30;
+      for (let i = 0; i < customersToUpsert.length; i += CHUNK_SIZE) {
+        const chunk = customersToUpsert.slice(i, i + CHUNK_SIZE);
+        for (const raw of chunk) {
+          try {
+            const c = mapCustomerNode(raw);
+            if (!c.name) continue;
+            const res = await upsertClientInDb(c);
+            if (res && res.status === 'inserted') importedCount++;
+            if (res && res.status === 'updated') updatedCount++;
+          } catch (err: any) {
+            console.error('[Neon Import Warning]', err?.message || err);
+          }
         }
-      });
+      }
 
       // Cleanup uploaded file
       try { if (tempFilePathToUnlink) fs.unlinkSync(tempFilePathToUnlink); } catch (e) {}
@@ -6196,7 +6203,11 @@ async function upsertClientInDb(c: ReturnType<typeof mapCustomerNode>, pgClient?
   if (!c.name) return { status: 'skipped' };
 
   if (c.payment_name) {
-    ensurePaymentMethodExists(c.payment_name);
+    try {
+      ensurePaymentMethodExists(c.payment_name);
+    } catch (e: any) {
+      console.error('[Neon Import Warning] Error ensuring payment method:', e?.message || e);
+    }
   }
 
   // 1. Direct write/upsert to PostgreSQL on Neon.tech in table `clients`
@@ -6204,93 +6215,72 @@ async function upsertClientInDb(c: ReturnType<typeof mapCustomerNode>, pgClient?
   try {
     pgResult = await upsertClientInPostgres(c, pgClient);
   } catch (err: any) {
-    console.error(`[Neon DB Error] Failed to upsert client "${c.name}" (${c.code || 'no code'}) to Neon:`, err);
-    throw err; // Re-throw so withTransaction can ROLLBACK and report
+    console.error('[Neon Import Warning]', err?.message || err);
   }
 
   // 2. Also keep local SQLite in sync
-  const selectClientByCode = db.prepare('SELECT id FROM clients WHERE LOWER(code) = LOWER(?)');
-  const selectClientByEmail = db.prepare('SELECT id FROM clients WHERE LOWER(email) = LOWER(?)');
-  const selectClientByName = db.prepare('SELECT id FROM clients WHERE LOWER(name) = LOWER(?)');
+  let existingId: number | null = pgResult.id || null;
+  try {
+    const selectClientByCode = db.prepare('SELECT id FROM clients WHERE LOWER(code) = LOWER(?)');
+    const selectClientByEmail = db.prepare('SELECT id FROM clients WHERE LOWER(email) = LOWER(?)');
+    const selectClientByName = db.prepare('SELECT id FROM clients WHERE LOWER(name) = LOWER(?)');
 
-  let existingId: number | null = null;
-  if (c.code) {
-    const match = selectClientByCode.get(c.code) as any;
-    if (match) existingId = match.id;
-  }
-  if (!existingId && c.email) {
-    const match = selectClientByEmail.get(c.email) as any;
-    if (match) existingId = match.id;
-  }
-  if (!existingId && c.name) {
-    const match = selectClientByName.get(c.name) as any;
-    if (match) existingId = match.id;
-  }
+    if (!existingId && c.code) {
+      const match = selectClientByCode.get(c.code) as any;
+      if (match) existingId = match.id;
+    }
+    if (!existingId && c.email) {
+      const match = selectClientByEmail.get(c.email) as any;
+      if (match) existingId = match.id;
+    }
+    if (!existingId && c.name) {
+      const match = selectClientByName.get(c.name) as any;
+      if (match) existingId = match.id;
+    }
 
-  if (existingId) {
-    db.prepare(`
-      UPDATE clients SET 
-        code = ?, name = ?, web_login = ?, address = ?, postcode = ?, city = ?, province = ?, country = ?,
-        fiscal_code = ?, vat_code = ?, sdi_pec = ?, phone = ?, cell_phone = ?, fax = ?, email = ?, pec = ?,
-        contact = ?, agente = ?, delivery_name = ?, delivery_address = ?, delivery_postcode = ?,
-        delivery_city = ?, delivery_province = ?, delivery_country = ?, price_list = ?, payment_name = ?, payment_bank = ?,
-        custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?, notes = ?
-      WHERE id = ?
-    `).run(
-      c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
-      c.fiscal_code, c.vat_code, c.sdi_pec, c.phone, c.cell_phone, c.fax, c.email, c.pec,
-      c.contact, c.agente, c.delivery_name, c.delivery_address, c.delivery_postcode,
-      c.delivery_city, c.delivery_province, c.delivery_country, c.price_list, c.payment_name, c.payment_bank,
-      c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes,
-      existingId
-    );
-  } else if (pgResult.id) {
-    db.prepare(`
-      INSERT OR REPLACE INTO clients (
-        id, code, name, web_login, address, postcode, city, province, country,
-        fiscal_code, vat_code, sdi_pec, phone, cell_phone, fax, email, pec,
-        contact, agente, delivery_name, delivery_address, delivery_postcode,
-        delivery_city, delivery_province, delivery_country, price_list, payment_name, payment_bank,
-        custom_field1, custom_field2, custom_field3, custom_field4, notes
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?
-      )
-    `).run(
-      pgResult.id,
-      c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
-      c.fiscal_code, c.vat_code, c.sdi_pec, c.phone, c.cell_phone, c.fax, c.email, c.pec,
-      c.contact, c.agente, c.delivery_name, c.delivery_address, c.delivery_postcode,
-      c.delivery_city, c.delivery_province, c.delivery_country, c.price_list, c.payment_name, c.payment_bank,
-      c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes
-    );
-    existingId = pgResult.id;
-  } else {
-    const result = db.prepare(`
-      INSERT INTO clients (
-        code, name, web_login, address, postcode, city, province, country,
-        fiscal_code, vat_code, sdi_pec, phone, cell_phone, fax, email, pec,
-        contact, agente, delivery_name, delivery_address, delivery_postcode,
-        delivery_city, delivery_province, delivery_country, price_list, payment_name, payment_bank,
-        custom_field1, custom_field2, custom_field3, custom_field4, notes
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?
-      )
-    `).run(
-      c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
-      c.fiscal_code, c.vat_code, c.sdi_pec, c.phone, c.cell_phone, c.fax, c.email, c.pec,
-      c.contact, c.agente, c.delivery_name, c.delivery_address, c.delivery_postcode,
-      c.delivery_city, c.delivery_province, c.delivery_country, c.price_list, c.payment_name, c.payment_bank,
-      c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes
-    );
-    if (!existingId) existingId = Number(result.lastInsertRowid);
+    if (existingId) {
+      db.prepare(`
+        UPDATE clients SET 
+          code = ?, name = ?, web_login = ?, address = ?, postcode = ?, city = ?, province = ?, country = ?,
+          fiscal_code = ?, vat_code = ?, sdi_pec = ?, phone = ?, cell_phone = ?, fax = ?, email = ?, pec = ?,
+          contact = ?, agente = ?, delivery_name = ?, delivery_address = ?, delivery_postcode = ?,
+          delivery_city = ?, delivery_province = ?, delivery_country = ?, price_list = ?, payment_name = ?, payment_bank = ?,
+          custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?, notes = ?
+        WHERE id = ?
+      `).run(
+        c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
+        c.fiscal_code, c.vat_code, c.sdi_pec, c.phone, c.cell_phone, c.fax, c.email, c.pec,
+        c.contact, c.agente, c.delivery_name, c.delivery_address, c.delivery_postcode,
+        c.delivery_city, c.delivery_province, c.delivery_country, c.price_list, c.payment_name, c.payment_bank,
+        c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes,
+        existingId
+      );
+    } else {
+      const result = db.prepare(`
+        INSERT INTO clients (
+          code, name, web_login, address, postcode, city, province, country,
+          fiscal_code, vat_code, sdi_pec, phone, cell_phone, fax, email, pec,
+          contact, agente, delivery_name, delivery_address, delivery_postcode,
+          delivery_city, delivery_province, delivery_country, price_list, payment_name, payment_bank,
+          custom_field1, custom_field2, custom_field3, custom_field4, notes
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?
+        )
+      `).run(
+        c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
+        c.fiscal_code, c.vat_code, c.sdi_pec, c.phone, c.cell_phone, c.fax, c.email, c.pec,
+        c.contact, c.agente, c.delivery_name, c.delivery_address, c.delivery_postcode,
+        c.delivery_city, c.delivery_province, c.delivery_country, c.price_list, c.payment_name, c.payment_bank,
+        c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes
+      );
+      if (!existingId) existingId = Number(result.lastInsertRowid);
+    }
+  } catch (syncErr: any) {
+    console.error('[Neon Import Warning] SQLite sync error:', syncErr?.message || syncErr);
   }
 
   return pgResult.status !== 'skipped' ? pgResult : { status: (existingId ? 'updated' : 'inserted') as 'inserted' | 'updated', id: existingId };
@@ -6429,15 +6419,21 @@ app.post('/api/easyfatt/import-clients', authMiddleware, upload.single('file'), 
       const sheet = workbook.Sheets[sheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' }) as any[];
 
-      await withTransaction(async (pgClient) => {
-        for (const row of rows) {
-          const clientData = mapCustomerNode(row);
-          if (!clientData.name) continue;
-          const res = await upsertClientInDb(clientData, pgClient);
-          if (res.status === 'inserted') importedCount++;
-          if (res.status === 'updated') updatedCount++;
+      const CHUNK_SIZE = 30;
+      for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+        const chunk = rows.slice(i, i + CHUNK_SIZE);
+        for (const row of chunk) {
+          try {
+            const clientData = mapCustomerNode(row);
+            if (!clientData.name) continue;
+            const res = await upsertClientInDb(clientData);
+            if (res && res.status === 'inserted') importedCount++;
+            if (res && res.status === 'updated') updatedCount++;
+          } catch (err: any) {
+            console.error('[Neon Import Warning]', err?.message || err);
+          }
         }
-      });
+      }
     } else {
       const xmlContent = fs.readFileSync(req.file.path, 'utf8');
       const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "", parseTagValue: false });
@@ -6458,15 +6454,21 @@ app.post('/api/easyfatt/import-clients', authMiddleware, upload.single('file'), 
         return res.status(400).json({ error: "Mancano clienti validi nel file." });
       }
 
-      await withTransaction(async (pgClient) => {
-        for (const item of items) {
-          const clientData = mapCustomerNode(item);
-          if (!clientData.name) continue;
-          const res = await upsertClientInDb(clientData, pgClient);
-          if (res.status === 'inserted') importedCount++;
-          if (res.status === 'updated') updatedCount++;
+      const CHUNK_SIZE = 30;
+      for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+        const chunk = items.slice(i, i + CHUNK_SIZE);
+        for (const item of chunk) {
+          try {
+            const clientData = mapCustomerNode(item);
+            if (!clientData.name) continue;
+            const res = await upsertClientInDb(clientData);
+            if (res && res.status === 'inserted') importedCount++;
+            if (res && res.status === 'updated') updatedCount++;
+          } catch (err: any) {
+            console.error('[Neon Import Warning]', err?.message || err);
+          }
         }
-      });
+      }
     }
 
     // Cleanup uploaded file

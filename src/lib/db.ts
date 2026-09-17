@@ -46,7 +46,7 @@ export const pool = new Pool({
 });
 
 pool.on('error', (err) => {
-  console.warn(`[Neon PostgreSQL Pool Notice on ${maskedUrl}]:`, err?.message || err);
+  console.error('[PG Pool Idle Client Error]', err?.message || err);
 });
 
 export async function queryWithRetry<T = any>(
