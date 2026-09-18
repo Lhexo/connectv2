@@ -1,5 +1,5 @@
 {
-  "name": "Remix Remix  Connect",
+  "name": "Connect v2",
   "description": "Piattaforma interna per la gestione di task, clienti e coordinamento tra reparti per distributori del settore estetico.",
   "requestFramePermissions": [
     "camera"

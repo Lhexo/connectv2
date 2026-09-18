@@ -19,6 +19,7 @@ import {
   getMaskedDbUrl, 
   ensureClientInSqlite,
   initDatabase,
+  initPgSchema,
   createOrderInPostgres,
   updateOrderInPostgres,
   deleteOrderInPostgres,
@@ -6831,15 +6832,6 @@ app.use((err: any, req: any, res: any, next: any) => {
 });
 
 async function startServer() {
-  // Schema Init Isolation: safely execute database initialization without crashing HTTP server
-  try {
-    console.log('[PostgreSQL Engine] Initializing PostgreSQL schema...');
-    await initDatabase();
-    console.log('[PostgreSQL Engine] Database schema initialized successfully.');
-  } catch (err) {
-    console.error('[DB INIT ERROR]', err);
-  }
-
   const isRunningFromDist = 
     (typeof process !== 'undefined' && process.argv[1]?.includes(path.join('dist', 'server'))) ||
     (typeof __filename !== 'undefined' && __filename.includes(path.join('dist', 'server'))) ||
@@ -6912,9 +6904,22 @@ async function startServer() {
     });
   }
 
+  // 1. Apri subito la porta per risolvere il 502 Bad Gateway e superare l'Health Check di Railway
   httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server HTTP attivo sulla porta ${PORT}`);
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
+
+  // 2. Connettiti al database senza bloccare l'avvio del server
+  (async () => {
+    try {
+      console.log('[PostgreSQL Engine] Connessione al database...');
+      await initPgSchema();
+      console.log('[PostgreSQL Engine] Schema inizializzato con successo!');
+    } catch (err) {
+      console.error('[PostgreSQL Engine ERROR] Impossibile connettersi al DB:', err);
+    }
+  })();
 }
 
 startServer().catch(err => {

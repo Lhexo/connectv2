@@ -1268,6 +1268,8 @@ export async function initDatabase(): Promise<void> {
   }
 }
 
+export const initPgSchema = initDatabase;
+
 export async function ensureClientInSqlite(clientId: any, _sqliteDb?: any): Promise<number | null> {
   if (clientId === undefined || clientId === null || clientId === '') return null;
   const numId = Number(clientId);
