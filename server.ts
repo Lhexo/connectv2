@@ -202,6 +202,19 @@ app.use((req: any, res: any, next: any) => {
   next();
 });
 
+// Healthcheck endpoints for Railway, Load Balancers, Docker, and K8s
+app.get('/healthcheck', (req: any, res: any) => {
+  res.status(200).send('OK');
+});
+
+app.get('/health', (req: any, res: any) => {
+  res.status(200).send('OK');
+});
+
+app.get('/api/health', (req: any, res: any) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // Detailed logger for Easyfatt integrations to diagnose connection errors
 app.use((req: any, res: any, next: any) => {
   if (req.url && req.url.includes('/api/easyfatt')) {
@@ -6863,9 +6876,8 @@ async function startServer() {
     process.env.NODE_ENV = 'production';
   }
 
-  // Force Express to listen on host 0.0.0.0 and port process.env.PORT || 8080 (or 3000 in AI Studio sandbox)
-  const isAiStudio = Boolean(process.env.APPLET_ID) && !isCloudPlatform;
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : (isAiStudio ? 3000 : 8080);
+  // Force Express to listen on host 0.0.0.0 and port process.env.PORT || 3000
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   const httpServer = http.createServer(app);
 
@@ -6906,6 +6918,7 @@ async function startServer() {
 
   // 1. Apri subito la porta per risolvere il 502 Bad Gateway e superare l'Health Check di Railway
   httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server in ascolto su 0.0.0.0:${PORT}`);
     console.log(`Server HTTP attivo sulla porta ${PORT}`);
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
@@ -6917,7 +6930,7 @@ async function startServer() {
       await initPgSchema();
       console.log('[PostgreSQL Engine] Schema inizializzato con successo!');
     } catch (err) {
-      console.error('[PostgreSQL Engine ERROR] Impossibile connettersi al DB:', err);
+      console.error('[DB INIT ERROR]', err);
     }
   })();
 }
