@@ -5440,7 +5440,7 @@ const handleEasyfattImport = async (req: any, res: any) => {
       let updatedCount = 0;
 
       // Process in batches / chunks without a monolithic transaction to prevent pooler timeouts
-      const CHUNK_SIZE = 30;
+      const CHUNK_SIZE = 100;
       for (let i = 0; i < customersToUpsert.length; i += CHUNK_SIZE) {
         const chunk = customersToUpsert.slice(i, i + CHUNK_SIZE);
         for (const raw of chunk) {
@@ -5515,8 +5515,8 @@ const handleEasyfattImport = async (req: any, res: any) => {
       }
     }
 
-    // 3. Process in batches (chunks of 50) for PostgreSQL (Neon) and local database without monolithic transactions
-    const PRODUCT_CHUNK_SIZE = 50;
+    // 3. Process in batches (chunks of 100) for PostgreSQL (Neon) and local database without monolithic transactions
+    const PRODUCT_CHUNK_SIZE = 100;
     for (let i = 0; i < mappedProducts.length; i += PRODUCT_CHUNK_SIZE) {
       const chunk = mappedProducts.slice(i, i + PRODUCT_CHUNK_SIZE);
       try {

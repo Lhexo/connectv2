@@ -360,7 +360,7 @@ export async function upsertProductsBatchInPostgres(
   let totalInserted = 0;
   let totalUpdated = 0;
 
-  const BATCH_SIZE = 50;
+  const BATCH_SIZE = 100;
   for (let i = 0; i < validProducts.length; i += BATCH_SIZE) {
     const batch = validProducts.slice(i, i + BATCH_SIZE);
     try {
@@ -569,7 +569,7 @@ export async function upsertClientsBatchInPostgres(
   let totalInserted = 0;
   let totalUpdated = 0;
 
-  const BATCH_SIZE = 50;
+  const BATCH_SIZE = 100;
   for (let i = 0; i < validClients.length; i += BATCH_SIZE) {
     const batch = validClients.slice(i, i + BATCH_SIZE);
     try {
