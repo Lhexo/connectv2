@@ -81,7 +81,10 @@ const workerScript = `
     connectionString: workerData.connectionString,
     ssl: { rejectUnauthorized: false },
     max: 10,
-    idleTimeoutMillis: 30000
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+    statement_timeout: 10000,
+    query_timeout: 10000
   });
 
   pool.on('error', (err) => {
@@ -183,8 +186,12 @@ function executeSync(type: 'all' | 'get' | 'run' | 'exec', rawSql: string, param
   Atomics.store(int32, 0, 1);
   w.postMessage({ type, sql: pgSql, params });
 
-  // Wait for worker response
-  Atomics.wait(int32, 0, 1);
+  // Wait for worker response with 10s timeout (Fail Fast)
+  const waitRes = Atomics.wait(int32, 0, 1, 10000);
+  if (waitRes === 'timed-out') {
+    Atomics.store(int32, 0, 0);
+    throw new Error(`[Postgres Sync Driver Timeout] Query timed out after 10000ms: "${pgSql.substring(0, 100)}"`);
+  }
 
   const len = int32[2];
   const buf = Buffer.from(sab, 16, len);

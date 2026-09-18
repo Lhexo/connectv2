@@ -6883,10 +6883,12 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     console.log(`[Server Boot] Serving static assets from: ${distPath}`);
+    // 1. Servire asset statici
     app.use(express.static(distPath, {
       maxAge: '1d',
       index: false,
     }));
+    // 3. Fallback SPA per rotte React/Vite
     app.get('*', (req, res) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/easyfatt') || req.path.startsWith('/uploadarticoli') || req.path.startsWith('/downloadordini') || req.path.startsWith('/health')) {
         return res.status(404).json({ error: 'Endpoint non trovato' });
@@ -6899,6 +6901,17 @@ async function startServer() {
       }
     });
   }
+
+  // 4. Middleware Globale di Gestione Errori Express (In coda a tutte le rotte)
+  app.use((err: any, req: any, res: any, next: any) => {
+    console.error('[EXPRESS ERROR]', err);
+    if (!res.headersSent) {
+      res.status(err.status || err.statusCode || 500).json({ 
+        error: 'Internal Server Error', 
+        message: err.message || 'Si è verificato un errore imprevisto sul server' 
+      });
+    }
+  });
 
   // 1. Avvio Immediato del Server HTTP (Priorità Assoluta)
   httpServer.listen(Number(PORT), HOST, () => {

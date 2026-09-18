@@ -9,6 +9,11 @@ export function getConnectionString(): string {
     return 'postgresql://postgres:postgres@localhost:5432/connectbeauty?sslmode=disable';
   }
   let finalUri = uri.trim();
+  // Rimozione forzata dell'endpoint con -pooler per prevenire blocchi TCP / PgBouncer su server persistenti
+  if (finalUri.includes('-pooler.')) {
+    console.log('[DB NOTICE] Sostituzione endpoint Neon pooled (-pooler) con endpoint diretto per evitare socket timeout.');
+    finalUri = finalUri.replace(/-pooler\./g, '.');
+  }
   if (!finalUri.includes('sslmode=')) {
     finalUri += (finalUri.includes('?') ? '&' : '?') + 'sslmode=require';
   }
@@ -39,8 +44,10 @@ export const pool = new Pool({
   connectionString,
   ssl: isSslNeeded ? { rejectUnauthorized: false } : false,
   max: 10,
-  idleTimeoutMillis: 60000,
-  connectionTimeoutMillis: 30000,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000, // Max 5s per connettersi (Fail Fast)
+  statement_timeout: 10000,      // Max 10s per eseguire una query (Fail Fast)
+  query_timeout: 10000,          // Max 10s per query
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
 });
