@@ -129,9 +129,9 @@ const workerScript = `
       int32[2] = encoded.length;
       Atomics.store(int32, 0, 2);
       Atomics.notify(int32, 0, 1);
-    } catch (err: any) {
+    } catch (err) {
       // Gracefully ignore duplicate column / already exists errors during dynamic schema alterations
-      const errMsg = err?.message || String(err);
+      const errMsg = (err && err.message) ? err.message : String(err);
       if (/already exists/i.test(errMsg) && (/ALTER\s+TABLE/i.test(req.sql) || /ADD\s+COLUMN/i.test(req.sql))) {
         const result = { ok: true, rows: [], rowCount: 0, lastInsertRowid: 0 };
         const encoded = Buffer.from(JSON.stringify(result));
@@ -164,6 +164,21 @@ function getWorker(): Worker {
         bufferSize: BUFFER_SIZE
       }
     });
+
+    worker.on('error', (err) => {
+      console.error('[Postgres Sync Driver Worker Error]', err);
+      worker = null;
+      Atomics.store(int32, 0, 3);
+      Atomics.notify(int32, 0, 1);
+    });
+
+    worker.on('exit', (code) => {
+      if (code !== 0) {
+        console.error(`[Postgres Sync Driver Worker Exited with code ${code}]`);
+      }
+      worker = null;
+    });
+
     // Unref so worker doesn't keep node alive if main thread exits
     worker.unref();
   }

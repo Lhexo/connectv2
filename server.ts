@@ -216,34 +216,55 @@ app.use((req: any, res: any, next: any) => {
 });
 
 // Auth Middleware with support for session, headers, Bearer tokens, and Roleplay/Simulation
-const authMiddleware = (req: any, res: any, next: any) => {
-  let userId = req.cookies?.userId || req.headers?.['x-user-id'] || req.headers?.['x-simulation-user'] || req.query?.userId;
-  
-  const authHeader = req.headers?.authorization || req.headers?.Authorization;
-  if (!userId && authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
-    userId = authHeader.substring(7).trim();
+const authMiddleware = async (req: any, res: any, next: any) => {
+  try {
+    let userId = req.cookies?.userId || req.headers?.['x-user-id'] || req.headers?.['x-simulation-user'] || req.query?.userId;
+    
+    const authHeader = req.headers?.authorization || req.headers?.Authorization;
+    if (!userId && authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      userId = authHeader.substring(7).trim();
+    }
+
+    const isRoleplay = req.headers?.['x-roleplay-mode'] === 'true' || req.query?.roleplay === 'true';
+
+    let user: any = null;
+    if (userId) {
+      const isNum = !isNaN(Number(userId));
+      const query = isNum 
+        ? 'SELECT * FROM users WHERE id = $1 OR LOWER(email) = LOWER($2) OR LOWER(name) = LOWER($3) LIMIT 1'
+        : 'SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(name) = LOWER($2) LIMIT 1';
+      const params = isNum ? [Number(userId), String(userId), String(userId)] : [String(userId), String(userId)];
+      
+      const resPg = await pool.query(query, params).catch(() => null);
+      if (resPg && resPg.rows && resPg.rows.length > 0) {
+        user = resPg.rows[0];
+      }
+    }
+
+    // Graceful fallback for roleplay, simulation or non-production if user not found
+    if (!user && (isRoleplay || process.env.NODE_ENV !== 'production')) {
+      const adminRes = await pool.query("SELECT * FROM users WHERE role = 'admin' LIMIT 1").catch(() => null);
+      if (adminRes && adminRes.rows && adminRes.rows.length > 0) {
+        user = adminRes.rows[0];
+      } else {
+        const anyRes = await pool.query("SELECT * FROM users LIMIT 1").catch(() => null);
+        if (anyRes && anyRes.rows && anyRes.rows.length > 0) {
+          user = anyRes.rows[0];
+        }
+      }
+    }
+
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    req.user = user;
+    req.isRoleplay = isRoleplay;
+    next();
+  } catch (err: any) {
+    console.error('[AUTH MIDDLEWARE ERROR]', err);
+    return res.status(401).json({ error: 'Unauthorized', message: err?.message || 'Authentication error' });
   }
-
-  const isRoleplay = req.headers?.['x-roleplay-mode'] === 'true' || req.query?.roleplay === 'true';
-
-  let user: any = null;
-  if (userId) {
-    user = db.prepare('SELECT * FROM users WHERE id = ? OR LOWER(email) = LOWER(?) OR LOWER(name) = LOWER(?)').get(userId, userId, userId);
-  }
-
-  // Graceful fallback for roleplay, simulation or non-production if user not found
-  if (!user && (isRoleplay || process.env.NODE_ENV !== 'production')) {
-    user = db.prepare('SELECT * FROM users WHERE role = ? LIMIT 1').get('admin') || 
-           db.prepare('SELECT * FROM users LIMIT 1').get();
-  }
-
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  req.user = user;
-  req.isRoleplay = isRoleplay;
-  next();
 };
 
 // Multer setup for file uploads
@@ -299,60 +320,22 @@ const createNotification = (userId: number, type: string, title: string, message
 
 // API Routes
 app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
-  const rawEmail = typeof email === 'string' ? email.trim() : '';
-  const rawPassword = typeof password === 'string' ? password.trim() : '';
-  console.log(`Login attempt for: ${rawEmail}`);
-  
-  if (!rawEmail || !rawPassword) {
-    return res.status(400).json({ error: 'Email e password sono obbligatori', success: false });
-  }
-
-  let searchEmail = rawEmail.toLowerCase()
-    .replace('@masterbeautyitalia.com', '@connectitalia.com')
-    .replace('@masterbeauty.com', '@connect.com');
-
-  // 1. Direct SQLite match (both original and converted email)
-  let user = db.prepare('SELECT * FROM users WHERE (LOWER(email) = LOWER(?) OR LOWER(email) = LOWER(?)) AND password = ?')
-    .get(searchEmail, rawEmail, rawPassword) as any;
-
-  // 2. Resilience for Master / Admin accounts
-  const isAdminEmail = [
-    'info@masterbeautyitalia.com',
-    'info@connectitalia.com',
-    'admin@connectitalia.com',
-    'admin'
-  ].includes(rawEmail.toLowerCase());
-
-  const knownAdminPasswords = [
-    'Genmb456!',
-    'Genmb456',
-    'password123',
-    'admin',
-    'admin123',
-    'MasterBeauty123!',
-    'masterbeauty',
-    'masterbeauty123'
-  ];
-
-  if (!user && isAdminEmail && knownAdminPasswords.includes(rawPassword)) {
-    user = (
-      db.prepare("SELECT * FROM users WHERE role = 'admin' OR LOWER(email) = LOWER(?) OR LOWER(email) = LOWER(?)")
-        .get('info@connectitalia.com', 'info@masterbeautyitalia.com') ||
-      db.prepare("SELECT * FROM users WHERE role = 'admin' LIMIT 1").get()
-    ) as any;
-
-    if (user) {
-      console.log(`[Auth Resilience] Admin user authenticated via master fallback for ${rawEmail}`);
-      try {
-        db.prepare('UPDATE users SET password = ? WHERE id = ?').run(rawPassword, user.id);
-        queryWithRetry('UPDATE users SET password = $1 WHERE id = $2', [rawPassword, user.id]).catch(() => {});
-      } catch (e) {}
+  try {
+    const { email, password } = req.body;
+    const rawEmail = typeof email === 'string' ? email.trim() : '';
+    const rawPassword = typeof password === 'string' ? password.trim() : '';
+    console.log(`Login attempt for: ${rawEmail}`);
+    
+    if (!rawEmail || !rawPassword) {
+      return res.status(400).json({ error: 'Email e password sono obbligatori', success: false });
     }
-  }
 
-  // 3. Fallback check in Postgres if not found in SQLite
-  if (!user) {
+    let searchEmail = rawEmail.toLowerCase()
+      .replace('@masterbeautyitalia.com', '@connectitalia.com')
+      .replace('@masterbeauty.com', '@connect.com');
+
+    // 1. Direct PostgreSQL match (both original and converted email)
+    let user: any = null;
     try {
       const pgUserRes = await queryWithRetry(
         'SELECT * FROM users WHERE (LOWER(email) = LOWER($1) OR LOWER(email) = LOWER($2)) AND password = $3 LIMIT 1',
@@ -360,36 +343,72 @@ app.post('/api/login', async (req, res) => {
       );
       if (pgUserRes.rows && pgUserRes.rows.length > 0) {
         user = pgUserRes.rows[0];
-        try {
-          const exists = db.prepare('SELECT id FROM users WHERE id = ?').get(user.id);
-          if (!exists) {
-            db.prepare('INSERT INTO users (id, name, email, password, department, role) VALUES (?, ?, ?, ?, ?, ?)')
-              .run(user.id, user.name, user.email, user.password, user.department || '', user.role || 'user');
-          } else {
-            db.prepare('UPDATE users SET email = ?, password = ?, role = ? WHERE id = ?')
-              .run(user.email, user.password, user.role, user.id);
-          }
-        } catch (e) {}
       }
-    } catch (pgErr: any) {
-      console.warn('[Login Postgres check warning]:', pgErr?.message || pgErr);
+    } catch (dbErr: any) {
+      console.warn('[Login DB direct query warning]:', dbErr?.message || dbErr);
     }
-  }
 
-  if (user) {
-    console.log(`Login successful for: ${rawEmail}`);
-    // Set cookie with SameSite=None and Secure for iframe compatibility
-    res.cookie('userId', user.id, { 
-      httpOnly: true, 
-      sameSite: 'none', 
-      secure: true,
-      maxAge: 24 * 60 * 60 * 1000 // 24 hours
-    });
-    const { password: _, ...userWithoutPassword } = user;
-    res.json({ user: userWithoutPassword, success: true });
-  } else {
-    console.log(`Login failed for: ${rawEmail}`);
-    res.status(401).json({ error: 'Credenziali non valide', success: false });
+    // 2. Resilience for Master / Admin accounts
+    const isAdminEmail = [
+      'info@masterbeautyitalia.com',
+      'info@connectitalia.com',
+      'admin@connectitalia.com',
+      'admin'
+    ].includes(rawEmail.toLowerCase());
+
+    const knownAdminPasswords = [
+      'Genmb456!',
+      'Genmb456',
+      'password123',
+      'admin',
+      'admin123',
+      'MasterBeauty123!',
+      'masterbeauty',
+      'masterbeauty123'
+    ];
+
+    if (!user && isAdminEmail && knownAdminPasswords.includes(rawPassword)) {
+      try {
+        const adminRes = await queryWithRetry(
+          "SELECT * FROM users WHERE role = 'admin' OR LOWER(email) = LOWER($1) OR LOWER(email) = LOWER($2) LIMIT 1",
+          ['info@connectitalia.com', 'info@masterbeautyitalia.com']
+        );
+        if (adminRes.rows && adminRes.rows.length > 0) {
+          user = adminRes.rows[0];
+        } else {
+          const anyAdmin = await queryWithRetry("SELECT * FROM users WHERE role = 'admin' LIMIT 1");
+          if (anyAdmin.rows && anyAdmin.rows.length > 0) {
+            user = anyAdmin.rows[0];
+          }
+        }
+
+        if (user) {
+          console.log(`[Auth Resilience] Admin user authenticated via master fallback for ${rawEmail}`);
+          await queryWithRetry('UPDATE users SET password = $1 WHERE id = $2', [rawPassword, user.id]).catch(() => {});
+        }
+      } catch (e) {
+        console.warn('[Admin fallback error]:', e);
+      }
+    }
+
+    if (user) {
+      console.log(`Login successful for: ${rawEmail}`);
+      // Set cookie with SameSite=None and Secure for iframe compatibility
+      res.cookie('userId', user.id, { 
+        httpOnly: true, 
+        sameSite: 'none', 
+        secure: true,
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+      });
+      const { password: _, ...userWithoutPassword } = user;
+      return res.json({ user: userWithoutPassword, success: true });
+    } else {
+      console.log(`Login failed for: ${rawEmail}`);
+      return res.status(401).json({ error: 'Credenziali non valide', success: false });
+    }
+  } catch (err: any) {
+    console.error('[LOGIN API FATAL ERROR]', err);
+    return res.status(401).json({ error: 'Credenziali non valide', success: false, message: err?.message || 'Login error' });
   }
 });
 
@@ -398,16 +417,25 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-app.get('/api/me', (req, res) => {
-  let userId = req.cookies?.userId || req.headers?.['x-user-id'] || req.query?.userId;
+app.get('/api/me', async (req, res) => {
+  try {
+    let userId = req.cookies?.userId || req.headers?.['x-user-id'] || req.query?.userId;
 
-  if (!userId) return res.status(401).json({ error: 'Not logged in' });
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
-  if (user) {
-    const { password: _, ...userWithoutPassword } = user;
-    res.json(userWithoutPassword);
-  } else {
-    res.status(404).json({ error: 'User not found' });
+    if (!userId) return res.status(401).json({ error: 'Not logged in' });
+    const isNum = !isNaN(Number(userId));
+    const query = isNum ? 'SELECT * FROM users WHERE id = $1 LIMIT 1' : 'SELECT * FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(name) = LOWER($1) LIMIT 1';
+    const params = [userId];
+    const userRes = await pool.query(query, params).catch(() => null);
+    const user = userRes?.rows?.[0];
+    if (user) {
+      const { password: _, ...userWithoutPassword } = user;
+      return res.json(userWithoutPassword);
+    } else {
+      return res.status(404).json({ error: 'User not found' });
+    }
+  } catch (err: any) {
+    console.error('[API ME ERROR]', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 
