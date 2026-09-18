@@ -160,22 +160,6 @@ function ensurePaymentMethodExists(paymentName: string) {
   }
 }
 
-// Migrate old email domains to new branding if table already exists
-try {
-  const usersToMigrate = db.prepare("SELECT id, email FROM users WHERE email LIKE '%@masterbeautyitalia.com' OR email LIKE '%@masterbeauty.com'").all() as { id: number, email: string }[];
-  for (const u of usersToMigrate) {
-    const newEmail = u.email.toLowerCase()
-      .replace('@masterbeautyitalia.com', '@connectitalia.com')
-      .replace('@masterbeauty.com', '@connect.com');
-    const exists = db.prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)").get(newEmail);
-    if (!exists) {
-      db.prepare("UPDATE users SET email = ? WHERE id = ?").run(newEmail, u.id);
-    }
-  }
-} catch (e) {
-  console.error('Email migration error:', e);
-}
-
 // Runtime secret reading (injected via environment variables, never hardcoded or baked in Docker images)
 const PAYLOAD_SECRET = process.env.PAYLOAD_SECRET;
 
@@ -6876,8 +6860,8 @@ async function startServer() {
     process.env.NODE_ENV = 'production';
   }
 
-  // Force Express to listen on host 0.0.0.0 and port process.env.PORT || 3000
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = process.env.PORT || 3000;
+  const HOST = '0.0.0.0';
 
   const httpServer = http.createServer(app);
 
@@ -6904,7 +6888,7 @@ async function startServer() {
       index: false,
     }));
     app.get('*', (req, res) => {
-      if (req.path.startsWith('/api') || req.path.startsWith('/easyfatt') || req.path.startsWith('/uploadarticoli') || req.path.startsWith('/downloadordini')) {
+      if (req.path.startsWith('/api') || req.path.startsWith('/easyfatt') || req.path.startsWith('/uploadarticoli') || req.path.startsWith('/downloadordini') || req.path.startsWith('/health')) {
         return res.status(404).json({ error: 'Endpoint non trovato' });
       }
       const indexPath = path.join(distPath, 'index.html');
@@ -6916,21 +6900,37 @@ async function startServer() {
     });
   }
 
-  // 1. Apri subito la porta per risolvere il 502 Bad Gateway e superare l'Health Check di Railway
-  httpServer.listen(PORT, '0.0.0.0', () => {
+  // 1. Avvio Immediato del Server HTTP (Priorità Assoluta)
+  httpServer.listen(Number(PORT), HOST, () => {
+    console.log(`[SERVER OK] HTTP Server in ascolto su http://${HOST}:${PORT}`);
     console.log(`Server in ascolto su 0.0.0.0:${PORT}`);
     console.log(`Server HTTP attivo sulla porta ${PORT}`);
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
 
-  // 2. Connettiti al database senza bloccare l'avvio del server
+  // 2. Inizializzazione DB Asincrona e Non Bloccante
   (async () => {
     try {
-      console.log('[PostgreSQL Engine] Connessione al database...');
+      console.log('[NEON PG POOL INIT] Connessione a PostgreSQL...');
       await initPgSchema();
-      console.log('[PostgreSQL Engine] Schema inizializzato con successo!');
+      console.log('[NEON PG POOL INIT] Schema e database pronti!');
+
+      // Migrate old email domains to new branding if needed
+      try {
+        const usersToMigrate = db.prepare("SELECT id, email FROM users WHERE email LIKE '%@masterbeautyitalia.com' OR email LIKE '%@masterbeauty.com'").all() as { id: number, email: string }[];
+        for (const u of usersToMigrate) {
+          const newEmail = u.email.toLowerCase()
+            .replace('@masterbeautyitalia.com', '@connectitalia.com')
+            .replace('@masterbeauty.com', '@connect.com');
+          const exists = db.prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)").get(newEmail);
+          if (!exists) {
+            db.prepare("UPDATE users SET email = ? WHERE id = ?").run(newEmail, u.id);
+          }
+        }
+      } catch (migErr) {
+        // Safe to ignore if table not present
+      }
     } catch (err) {
-      console.error('[DB INIT ERROR]', err);
+      console.error('[NEON PG ERROR] Errore durante l\'inizializzazione del DB:', err);
     }
   })();
 }
