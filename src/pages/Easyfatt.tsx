@@ -109,6 +109,7 @@ interface Product {
   online_notes?: string | null;
   online_customized?: number | null;
   classe_provvigione?: string | null;
+  [key: string]: any;
 }
 
 interface OrderItem {
