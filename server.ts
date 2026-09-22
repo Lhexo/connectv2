@@ -4688,6 +4688,8 @@ app.get('/api/easyfatt/export-orders', authMiddleware, async (req: any, res: any
         whereConditions.push(`o.id IN (${placeholders})`);
         params.push(...idArray);
       }
+    } else {
+      whereConditions.push(`(o.is_imported = false OR o.is_imported IS NULL OR o.is_imported = 0)`);
     }
 
     if (isUserAgent(req.user) && !isUserAdmin(req.user)) {
@@ -4791,6 +4793,9 @@ async function handleEasyfattOrderDownload(req: any, res: any) {
     
     // Esclude ordini ancora in stato bozza non confermati dall'agente
     query += " AND (o.status != 'Bozza' OR o.status IS NULL)";
+
+    // Esclude categoricamente gli ordini storici importati da file XML (utilizzati esclusivamente per fini statistici o consultazione interna)
+    query += " AND (o.is_imported = false OR o.is_imported IS NULL OR o.is_imported = 0)";
 
     // Finestra di grazia 30 ore per Danea Easyfatt:
     // Restituisce tutti gli ordini non ancora sincronizzati (is_synced = FALSE / NULL)
@@ -6201,10 +6206,10 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
       const paymentBank = String(doc.PaymentBank || doc.paymentbank || '').trim();
       const internalComment = String(doc.InternalComment || doc.internalcomment || doc.Notes || doc.notes || '').trim();
 
-      // Insert Historical Order (is_imported = true) in SQLite
+      // Insert Historical Order (is_imported = true, is_synced = true) in SQLite
       const insertOrderResult = await queryRun(`
-        INSERT INTO orders (client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Esportato', true)
+        INSERT INTO orders (client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported, is_synced, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Esportato', 1, 1, '2000-01-01 00:00:00')
       `, [clientMatch.id,
         user.id,
         docDate,
@@ -6306,16 +6311,21 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
         try {
           await pgClient.query('BEGIN');
           const pgOrderRes = await pgClient.query(`
-            INSERT INTO orders (id, client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Esportato', true)
+            INSERT INTO orders (id, client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported, is_synced, synced_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Esportato', true, true, '2000-01-01 00:00:00')
             ON CONFLICT (id) DO UPDATE SET
               client_id = EXCLUDED.client_id,
+              agent_id = EXCLUDED.agent_id,
               date = EXCLUDED.date,
               number = EXCLUDED.number,
               payment_name = EXCLUDED.payment_name,
+              payment_bank = EXCLUDED.payment_bank,
+              notes = EXCLUDED.notes,
               total = EXCLUDED.total,
               status = 'Esportato',
-              is_imported = true
+              is_imported = true,
+              is_synced = true,
+              synced_at = '2000-01-01 00:00:00'
             RETURNING id
           `, [
             newOrderId,
