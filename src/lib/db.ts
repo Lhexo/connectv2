@@ -782,7 +782,16 @@ export async function upsertClientsBatchInPostgres(
       // 5. Single summary log per batch
       console.log(`[SYNC] Batch of ${batch.length} clients processed successfully (${batchInserted} inserted, ${batchUpdated} updated)`);
     } catch (batchErr: any) {
-      console.error(`[PostgreSQL Batch Clients ERROR] Failed batch chunk starting at index ${i}:`, batchErr?.message || batchErr);
+      console.error(`[PostgreSQL Batch Clients ERROR] Failed batch chunk starting at index ${i}:`, batchErr?.message || batchErr, 'Retrying items individually...');
+      for (const c of batch) {
+        try {
+          const res = await upsertClientInPostgres(c, clientOrPool);
+          if (res.status === 'inserted') totalInserted++;
+          if (res.status === 'updated') totalUpdated++;
+        } catch (indErr: any) {
+          console.error(`[PostgreSQL Client Fallback Error] Client "${c.name}" (Code: ${c.code}):`, indErr?.message || indErr);
+        }
+      }
     }
   }
 
@@ -1261,7 +1270,12 @@ export async function initDatabase(): Promise<void> {
       WHERE clients.id = duplicate_codes.id AND duplicate_codes.rn > 1
     `);
     
-    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_code ON clients (code) WHERE code IS NOT NULL AND code != ''`);
+    // Drop old partial index if it exists to allow standard ON CONFLICT (code) to resolve
+    try {
+      await pool.query(`DROP INDEX IF EXISTS idx_clients_code`);
+    } catch (e) {}
+
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_code ON clients (code)`);
   } catch (e) {
     console.error('[PostgreSQL Engine ERROR] clientCols alter table / index error:', e);
   }

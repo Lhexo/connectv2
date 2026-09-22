@@ -5804,16 +5804,23 @@ const handleEasyfattImport = async (req: any, res: any) => {
         codesToDelete = currentDbCodes.filter(c => !incomingCodes.has(c));
       }
     } 
-    // Check if it is the official customer schema <EasyfattCustomers>
-    else if (jsonObj.EasyfattCustomers) {
-      const root = jsonObj.EasyfattCustomers;
+    // Check if it is customer schema (<EasyfattCustomers>, <EasyfattClients>, <Customers>, <Clients>, etc.)
+    else if (jsonObj.EasyfattCustomers || jsonObj.EasyfattClients || jsonObj.Customers || jsonObj.Clients || jsonObj.Clienti || jsonObj.Anagrafiche) {
+      const root = jsonObj.EasyfattCustomers || jsonObj.EasyfattClients || jsonObj.Customers || jsonObj.Clients || jsonObj.Clienti || jsonObj.Anagrafiche;
       mode = String(root.Mode || root.mode || 'full').toLowerCase();
       
       let customersToUpsert: any[] = [];
-      const customersSection = getVal(root, ['Customers', 'customers']);
+      const customersSection = getVal(root, ['Customers', 'customers', 'Clients', 'clients', 'Clienti', 'clienti', 'Anagrafiche', 'anagrafiche']);
       if (customersSection) {
-        const rawCusts = getVal(customersSection, ['Customer', 'customer']);
+        const rawCusts = getVal(customersSection, ['Customer', 'customer', 'Client', 'client', 'Cliente', 'cliente', 'Anagrafica', 'anagrafica']);
         customersToUpsert = rawCusts ? (Array.isArray(rawCusts) ? rawCusts : [rawCusts]) : [];
+      } else {
+        const directCusts = getVal(root, ['Customer', 'customer', 'Client', 'client', 'Cliente', 'cliente', 'Anagrafica', 'anagrafica']);
+        if (directCusts) {
+          customersToUpsert = Array.isArray(directCusts) ? directCusts : [directCusts];
+        } else if (Array.isArray(root)) {
+          customersToUpsert = root;
+        }
       }
 
       let importedCount = 0;
@@ -5839,9 +5846,6 @@ const handleEasyfattImport = async (req: any, res: any) => {
         } catch (err: any) {
           console.error(`[Easyfatt Neon Client Batch Error chunk ${i}-${i + chunk.length}]`, err?.message || err);
         }
-
-        // Sync local mirror in a transaction per chunk for sub-millisecond execution
-        // Clients processed in PostgreSQL Neon batch upsert
       }
 
       // Cleanup uploaded file
@@ -6595,39 +6599,51 @@ function mapCustomerNode(custNode: any) {
     return fallback;
   }
 
-  const code = normalizeCode(getVal(custNode, ['CustomerCode', 'Code', 'code', 'CODE', 'Cod.']));
-  const name = getVal(custNode, ['CustomerName', 'Name', 'name', 'NAME', 'Denominazione']);
-  const webLogin = getVal(custNode, ['CustomerWebLogin', 'WebLogin', 'web_login', 'Login web']);
-  const address = getVal(custNode, ['CustomerAddress', 'Address', 'address', 'INDIRIZZO', 'Indirizzo']);
-  const postcode = normalizePostcode(getVal(custNode, ['CustomerPostcode', 'Postcode', 'postcode', 'Cap', 'CAP']));
-  const city = getVal(custNode, ['CustomerCity', 'City', 'city', 'CITY', 'Città']);
-  const province = getVal(custNode, ['CustomerProvince', 'Province', 'province', 'PROVINCIA', 'Provincia', 'Prov.']);
-  const country = getVal(custNode, ['CustomerCountry', 'Country', 'country', 'NAZIONE', 'Nazione']) || 'Italia';
-  const fiscalCode = normalizeFiscalCode(getVal(custNode, ['CustomerFiscalCode', 'FiscalCode', 'fiscalcode', 'Codice fiscale', 'FISCAL_CODE']));
-  const vatCode = normalizeVatCode(getVal(custNode, ['CustomerVatCode', 'VatCode', 'vatcode', 'P_IVA', 'Partita Iva', 'PartitaIva', 'VAT_CODE']));
-  const sdiPec = normalizeSdiCode(getVal(custNode, ['CustomerEInvoiceDestCode', 'EInvoiceDestCode', 'einvoicedestcode', 'Cod. destinatario Fatt. elettr.']));
-  const phone = getVal(custNode, ['CustomerTel', 'Tel', 'tel', 'TEL', 'Telefono', 'telefono']);
-  const cellPhone = getVal(custNode, ['CustomerCellPhone', 'CellPhone', 'cellphone', 'CELL', 'Cell']);
+  const code = normalizeCode(getVal(custNode, ['CustomerCode', 'Code', 'code', 'CODE', 'Cod.', 'Codice', 'codice', 'InternalID', 'internal_id', 'ID', 'id']));
+  const name = getVal(custNode, ['CustomerName', 'Name', 'name', 'NAME', 'Denominazione', 'denominazione', 'RagioneSociale', 'ragione_sociale', 'Ragione Sociale', 'ragionesociale', 'CompanyName', 'company_name', 'Nominativo', 'nominativo', 'Intestazione', 'intestazione', 'Cliente', 'cliente', 'CognomeNome', 'Cognome Nome']);
+  const webLogin = getVal(custNode, ['CustomerWebLogin', 'WebLogin', 'web_login', 'Login web', 'LoginWeb', 'login_web']);
+  const address = getVal(custNode, ['CustomerAddress', 'Address', 'address', 'INDIRIZZO', 'Indirizzo', 'indirizzo', 'Via', 'via', 'Street', 'street']);
+  const postcode = normalizePostcode(getVal(custNode, ['CustomerPostcode', 'Postcode', 'postcode', 'Cap', 'CAP', 'cap', 'Zip', 'ZIP', 'zip']));
+  const city = getVal(custNode, ['CustomerCity', 'City', 'city', 'CITY', 'Città', 'citta', 'Citta', 'Comune', 'comune']);
+  const province = getVal(custNode, ['CustomerProvince', 'Province', 'province', 'PROVINCIA', 'Provincia', 'Prov.', 'Prov', 'prov']);
+  const country = getVal(custNode, ['CustomerCountry', 'Country', 'country', 'NAZIONE', 'Nazione', 'nazione', 'Stato', 'stato']) || 'Italia';
+  const fiscalCode = normalizeFiscalCode(getVal(custNode, ['CustomerFiscalCode', 'FiscalCode', 'fiscalcode', 'Codice fiscale', 'CodiceFiscale', 'Codice_Fiscale', 'cf', 'CF', 'FISCAL_CODE', 'fiscal_code']));
+  const vatCode = normalizeVatCode(getVal(custNode, ['CustomerVatCode', 'VatCode', 'vatcode', 'P_IVA', 'Partita Iva', 'PartitaIva', 'Partita_Iva', 'piva', 'PIVA', 'VAT_CODE', 'vat_code']));
+  const sdiPec = normalizeSdiCode(getVal(custNode, ['CustomerEInvoiceDestCode', 'EInvoiceDestCode', 'einvoicedestcode', 'Cod. destinatario Fatt. elettr.', 'CodiceDestinatario', 'SDI', 'sdi']));
+  const phone = getVal(custNode, ['CustomerTel', 'Tel', 'tel', 'TEL', 'Telefono', 'telefono', 'Phone', 'phone']);
+  const cellPhone = getVal(custNode, ['CustomerCellPhone', 'CellPhone', 'cellphone', 'CELL', 'Cell', 'cell', 'Cellulare', 'cellulare', 'Mobile', 'mobile']);
   const fax = getVal(custNode, ['CustomerFax', 'Fax', 'fax', 'FAX']);
-  const email = getVal(custNode, ['CustomerEmail', 'Email', 'email', 'EMAIL', 'e-mail']);
-  const pec = getVal(custNode, ['CustomerPec', 'Pec', 'pec', 'PEC']);
-  const contact = getVal(custNode, ['CustomerReference', 'Reference', 'reference', 'REFERENTE', 'Referente']);
-  const agente = getVal(custNode, ['SalesAgent', 'salesagent', 'AGENTE', 'Agente', 'Agent', 'CustomerAgent']);
+  const email = getVal(custNode, ['CustomerEmail', 'Email', 'email', 'EMAIL', 'e-mail', 'Mail', 'mail']);
+  const pec = getVal(custNode, ['CustomerPec', 'Pec', 'pec', 'PEC', 'EmailPec', 'email_pec']);
+  const contact = getVal(custNode, ['CustomerReference', 'Reference', 'reference', 'REFERENTE', 'Referente', 'referente', 'Contatto', 'contatto', 'Contact', 'contact']);
+  const agente = getVal(custNode, ['SalesAgent', 'salesagent', 'AGENTE', 'Agente', 'agente', 'Agent', 'agent', 'CustomerAgent']);
 
   // Delivery fields
-  const deliveryName = getVal(custNode, ['DeliveryName', 'delivery_name']);
-  const deliveryAddress = getVal(custNode, ['DeliveryAddress', 'delivery_address']);
-  const deliveryPostcode = normalizePostcode(getVal(custNode, ['DeliveryPostcode', 'delivery_postcode']));
-  const deliveryCity = getVal(custNode, ['DeliveryCity', 'delivery_city']);
-  const deliveryProvince = getVal(custNode, ['DeliveryProvince', 'delivery_province']);
-  const deliveryCountry = getVal(custNode, ['DeliveryCountry', 'delivery_country']);
+  const deliveryName = getVal(custNode, ['DeliveryName', 'delivery_name', 'Destinatario', 'destinatario']);
+  const deliveryAddress = getVal(custNode, ['DeliveryAddress', 'delivery_address', 'IndirizzoSpedizione']);
+  const deliveryPostcode = normalizePostcode(getVal(custNode, ['DeliveryPostcode', 'delivery_postcode', 'CapSpedizione']));
+  const deliveryCity = getVal(custNode, ['DeliveryCity', 'delivery_city', 'CittaSpedizione']);
+  const deliveryProvince = getVal(custNode, ['DeliveryProvince', 'delivery_province', 'ProvinciaSpedizione']);
+  const deliveryCountry = getVal(custNode, ['DeliveryCountry', 'delivery_country', 'NazioneSpedizione']);
 
   // Payment fields
-  const paymentName = getVal(custNode, ['PaymentName', 'payment_name', 'Pagamento']);
-  const paymentBank = getVal(custNode, ['PaymentBank', 'payment_bank', 'Banca']);
+  const paymentName = getVal(custNode, ['PaymentName', 'payment_name', 'Pagamento', 'pagamento']);
+  const paymentBank = getVal(custNode, ['PaymentBank', 'payment_bank', 'Banca', 'banca', 'IBAN', 'iban']);
 
   // Raw notes / internal comments
-  const rawNotes = getVal(custNode, ['InternalComment', 'Notes', 'notes', 'NOTE', 'Note', 'Note doc.']) || '';
+  const rawNotes = getVal(custNode, ['InternalComment', 'Notes', 'notes', 'NOTE', 'Note', 'Note doc.', 'Annotazioni']) || '';
+
+  const resolvedName = name ? String(name).trim() : (
+    contact ? String(contact).trim() : (
+      deliveryName ? String(deliveryName).trim() : (
+        code ? `Cliente ${String(code).trim()}` : (
+          vatCode ? `Azienda P.IVA ${String(vatCode).trim()}` : (
+            email ? String(email).trim() : ''
+          )
+        )
+      )
+    )
+  );
 
   // Prepare metadata matching deserializeClientMetadata format
   const metadata: Record<string, string> = {
@@ -6678,7 +6694,7 @@ function mapCustomerNode(custNode: any) {
 
   return {
     code: code ? String(code).trim() : null,
-    name: name ? String(name).trim() : '',
+    name: resolvedName,
     web_login: webLogin ? String(webLogin).trim() : null,
     address: address ? String(address).trim() : null,
     postcode: postcode ? String(postcode).trim() : null,

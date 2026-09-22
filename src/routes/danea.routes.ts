@@ -19,7 +19,7 @@ const router = Router();
 const upload = multer({ dest: path.join(process.cwd(), 'uploads') });
 
 // ==============================================================================
-// HELPER: Sanitizzazione e Codifica XML
+// HELPER: Sanitizzazione e Codifica XML & Customer Mapper
 // ==============================================================================
 export function escapeXml(str: any): string {
   if (str === null || str === undefined) return '';
@@ -42,6 +42,96 @@ export function formatProvince(provStr: string | null | undefined): string {
   if (!provStr) return '';
   const clean = String(provStr).trim().toUpperCase();
   return clean.length > 2 ? clean.substring(0, 2) : clean;
+}
+
+function getFieldVal(node: any, keys: string[], fallback: any = null): any {
+  if (!node || typeof node !== 'object') return fallback;
+  for (const k of keys) {
+    if (node[k] !== undefined && node[k] !== null && String(node[k]).trim() !== '') return node[k];
+  }
+  return fallback;
+}
+
+export function mapDaneaCustomer(c: any) {
+  const code = getFieldVal(c, ['CustomerCode', 'Code', 'code', 'CODE', 'Cod.', 'Codice', 'codice', 'InternalID', 'internal_id', 'ID', 'id']);
+  const name = getFieldVal(c, ['CustomerName', 'Name', 'name', 'NAME', 'Denominazione', 'denominazione', 'RagioneSociale', 'ragione_sociale', 'Ragione Sociale', 'ragionesociale', 'CompanyName', 'company_name', 'Nominativo', 'nominativo', 'Intestazione', 'intestazione', 'Cliente', 'cliente', 'CognomeNome', 'Cognome Nome']);
+  const webLogin = getFieldVal(c, ['CustomerWebLogin', 'WebLogin', 'web_login', 'Login web', 'LoginWeb', 'login_web']);
+  const address = getFieldVal(c, ['CustomerAddress', 'Address', 'address', 'INDIRIZZO', 'Indirizzo', 'indirizzo', 'Via', 'via', 'Street', 'street']);
+  const postcode = formatCap(getFieldVal(c, ['CustomerPostcode', 'Postcode', 'postcode', 'Cap', 'CAP', 'cap', 'Zip', 'ZIP', 'zip']));
+  const city = getFieldVal(c, ['CustomerCity', 'City', 'city', 'CITY', 'Città', 'citta', 'Citta', 'Comune', 'comune']);
+  const province = formatProvince(getFieldVal(c, ['CustomerProvince', 'Province', 'province', 'PROVINCIA', 'Provincia', 'provincia', 'Prov.', 'Prov', 'prov']));
+  const country = getFieldVal(c, ['CustomerCountry', 'Country', 'country', 'NAZIONE', 'Nazione', 'nazione', 'Stato', 'stato']) || 'Italia';
+  const fiscalCode = getFieldVal(c, ['CustomerFiscalCode', 'FiscalCode', 'fiscalcode', 'Codice fiscale', 'CodiceFiscale', 'Codice_Fiscale', 'cf', 'CF', 'FISCAL_CODE', 'fiscal_code']);
+  const vatCode = getFieldVal(c, ['CustomerVatCode', 'VatCode', 'vatcode', 'P_IVA', 'Partita Iva', 'PartitaIva', 'Partita_Iva', 'piva', 'PIVA', 'VAT_CODE', 'vat_code']);
+  const sdiPec = getFieldVal(c, ['CustomerEInvoiceDestCode', 'EInvoiceDestCode', 'einvoicedestcode', 'Cod. destinatario Fatt. elettr.', 'CodiceDestinatario', 'SDI', 'sdi']);
+  const phone = getFieldVal(c, ['CustomerTel', 'Tel', 'tel', 'TEL', 'Telefono', 'telefono', 'Phone', 'phone']);
+  const cellPhone = getFieldVal(c, ['CustomerCellPhone', 'CellPhone', 'cellphone', 'CELL', 'Cell', 'cell', 'Cellulare', 'cellulare', 'Mobile', 'mobile']);
+  const fax = getFieldVal(c, ['CustomerFax', 'Fax', 'fax', 'FAX']);
+  const email = getFieldVal(c, ['CustomerEmail', 'Email', 'email', 'EMAIL', 'e-mail', 'Mail', 'mail']);
+  const pec = getFieldVal(c, ['CustomerPec', 'Pec', 'pec', 'PEC', 'EmailPec', 'email_pec']);
+  const contact = getFieldVal(c, ['CustomerReference', 'Reference', 'reference', 'REFERENTE', 'Referente', 'referente', 'Contatto', 'contatto', 'Contact', 'contact']);
+  const agente = getFieldVal(c, ['SalesAgent', 'salesagent', 'AGENTE', 'Agente', 'agente', 'Agent', 'agent', 'CustomerAgent']);
+  const deliveryName = getFieldVal(c, ['DeliveryName', 'delivery_name', 'Destinatario', 'destinatario']);
+  const deliveryAddress = getFieldVal(c, ['DeliveryAddress', 'delivery_address', 'IndirizzoSpedizione']);
+  const deliveryPostcode = formatCap(getFieldVal(c, ['DeliveryPostcode', 'delivery_postcode', 'CapSpedizione']));
+  const deliveryCity = getFieldVal(c, ['DeliveryCity', 'delivery_city', 'CittaSpedizione']);
+  const deliveryProvince = formatProvince(getFieldVal(c, ['DeliveryProvince', 'delivery_province', 'ProvinciaSpedizione']));
+  const deliveryCountry = getFieldVal(c, ['DeliveryCountry', 'delivery_country', 'NazioneSpedizione']);
+  const priceList = getFieldVal(c, ['PriceList', 'Listino', 'listino', 'price_list']);
+  const paymentName = getFieldVal(c, ['PaymentName', 'payment_name', 'Pagamento', 'pagamento']);
+  const paymentBank = getFieldVal(c, ['PaymentBank', 'payment_bank', 'Banca', 'banca', 'IBAN', 'iban']);
+  const customField1 = getFieldVal(c, ['CustomField1', 'custom_field1', 'Extra 1', 'Extra1']);
+  const customField2 = getFieldVal(c, ['CustomField2', 'custom_field2', 'Extra 2', 'Extra2']);
+  const customField3 = getFieldVal(c, ['CustomField3', 'custom_field3', 'Extra 3', 'Extra3']);
+  const customField4 = getFieldVal(c, ['CustomField4', 'custom_field4', 'Extra 4', 'Extra4']);
+  const rawNotes = getFieldVal(c, ['InternalComment', 'Notes', 'notes', 'NOTE', 'Note', 'Note doc.', 'Annotazioni']) || '';
+
+  const resolvedName = name ? String(name).trim() : (
+    contact ? String(contact).trim() : (
+      deliveryName ? String(deliveryName).trim() : (
+        code ? `Cliente ${String(code).trim()}` : (
+          vatCode ? `Azienda P.IVA ${String(vatCode).trim()}` : (
+            email ? String(email).trim() : ''
+          )
+        )
+      )
+    )
+  );
+
+  return {
+    code: code ? String(code).trim() : null,
+    name: resolvedName,
+    web_login: webLogin ? String(webLogin).trim() : null,
+    address: address ? String(address).trim() : null,
+    postcode: postcode ? String(postcode).trim() : null,
+    city: city ? String(city).trim() : null,
+    province: province ? String(province).trim() : null,
+    country: country ? String(country).trim() : 'Italia',
+    fiscal_code: fiscalCode ? String(fiscalCode).trim() : null,
+    vat_code: vatCode ? String(vatCode).trim() : null,
+    sdi_pec: sdiPec ? String(sdiPec).trim() : null,
+    phone: phone ? String(phone).trim() : null,
+    cell_phone: cellPhone ? String(cellPhone).trim() : null,
+    fax: fax ? String(fax).trim() : null,
+    email: email ? String(email).trim() : null,
+    pec: pec ? String(pec).trim() : null,
+    contact: contact ? String(contact).trim() : null,
+    agente: agente ? String(agente).trim() : null,
+    delivery_name: deliveryName ? String(deliveryName).trim() : null,
+    delivery_address: deliveryAddress ? String(deliveryAddress).trim() : null,
+    delivery_postcode: deliveryPostcode ? String(deliveryPostcode).trim() : null,
+    delivery_city: deliveryCity ? String(deliveryCity).trim() : null,
+    delivery_province: deliveryProvince ? String(deliveryProvince).trim() : null,
+    delivery_country: deliveryCountry ? String(deliveryCountry).trim() : null,
+    price_list: priceList ? String(priceList).trim() : null,
+    payment_name: paymentName ? String(paymentName).trim() : null,
+    payment_bank: paymentBank ? String(paymentBank).trim() : null,
+    custom_field1: customField1 ? String(customField1).trim() : null,
+    custom_field2: customField2 ? String(customField2).trim() : null,
+    custom_field3: customField3 ? String(customField3).trim() : null,
+    custom_field4: customField4 ? String(customField4).trim() : null,
+    notes: rawNotes ? String(rawNotes).trim() : null
+  };
 }
 
 // ==============================================================================
@@ -445,30 +535,42 @@ export async function handleUploadCatalog(req: Request, res: Response) {
 
       await upsertProductsBatchInPostgres(mapped);
     } 
-    // 3. Elaborazione Batch UPSERT Clienti
-    else if (jsonObj.EasyfattCustomers) {
-      const root = jsonObj.EasyfattCustomers;
-      const customersSection = root.Customers;
-      const rawCusts = customersSection?.Customer ? (Array.isArray(customersSection.Customer) ? customersSection.Customer : [customersSection.Customer]) : [];
-      
-      const mappedClients = rawCusts.map((c: any) => ({
-        code: String(c.Code || c.InternalID || '').trim(),
-        name: String(c.Name || '').trim(),
-        address: c.Address ? String(c.Address).trim() : null,
-        postcode: c.Postcode ? formatCap(String(c.Postcode)) : null,
-        city: c.City ? String(c.City).trim() : null,
-        province: c.Province ? formatProvince(String(c.Province)) : null,
-        country: c.Country ? String(c.Country).trim() : 'Italia',
-        fiscal_code: c.FiscalCode ? String(c.FiscalCode).trim() : null,
-        vat_code: c.VatCode ? String(c.VatCode).trim() : null,
-        phone: c.Tel ? String(c.Tel).trim() : null,
-        cell_phone: c.Cell ? String(c.Cell).trim() : null,
-        email: c.Email ? String(c.Email).trim() : null,
-        pec: c.Pec ? String(c.Pec).trim() : null,
-        contact: c.Reference ? String(c.Reference).trim() : null
-      })).filter((c: any) => c.name);
+    // 3. Elaborazione Batch UPSERT Clienti (supporta EasyfattCustomers, EasyfattClients, EasyfattClienti, Customers, Clienti)
+    const custRoot = jsonObj.EasyfattCustomers || jsonObj.easyfattcustomers || jsonObj.EasyfattClients || jsonObj.easyfattclients || jsonObj.EasyfattClienti || jsonObj.Customers || jsonObj.customers || jsonObj.Clienti || jsonObj.clienti;
+    
+    if (custRoot) {
+      let rawCustList: any[] = [];
+      const custSec = custRoot.Customers || custRoot.customers || custRoot.UpdatedCustomers || custRoot.updatedcustomers || custRoot.UpdateCustomers || custRoot.Clienti || custRoot.clienti;
+      if (custSec) {
+        const rawCusts = custSec.Customer || custSec.customer || custSec.Cliente || custSec.cliente || custSec;
+        rawCustList = Array.isArray(rawCusts) ? rawCusts : [rawCusts];
+      } else if (custRoot.Customer || custRoot.customer || custRoot.Cliente || custRoot.cliente) {
+        const rawCusts = custRoot.Customer || custRoot.customer || custRoot.Cliente || custRoot.cliente;
+        rawCustList = Array.isArray(rawCusts) ? rawCusts : [rawCusts];
+      } else if (Array.isArray(custRoot)) {
+        rawCustList = custRoot;
+      }
 
-      await upsertClientsBatchInPostgres(mappedClients);
+      const mappedClients = rawCustList.map(mapDaneaCustomer).filter(c => c && c.name && c.name.trim());
+      console.log(`[DANEA CUSTOMER SYNC - ROUTE] Parsed ${rawCustList.length} raw customer items -> ${mappedClients.length} valid clients to upsert`);
+      
+      if (mappedClients.length > 0) {
+        const upsertRes = await upsertClientsBatchInPostgres(mappedClients);
+        console.log(`[DANEA CUSTOMER SYNC - ROUTE RESULT] Inserted: ${upsertRes.inserted}, Updated: ${upsertRes.updated}, Total: ${upsertRes.total}`);
+      }
+    }
+    // 4. Se arrivano documenti (EasyfattDocuments), estrai anche le anagrafiche dei clienti associati
+    else if (jsonObj.EasyfattDocuments) {
+      const documents = jsonObj.EasyfattDocuments.Documents || jsonObj.EasyfattDocuments.documents || jsonObj.EasyfattDocuments;
+      const rawDocs = documents?.Document || documents?.document || (Array.isArray(documents) ? documents : null);
+      if (rawDocs) {
+        const docList = Array.isArray(rawDocs) ? rawDocs : [rawDocs];
+        const docCustomers = docList.map(mapDaneaCustomer).filter(c => c && c.name && c.name.trim());
+        if (docCustomers.length > 0) {
+          console.log(`[DANEA DOCUMENTS SYNC - ROUTE] Extracting ${docCustomers.length} customer records from documents`);
+          await upsertClientsBatchInPostgres(docCustomers);
+        }
+      }
     }
 
     try { if (tempFilePathToUnlink) fs.unlinkSync(tempFilePathToUnlink); } catch (e) {}
