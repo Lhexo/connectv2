@@ -6864,12 +6864,10 @@ app.all(easyfattUploadImageFinishedPaths, (req: any, res: any) => {
   res.send("OK");
 });
 
-// 11d. Base Easyfatt endpoint fallback (handles requests sent to /api/easyfatt or /easyfatt without subpath)
+// 11d. Base Easyfatt endpoint fallback (handles requests sent to /api/easyfatt without subpath)
 const easyfattBasePaths = [
   '/api/easyfatt',
-  '/api/easyfatt/',
-  '/easyfatt',
-  '/easyfatt/'
+  '/api/easyfatt/'
 ];
 
 app.all(easyfattBasePaths, (req: any, res: any) => {
@@ -6893,7 +6891,30 @@ app.all(easyfattBasePaths, (req: any, res: any) => {
       return handleEasyfattImport(req, res);
     }
   } else {
+    // Only for API requests sent directly to /api/easyfatt
     res.send("OK");
+  }
+});
+
+// Support POST only for /easyfatt in case someone configured the base path in Danea
+app.post(['/easyfatt', '/easyfatt/'], (req: any, res: any) => {
+  const isOrderDownload = !!(
+    req.query.appver || req.body?.appver ||
+    req.query.firstdate || req.body?.firstdate ||
+    req.query.firstnum || req.body?.firstnum ||
+    req.query.lastnum || req.body?.lastnum
+  );
+  if (isOrderDownload) {
+    return handleEasyfattOrderDownload(req, res);
+  } else {
+    const contentType = req.headers['content-type'] || '';
+    if (contentType.includes('multipart/form-data')) {
+      return upload.any()(req, res, (err: any) => {
+        if (err) return res.status(400).send("ERROR: " + err.message);
+        return handleEasyfattImport(req, res);
+      });
+    }
+    return handleEasyfattImport(req, res);
   }
 });
 
