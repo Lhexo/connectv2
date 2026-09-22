@@ -4795,14 +4795,14 @@ async function handleEasyfattOrderDownload(req: any, res: any) {
     query += " AND (o.status != 'Bozza' OR o.status IS NULL)";
 
     // Esclude categoricamente gli ordini storici importati da file XML (utilizzati esclusivamente per fini statistici o consultazione interna)
-    query += " AND (o.is_imported = false OR o.is_imported IS NULL OR o.is_imported = 0)";
+    query += " AND (o.is_imported IS FALSE OR o.is_imported IS NULL)";
 
     // Finestra temporale di 30 ore per ordini creati in App (is_imported = false / NULL):
     // Gli ordini generati dalla rete agenti sono disponibili per lo scarico da parte di Danea
     // entro e non oltre 30 ore dal momento della loro creazione (oppure fino a sincronizzazione / entro 30h dalla sync).
     if (!req.query.all && !req.body?.all) {
       query += ` AND (
-        ( (o.is_synced = false OR o.is_synced IS NULL) AND (o.created_at IS NULL OR o.created_at >= (NOW() - INTERVAL '30 hours')) )
+        ( (o.is_synced IS FALSE OR o.is_synced IS NULL) AND (o.created_at IS NULL OR o.created_at >= (NOW() - INTERVAL '30 hours')) )
         OR (o.synced_at IS NOT NULL AND o.synced_at >= (NOW() - INTERVAL '30 hours'))
       )`;
     }
