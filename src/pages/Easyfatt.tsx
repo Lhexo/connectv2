@@ -3013,11 +3013,10 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                         {/* Unit Price */}
                                         <div className="text-right min-w-[90px]">
                                           <div className="font-mono text-xs font-black text-[#5A5A40]">
-                                            € {calculateTaxable(p.price, p.vat_code || 22).toFixed(2)}{' '}
-                                            <span className="text-[9px] font-sans font-normal text-gray-500">+ IVA</span>
+                                            € {p.price.toFixed(2)}
                                           </div>
                                           <div className="text-[10px] text-gray-400 font-medium">
-                                            (€ {p.price.toFixed(2)} inc.)
+                                            Imponibile
                                           </div>
                                         </div>
                                       </div>
@@ -3304,25 +3303,15 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                         </button>
                                       </div>
 
-                                      {/* Dynamic Imponibile & Ivato breakdown */}
-                                      <div className="grid grid-cols-2 gap-2 bg-amber-50/70 p-2 rounded-lg border border-amber-200/70 text-[11px]">
-                                        <div>
-                                          <span className="text-[9px] text-gray-500 font-medium block">Prezzo Unit. Imponibile</span>
-                                          <div className="font-mono font-bold text-gray-900">
-                                            € {line.unitTaxable.toFixed(2)}
-                                          </div>
-                                          <span className="text-[9px] text-gray-400 font-normal">
-                                            (Ivato: € {item.price.toFixed(2)})
-                                          </span>
+                                      {/* Dynamic Imponibile breakdown */}
+                                      <div className="bg-gray-50/90 p-2 rounded-lg border border-gray-200/70 text-[11px] space-y-1">
+                                        <div className="flex justify-between items-center text-gray-600">
+                                          <span>Prezzo Unit. Imponibile:</span>
+                                          <span className="font-mono font-bold text-gray-900">€ {line.unitTaxable.toFixed(2)}</span>
                                         </div>
-                                        <div className="text-right">
-                                          <span className="text-[9px] text-gray-500 font-medium block">Totale Riga</span>
-                                          <div className="font-mono font-bold text-gray-900">
-                                            Imp. € {line.totalTaxable.toFixed(2)}
-                                          </div>
-                                          <div className="font-mono font-black text-[#5A5A40] text-xs">
-                                            Ivato: € {line.totalGross.toFixed(2)}
-                                          </div>
+                                        <div className="flex justify-between items-center text-gray-600">
+                                          <span>Totale Riga Imponibile:</span>
+                                          <span className="font-mono font-bold text-gray-900">€ {line.totalTaxable.toFixed(2)}</span>
                                         </div>
                                       </div>
 
@@ -3361,7 +3350,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                         {/* Interactive Price & Line Total Inputs */}
                                         <div className="grid grid-cols-2 gap-1.5 bg-white/80 p-1.5 rounded-lg border border-gray-150">
                                           <div>
-                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Prezzo Ivato Unit.</div>
+                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">PREZZO UNIT. IMPONIBILE</div>
                                             <EditableAmountInput
                                               value={item.price}
                                               onChange={(newPrice) => handleUpdateItemPrice(item.product_code, newPrice, idx)}
@@ -3370,9 +3359,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                             />
                                           </div>
                                           <div>
-                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Tot. Ivato Riga</div>
+                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">TOTALE RIGA IMPONIBILE</div>
                                             <EditableAmountInput
-                                              value={Math.round(line.totalGross * 100) / 100}
+                                              value={Math.round(line.totalTaxable * 100) / 100}
                                               onChange={(newTotal) => handleUpdateItemTotal(item.product_code, newTotal, idx)}
                                               prefix="€"
                                               placeholder="0.00"

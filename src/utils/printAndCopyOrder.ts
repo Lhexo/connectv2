@@ -300,8 +300,8 @@ export function formatOrderPlainText(orderOrData: any, client?: any): string {
       const umPart = item.um ? ` ${item.um}` : ' pz';
 
       lines.push(`${index + 1}. ${codePart}${item.description}`);
-      lines.push(`   Quantità: ${item.qty}${umPart} | Imp. Unit: € ${unitTaxable.toFixed(2)} (IVA ${vatRate}%) [Ivato € ${item.price.toFixed(2)}]`);
-      lines.push(`   Totale Riga: Imp. € ${rowTaxable.toFixed(2)} | Ivato € ${rowGross.toFixed(2)}`);
+      lines.push(`   Quantità: ${item.qty}${umPart} | Imp. Unit: € ${unitTaxable.toFixed(2)} (IVA ${vatRate}%)`);
+      lines.push(`   Totale Riga Imp: € ${rowTaxable.toFixed(2)}`);
     });
   } else {
     lines.push('(Nessun articolo registrato)');
