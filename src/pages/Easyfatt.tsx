@@ -58,7 +58,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import GirovisiteSection from '../components/GirovisiteSection';
 import ClientSalesHistory from '../components/ClientSalesHistory';
-import { printOrderDocument, copyOrderToClipboard } from '../utils/printAndCopyOrder';
+import { printOrderDocument, copyOrderToClipboard, setCachedCompanyHeader } from '../utils/printAndCopyOrder';
 import EditableAmountInput from '../components/EditableAmountInput';
 import { useTablePagination } from '../hooks/useTablePagination';
 import { DataTablePagination } from '../components/DataTablePagination';
@@ -1147,10 +1147,18 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const fetchCompanyHeader = async () => {
     try {
-      const res = await fetch('/api/easyfatt/company-header');
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      const res = await fetch('/api/easyfatt/company-header', {
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        }
+      });
       if (res.ok) {
         const data = await res.json();
-        if (data) setCompanyHeader(prev => ({ ...prev, ...data }));
+        if (data && (data.company_name || data.company_vat_code)) {
+          setCompanyHeader(prev => ({ ...prev, ...data }));
+          setCachedCompanyHeader(data);
+        }
       }
     } catch (err) {
       console.error('Error fetching company header:', err);
@@ -1161,15 +1169,26 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     e.preventDefault();
     setSavingCompanyHeader(true);
     try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
       const res = await fetch('/api/easyfatt/company-header', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
         body: JSON.stringify(companyHeader)
       });
       if (res.ok) {
+        const data = await res.json();
+        if (data?.data) {
+          setCompanyHeader(prev => ({ ...prev, ...data.data }));
+          setCachedCompanyHeader(data.data);
+        } else {
+          setCachedCompanyHeader(companyHeader);
+        }
         showStatus('Intestazione aziendale e logo salvati con successo!', 'success');
       } else {
-        const errData = await res.json();
+        const errData = await res.json().catch(() => ({}));
         showStatus('Errore durante il salvataggio: ' + (errData.error || 'Errore generico'), 'error');
       }
     } catch (err: any) {
@@ -7794,7 +7813,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
                 {/* Body (Scrollable) */}
                 {clientModalTab === 'storico' ? (
-                  <div className="p-6 overflow-y-auto max-h-[calc(90vh-80px)]">
+                  <div className="p-6 overflow-y-auto overscroll-contain max-h-[calc(90dvh-80px)]">
                     <ClientSalesHistory 
                       clientId={selectedDetailClient.id} 
                       clientName={selectedDetailClient.name} 
@@ -7802,7 +7821,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                     />
                   </div>
                 ) : (
-                  <div className="p-6 overflow-y-auto space-y-6">
+                  <div className="p-6 overflow-y-auto overscroll-contain space-y-6">
                     {/* Banner to Switch to Full History */}
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-gradient-to-r from-[#5A5A40]/10 via-[#5A5A40]/5 to-transparent rounded-2xl border border-[#5A5A40]/15">
                       <div className="flex items-center gap-2.5">
@@ -8770,12 +8789,12 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
       {/* 4. EXPANDED CHECKOUT & CART SHEET */}
       <AnimatePresence>
         {isStickyCartOpen && (
-          <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 overflow-y-auto overscroll-contain">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-white rounded-3xl border border-gray-200 w-full max-w-3xl max-h-[90vh] shadow-2xl flex flex-col overflow-hidden"
+              className="bg-white rounded-3xl border border-gray-200 w-full max-w-3xl max-h-[90dvh] shadow-2xl flex flex-col overflow-hidden"
             >
               {/* Header */}
               <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-gray-50/70 shrink-0">
@@ -8798,7 +8817,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
               </div>
 
               {/* Body */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              <div className="flex-1 overflow-y-auto overscroll-contain p-6 space-y-6">
                 {/* Client Selection Section */}
                 <div className="bg-[#F8F9FA] p-4 rounded-2xl border border-gray-200 space-y-3">
                   <label className="text-xs font-black uppercase text-[#5A5A40] flex items-center gap-1.5">

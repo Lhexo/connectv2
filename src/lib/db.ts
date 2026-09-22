@@ -1522,6 +1522,30 @@ export async function initDatabase(): Promise<void> {
         company_logo TEXT DEFAULT ''
       );
     `);
+
+    // Ensure all columns exist in case table was created with older schema
+    const chColumns = [
+      "company_name TEXT DEFAULT 'Connect Beauty S.r.l.'",
+      "company_address TEXT DEFAULT 'Via Armando Diaz 162'",
+      "company_postcode TEXT DEFAULT '35010'",
+      "company_city TEXT DEFAULT 'Vigonza'",
+      "company_province TEXT DEFAULT 'PD'",
+      "company_country TEXT DEFAULT 'Italia'",
+      "company_vat_code TEXT DEFAULT '00165987261'",
+      "company_fiscal_code TEXT DEFAULT '00165987261'",
+      "company_tel TEXT DEFAULT '049/1234567'",
+      "company_fax TEXT DEFAULT '049/1234568'",
+      "company_email TEXT DEFAULT 'info@connect-beauty.it'",
+      "company_pec TEXT DEFAULT 'connectbeauty@pec.it'",
+      "company_website TEXT DEFAULT 'www.connect-beauty.it'",
+      "company_logo TEXT DEFAULT ''"
+    ];
+
+    for (const col of chColumns) {
+      const colName = col.split(' ')[0];
+      await queryExec(`ALTER TABLE company_header ADD COLUMN IF NOT EXISTS ${col};`).catch(() => {});
+    }
+
     const existingCH = await queryGet('SELECT id FROM company_header WHERE id = 1');
     if (!existingCH) {
       await queryRun(`

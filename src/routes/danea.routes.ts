@@ -16,7 +16,24 @@ import {
 import { calculateInstallments } from '../services/paymentScheduler';
 
 const router = Router();
-const upload = multer({ dest: path.join(process.cwd(), 'uploads') });
+// Multer setup per salvare i file nella cartella uploads/ alla radice del progetto
+const uploadDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    // Se Danea invia fileName nel body (o se disponibile), preserva il nome file originale
+    const rawFileName = req.body?.fileName || req.body?.filename || req.body?.FileName || file.originalname || 'image.jpg';
+    const safeName = path.basename(String(rawFileName).trim());
+    cb(null, `${Date.now()}-${safeName}`);
+  }
+});
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
 
 // ==============================================================================
 // HELPER: Sanitizzazione e Codifica XML & Customer Mapper
@@ -575,7 +592,7 @@ export async function handleUploadCatalog(req: Request, res: Response) {
 
     try { if (tempFilePathToUnlink) fs.unlinkSync(tempFilePathToUnlink); } catch (e) {}
 
-    // 4. Risposta Handshake Rigorosa per AppVersion
+    // 4. Risposta Handshake Rigorosa per AppVersion (TASK 1)
     let appVerNum = 2;
     if (jsonObj.EasyfattProducts?.AppVersion) {
       const raw = String(jsonObj.EasyfattProducts.AppVersion);
@@ -589,8 +606,8 @@ export async function handleUploadCatalog(req: Request, res: Response) {
     }
 
     const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const responseBody = `OK\nImageSendURL=${proto}://${host}/api/easyfatt/upload-image\nImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-image-finished\n`;
+    const host = req.headers['x-forwarded-host'] || req.get('host') || req.headers.host;
+    const responseBody = `OK\nImageSendURL=${proto}://${host}/api/easyfatt/upload-images\nImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-images-finished\n`;
     return res.status(200).send(responseBody);
   } catch (err: any) {
     console.error('Easyfatt catalog import error:', err);
@@ -598,6 +615,58 @@ export async function handleUploadCatalog(req: Request, res: Response) {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.status(500).send("ERROR: " + (err.message || 'Errore elaborazione catalogo'));
   }
+}
+
+// ==============================================================================
+// 4. ROTTA UPLOAD IMMAGINI (TASK 2)
+// ==============================================================================
+export async function handleUploadImages(req: Request, res: Response) {
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(200).send("OK");
+  }
+
+  const isAuth = await checkDaneaAuth(req);
+  if (!isAuth) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(401).send("ERROR: Utente o password non validi.");
+  }
+
+  try {
+    const file = (req as any).file || ((req as any).files && (req as any).files[0]);
+    if (!file) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.status(400).send("ERROR: Nessun file caricato.");
+    }
+
+    // Danea invia il nome del file nel parametro form 'fileName' oppure usiamo l'originale
+    const rawFileName = req.body?.fileName || req.body?.filename || req.body?.FileName || file.originalname || 'image.jpg';
+    const safeFileName = path.basename(String(rawFileName).trim());
+
+    if (safeFileName && file.path) {
+      const targetPath = path.join(uploadDir, safeFileName);
+      if (file.path !== targetPath) {
+        fs.copyFileSync(file.path, targetPath);
+        try { fs.unlinkSync(file.path); } catch (e) {}
+      }
+    }
+
+    // Risposta TASSATIVAMENTE testo puro 'OK' status 200 (NO JSON)
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(200).send("OK");
+  } catch (err: any) {
+    console.error('[Easyfatt Image Upload Error]', err);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(500).send("ERROR: " + (err.message || 'Errore durante il salvataggio immagine'));
+  }
+}
+
+// ==============================================================================
+// 5. ROTTA FINE TRASMISSIONE IMMAGINI (TASK 3)
+// ==============================================================================
+export async function handleUploadImagesFinished(req: Request, res: Response) {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  return res.status(200).send("OK");
 }
 
 // ==============================================================================
@@ -617,7 +686,45 @@ const uploadPaths = [
   '/uploadclienti.php'
 ];
 
+const imageUploadPaths = [
+  '/api/easyfatt/upload-images',
+  '/api/easyfatt/upload-images.php',
+  '/api/easyfatt/upload-image',
+  '/api/easyfatt/upload-image.php',
+  '/api/easyfatt/uploadImmagini.php',
+  '/api/easyfatt/uploadimmagini.php',
+  '/upload-images',
+  '/upload-images.php',
+  '/upload-image',
+  '/upload-image.php',
+  '/uploadImmagini.php',
+  '/uploadimmagini.php'
+];
+
+const imageFinishPaths = [
+  '/api/easyfatt/upload-images-finished',
+  '/api/easyfatt/upload-images-finished.php',
+  '/api/easyfatt/upload-image-finished',
+  '/api/easyfatt/upload-image-finished.php',
+  '/api/easyfatt/uploadTerminato.php',
+  '/api/easyfatt/uploadterminato.php',
+  '/api/easyfatt/sync-finish',
+  '/api/easyfatt/invio_terminato.php',
+  '/api/easyfatt/invio_terminato.asp',
+  '/upload-images-finished',
+  '/upload-images-finished.php',
+  '/upload-image-finished',
+  '/upload-image-finished.php',
+  '/uploadTerminato.php',
+  '/uploadterminato.php',
+  '/sync-finish',
+  '/invio_terminato.php',
+  '/invio_terminato.asp'
+];
+
 router.all(downloadPaths, handleDownloadOrders);
 router.all(uploadPaths, upload.any(), handleUploadCatalog);
+router.all(imageUploadPaths, upload.any(), handleUploadImages);
+router.all(imageFinishPaths, handleUploadImagesFinished);
 
 export default router;

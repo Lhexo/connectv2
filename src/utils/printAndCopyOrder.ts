@@ -358,20 +358,90 @@ export async function copyOrderToClipboard(orderOrData: any, client?: any): Prom
   }
 }
 
+export interface CompanyHeaderData {
+  id?: number;
+  company_name?: string;
+  company_address?: string;
+  company_postcode?: string;
+  company_city?: string;
+  company_province?: string;
+  company_country?: string;
+  company_vat_code?: string;
+  company_fiscal_code?: string;
+  company_tel?: string;
+  company_fax?: string;
+  company_email?: string;
+  company_pec?: string;
+  company_website?: string;
+  company_logo?: string;
+}
+
+let cachedCompanyHeader: CompanyHeaderData | null = null;
+
+export function setCachedCompanyHeader(header: CompanyHeaderData) {
+  cachedCompanyHeader = header;
+}
+
+export async function fetchCompanyHeaderData(): Promise<CompanyHeaderData> {
+  if (cachedCompanyHeader) {
+    return cachedCompanyHeader;
+  }
+  try {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const res = await fetch('/api/easyfatt/company-header', {
+      headers: {
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && (data.company_name || data.company_vat_code)) {
+        cachedCompanyHeader = data;
+        return data;
+      }
+    }
+  } catch (err) {
+    console.warn('Could not fetch company header from backend:', err);
+  }
+
+  // Fallback defaults
+  return {
+    company_name: 'Connect Beauty S.r.l.',
+    company_address: 'Via Armando Diaz 162',
+    company_postcode: '35010',
+    company_city: 'Vigonza',
+    company_province: 'PD',
+    company_country: 'Italia',
+    company_vat_code: '00165987261',
+    company_fiscal_code: '00165987261',
+    company_tel: '049/1234567',
+    company_fax: '049/1234568',
+    company_email: 'info@connect-beauty.it',
+    company_pec: 'connectbeauty@pec.it',
+    company_website: 'www.connect-beauty.it',
+    company_logo: ''
+  };
+}
+
 /**
  * Builds the complete A4 printable HTML layout
  */
-export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
-  const company = {
-    name: 'Connect Beauty S.r.l.',
-    address: 'Via dell\'Innovazione 12',
-    postcode: '20126',
-    city: 'Milano',
-    province: 'MI',
-    vat: 'IT12345678901',
-    phone: '+39 02 87654321',
-    email: 'ordini@connectbeauty.it',
-    web: 'www.connectbeauty.it'
+export function buildOrderDocumentHtml(printable: PrintableOrderData, companyHeader?: CompanyHeaderData): string {
+  const company: CompanyHeaderData = companyHeader || cachedCompanyHeader || {
+    company_name: 'Connect Beauty S.r.l.',
+    company_address: 'Via Armando Diaz 162',
+    company_postcode: '35010',
+    company_city: 'Vigonza',
+    company_province: 'PD',
+    company_country: 'Italia',
+    company_vat_code: '00165987261',
+    company_fiscal_code: '00165987261',
+    company_tel: '049/1234567',
+    company_fax: '049/1234568',
+    company_email: 'info@connect-beauty.it',
+    company_pec: 'connectbeauty@pec.it',
+    company_website: 'www.connect-beauty.it',
+    company_logo: ''
   };
 
   const rowsHtml = printable.items.map((it: any, idx) => {
@@ -521,17 +591,26 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
       </head>
       <body>
         <div class="header-box">
-          <div>
-            <div class="company-title">${company.name}</div>
-            <div style="color: #475569; margin-top: 4px; font-size: 12px;">
-              ${company.address} - ${company.postcode} ${company.city} (${company.province})<br>
-              P.IVA: ${company.vat} | Tel: ${company.phone} | Email: ${company.email}
+          <div style="max-width: 62%;">
+            ${company.company_logo ? `<img src="${company.company_logo}" alt="Logo" style="max-height: 52px; max-width: 220px; object-fit: contain; margin-bottom: 8px; display: block;" />` : ''}
+            <div class="company-title">${company.company_name || 'Connect Beauty S.r.l.'}</div>
+            <div style="color: #475569; margin-top: 4px; font-size: 11px; line-height: 1.45;">
+              ${company.company_address ? `${company.company_address}<br>` : ''}
+              ${(company.company_postcode || company.company_city) ? `${company.company_postcode || ''} ${company.company_city || ''} ${company.company_province ? `(${company.company_province})` : ''} ${company.company_country && company.company_country !== 'Italia' ? `- ${company.company_country}` : ''}<br>` : ''}
+              ${company.company_vat_code ? `P.IVA: <strong>${company.company_vat_code}</strong> ` : ''}
+              ${company.company_fiscal_code && company.company_fiscal_code !== company.company_vat_code ? `| C.F.: <strong>${company.company_fiscal_code}</strong>` : ''}
+              ${(company.company_vat_code || company.company_fiscal_code) && (company.company_tel || company.company_email) ? '<br>' : ''}
+              ${company.company_tel ? `Tel: ${company.company_tel} ` : ''}
+              ${company.company_email ? `| Email: ${company.company_email}` : ''}
+              ${(company.company_pec || company.company_website) ? '<br>' : ''}
+              ${company.company_pec ? `PEC: ${company.company_pec} ` : ''}
+              ${company.company_website ? `| Web: ${company.company_website}` : ''}
             </div>
           </div>
           <div class="doc-badge">
-            <div style="font-size: 11px; opacity: 0.8; text-transform: uppercase;">Conferma d'Ordine</div>
-            <div style="font-size: 18px; font-weight: 800;">${printable.orderNumber || ''}</div>
-            <div style="font-size: 11px; margin-top: 2px;">Data: ${printable.date || ''}</div>
+            <div style="font-size: 11px; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.5px;">Conferma d'Ordine</div>
+            <div style="font-size: 18px; font-weight: 800; margin: 2px 0;">${printable.orderNumber || ''}</div>
+            <div style="font-size: 11px;">Data: ${printable.date || ''}</div>
           </div>
         </div>
 
@@ -617,9 +696,10 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
 /**
  * Directly renders and downloads a crisp A4 PDF document
  */
-export async function downloadOrderPdf(orderOrData: any, client?: any): Promise<boolean> {
+export async function downloadOrderPdf(orderOrData: any, client?: any, companyHeader?: CompanyHeaderData): Promise<boolean> {
   const printable = buildPrintableFromOrder(orderOrData, client);
-  const html = buildOrderDocumentHtml(printable);
+  const header = companyHeader || await fetchCompanyHeaderData();
+  const html = buildOrderDocumentHtml(printable, header);
 
   try {
     // Create an off-screen render container
@@ -671,9 +751,10 @@ export async function downloadOrderPdf(orderOrData: any, client?: any): Promise<
 /**
  * Universal print method: builds iframe, triggers print, and gracefully falls back to PDF if blocked
  */
-export async function printOrderDocument(orderOrData: any, client?: any): Promise<void> {
+export async function printOrderDocument(orderOrData: any, client?: any, companyHeader?: CompanyHeaderData): Promise<void> {
   const printable = buildPrintableFromOrder(orderOrData, client);
-  const html = buildOrderDocumentHtml(printable);
+  const header = companyHeader || await fetchCompanyHeaderData();
+  const html = buildOrderDocumentHtml(printable, header);
 
   let printSuccess = false;
 
@@ -738,5 +819,5 @@ export async function printOrderDocument(orderOrData: any, client?: any): Promis
 
   // Fallback 2: Automatic PDF download so the user ALWAYS gets their printed/printable order!
   console.log('Falling back to high-res PDF generation and download...');
-  await downloadOrderPdf(printable);
+  await downloadOrderPdf(printable, client, header);
 }

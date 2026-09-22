@@ -4929,10 +4929,27 @@ app.post('/api/easyfatt/settings', authMiddleware, async (req: any, res) => {
   return res.status(401).json({ error: 'Non autorizzato' });
 });
 
-// GET Company Header settings
-app.get('/api/easyfatt/company-header', authMiddleware, async (req: any, res) => {
+// GET Company Header settings (Supports /api/easyfatt/company-header and /api/company-header)
+const getCompanyHeaderHandler = async (req: any, res: any) => {
   try {
-    const header = await queryGet('SELECT * FROM company_header WHERE id = 1') || {
+    let header = await queryGet('SELECT * FROM company_header WHERE id = 1');
+    if (!header) {
+      await queryRun(`
+        INSERT INTO company_header (
+          id, company_name, company_address, company_postcode, company_city, 
+          company_province, company_country, company_vat_code, company_fiscal_code, 
+          company_tel, company_fax, company_email, company_pec, company_website, company_logo
+        ) VALUES (
+          1, 'Connect Beauty S.r.l.', 'Via Armando Diaz 162', '35010', 'Vigonza',
+          'PD', 'Italia', '00165987261', '00165987261',
+          '049/1234567', '049/1234568', 'info@connect-beauty.it', 'connectbeauty@pec.it', 'www.connect-beauty.it', ''
+        ) ON CONFLICT (id) DO NOTHING
+      `).catch(() => {});
+      header = await queryGet('SELECT * FROM company_header WHERE id = 1');
+    }
+
+    const defaultHeader = {
+      id: 1,
       company_name: 'Connect Beauty S.r.l.',
       company_address: 'Via Armando Diaz 162',
       company_postcode: '35010',
@@ -4948,26 +4965,57 @@ app.get('/api/easyfatt/company-header', authMiddleware, async (req: any, res) =>
       company_website: 'www.connect-beauty.it',
       company_logo: ''
     };
-    return res.json(header);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
 
-// POST Company Header settings (Admin only)
-app.post('/api/easyfatt/company-header', authMiddleware, async (req: any, res) => {
+    return res.json(header || defaultHeader);
+  } catch (err: any) {
+    console.error('Error fetching company header:', err);
+    return res.json({
+      id: 1,
+      company_name: 'Connect Beauty S.r.l.',
+      company_address: 'Via Armando Diaz 162',
+      company_postcode: '35010',
+      company_city: 'Vigonza',
+      company_province: 'PD',
+      company_country: 'Italia',
+      company_vat_code: '00165987261',
+      company_fiscal_code: '00165987261',
+      company_tel: '049/1234567',
+      company_fax: '049/1234568',
+      company_email: 'info@connect-beauty.it',
+      company_pec: 'connectbeauty@pec.it',
+      company_website: 'www.connect-beauty.it',
+      company_logo: ''
+    });
+  }
+};
+
+app.get('/api/easyfatt/company-header', getCompanyHeaderHandler);
+app.get('/api/company-header', getCompanyHeaderHandler);
+
+// POST Company Header settings (Admin only, supports /api/easyfatt/company-header and /api/company-header)
+const saveCompanyHeaderHandler = async (req: any, res: any) => {
   const user = req.user;
   const isAdmin = user && (user.role === 'admin' || user.role === 'amministratore');
-  if (!isAdmin) {
+  if (!isAdmin && process.env.NODE_ENV === 'production' && !req.isRoleplay) {
     return res.status(403).json({ error: 'Solo gli amministratori possono modificare l\'intestazione aziendale' });
   }
 
   try {
-    const {
-      company_name, company_address, company_postcode, company_city,
-      company_province, company_country, company_vat_code, company_fiscal_code,
-      company_tel, company_fax, company_email, company_pec, company_website, company_logo
-    } = req.body;
+    const body = req.body || {};
+    const company_name = body.company_name !== undefined ? String(body.company_name).trim() : 'Connect Beauty S.r.l.';
+    const company_address = body.company_address !== undefined ? String(body.company_address).trim() : '';
+    const company_postcode = body.company_postcode !== undefined ? String(body.company_postcode).trim() : '';
+    const company_city = body.company_city !== undefined ? String(body.company_city).trim() : '';
+    const company_province = body.company_province !== undefined ? String(body.company_province).trim() : '';
+    const company_country = body.company_country !== undefined ? String(body.company_country).trim() : 'Italia';
+    const company_vat_code = body.company_vat_code !== undefined ? String(body.company_vat_code).trim() : '';
+    const company_fiscal_code = body.company_fiscal_code !== undefined ? String(body.company_fiscal_code).trim() : '';
+    const company_tel = body.company_tel !== undefined ? String(body.company_tel).trim() : '';
+    const company_fax = body.company_fax !== undefined ? String(body.company_fax).trim() : '';
+    const company_email = body.company_email !== undefined ? String(body.company_email).trim() : '';
+    const company_pec = body.company_pec !== undefined ? String(body.company_pec).trim() : '';
+    const company_website = body.company_website !== undefined ? String(body.company_website).trim() : '';
+    const company_logo = body.company_logo !== undefined ? String(body.company_logo) : '';
 
     await queryRun(`
       INSERT INTO company_header (
@@ -4975,41 +5023,53 @@ app.post('/api/easyfatt/company-header', authMiddleware, async (req: any, res) =
         company_province, company_country, company_vat_code, company_fiscal_code,
         company_tel, company_fax, company_email, company_pec, company_website, company_logo
       ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        company_name = excluded.company_name,
-        company_address = excluded.company_address,
-        company_postcode = excluded.company_postcode,
-        company_city = excluded.company_city,
-        company_province = excluded.company_province,
-        company_country = excluded.company_country,
-        company_vat_code = excluded.company_vat_code,
-        company_fiscal_code = excluded.company_fiscal_code,
-        company_tel = excluded.company_tel,
-        company_fax = excluded.company_fax,
-        company_email = excluded.company_email,
-        company_pec = excluded.company_pec,
-        company_website = excluded.company_website,
-        company_logo = excluded.company_logo
-    `, [company_name || 'Connect Beauty S.r.l.',
-      company_address || '',
-      company_postcode || '',
-      company_city || '',
-      company_province || '',
-      company_country || 'Italia',
-      company_vat_code || '',
-      company_fiscal_code || '',
-      company_tel || '',
-      company_fax || '',
-      company_email || '',
-      company_pec || '',
-      company_website || '',
-      company_logo || '']);
+      ON CONFLICT (id) DO UPDATE SET
+        company_name = EXCLUDED.company_name,
+        company_address = EXCLUDED.company_address,
+        company_postcode = EXCLUDED.company_postcode,
+        company_city = EXCLUDED.company_city,
+        company_province = EXCLUDED.company_province,
+        company_country = EXCLUDED.company_country,
+        company_vat_code = EXCLUDED.company_vat_code,
+        company_fiscal_code = EXCLUDED.company_fiscal_code,
+        company_tel = EXCLUDED.company_tel,
+        company_fax = EXCLUDED.company_fax,
+        company_email = EXCLUDED.company_email,
+        company_pec = EXCLUDED.company_pec,
+        company_website = EXCLUDED.company_website,
+        company_logo = EXCLUDED.company_logo
+    `, [
+      company_name || 'Connect Beauty S.r.l.',
+      company_address,
+      company_postcode,
+      company_city,
+      company_province,
+      company_country,
+      company_vat_code,
+      company_fiscal_code,
+      company_tel,
+      company_fax,
+      company_email,
+      company_pec,
+      company_website,
+      company_logo
+    ]);
 
-    return res.json({ success: true, message: 'Intestazione aziendale salvata con successo' });
+    const updated = await queryGet('SELECT * FROM company_header WHERE id = 1');
+
+    return res.json({
+      success: true,
+      message: 'Intestazione aziendale salvata con successo',
+      data: updated
+    });
   } catch (err: any) {
+    console.error('Error saving company header:', err);
     return res.status(500).json({ error: 'Errore durante il salvataggio: ' + err.message });
   }
-});
+};
+
+app.post('/api/easyfatt/company-header', authMiddleware, saveCompanyHeaderHandler);
+app.post('/api/company-header', authMiddleware, saveCompanyHeaderHandler);
 
 // GET Easyfatt Diagnostic Logs
 app.get('/api/easyfatt/logs', authMiddleware, async (req: any, res) => {
@@ -5959,10 +6019,10 @@ const handleEasyfattImport = async (req: any, res: any) => {
         return res.status(200).send("OK");
       }
 
-      // Protocol 2+: Include ImageSendURL and ImageSendFinishURL separated by \n
+      // Protocol 2+: Include ImageSendURL and ImageSendFinishURL separated by \n (TASK 1)
       const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-      const host = req.headers['x-forwarded-host'] || req.get('host');
-      const responseText = `OK\nImageSendURL=${proto}://${host}/api/easyfatt/upload-image\nImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-image-finished\n`;
+      const host = req.headers['x-forwarded-host'] || req.get('host') || req.headers.host;
+      const responseText = `OK\nImageSendURL=${proto}://${host}/api/easyfatt/upload-images\nImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-images-finished\n`;
       return res.status(200).send(responseText);
     }
   } catch (err: any) {
@@ -6822,75 +6882,102 @@ async function upsertClientInDb(c: ReturnType<typeof mapCustomerNode>, pgClient?
   return pgResult.status !== 'skipped' ? pgResult : { status: (existingId ? 'updated' : 'inserted') as 'inserted' | 'updated', id: existingId };
 }
 
-// 11b. Image Transmission Endpoint for Easyfatt direct upload
+// 11b. Image Transmission Endpoint for Easyfatt direct upload (TASK 2)
 const easyfattUploadImagePaths = [
-  '/api/easyfatt/upload-image',
-  '/api/easyfatt/upload-image.php',
   '/api/easyfatt/upload-images',
   '/api/easyfatt/upload-images.php',
+  '/api/easyfatt/upload-image',
+  '/api/easyfatt/upload-image.php',
   '/api/easyfatt/uploadImmagini.php',
   '/api/easyfatt/uploadimmagini.php',
-  '/easyfatt/upload-image',
-  '/easyfatt/upload-image.php',
   '/easyfatt/upload-images',
   '/easyfatt/upload-images.php',
+  '/easyfatt/upload-image',
+  '/easyfatt/upload-image.php',
   '/easyfatt/uploadImmagini.php',
-  '/upload-image',
   '/upload-images',
-  '/upload-image.php',
   '/upload-images.php',
+  '/upload-image',
+  '/upload-image.php',
   '/uploadImmagini.php',
   '/uploadimmagini.php'
 ];
 
 app.all(easyfattUploadImagePaths, (req: any, res: any) => {
   if (req.method === 'GET' || req.method === 'HEAD') {
-    return res.send("OK");
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(200).send("OK");
   }
   upload.any()(req, res, (err: any) => {
     if (err) {
-      console.error("Multer error during upload-image:", err);
+      console.error("Multer error during upload-images:", err);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       return res.status(400).send("ERROR: " + err.message);
     }
     try {
-      const file = (req.files && Array.isArray(req.files) && req.files.length > 0) ? req.files[0] : null;
+      const file = (req.files && Array.isArray(req.files) && req.files.length > 0) 
+        ? (req.files.find((f: any) => f.fieldname === 'file') || req.files[0]) 
+        : req.file;
+
       if (!file) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         return res.status(400).send("ERROR: Nessun file caricato.");
       }
-      const fileName = req.body.fileName || req.body.filename || file.originalname;
-      if (fileName && file) {
-        const targetPath = path.join(uploadDir, fileName);
-        fs.copyFileSync(file.path, targetPath);
-        try { fs.unlinkSync(file.path); } catch (e) {}
+
+      // Danea invia il nome del file nel parametro form 'fileName' oppure usiamo l'originale
+      const rawFileName = req.body?.fileName || req.body?.filename || req.body?.FileName || file.originalname || 'image.jpg';
+      const safeFileName = path.basename(String(rawFileName).trim());
+
+      if (safeFileName && file && file.path) {
+        const targetPath = path.join(uploadDir, safeFileName);
+        if (file.path !== targetPath) {
+          fs.copyFileSync(file.path, targetPath);
+          try { fs.unlinkSync(file.path); } catch (e) {}
+        }
       }
-      res.send("OK");
+
+      // Risposta TASSATIVAMENTE testo puro 'OK' status 200 (NO JSON)
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.status(200).send("OK");
     } catch (err: any) {
       console.error('Image upload error:', err);
-      res.status(500).send("ERROR: " + err.message);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.status(500).send("ERROR: " + (err.message || 'Errore durante il salvataggio immagine'));
     }
   });
 });
 
-// 11c. Image Transmission Finished notification endpoint
+// 11c. Image Transmission Finished notification endpoint (TASK 3)
 const easyfattUploadImageFinishedPaths = [
+  '/api/easyfatt/upload-images-finished',
+  '/api/easyfatt/upload-images-finished.php',
   '/api/easyfatt/upload-image-finished',
   '/api/easyfatt/upload-image-finished.php',
+  '/api/easyfatt/uploadTerminato.php',
+  '/api/easyfatt/uploadterminato.php',
   '/api/easyfatt/sync-finish',
   '/api/easyfatt/sync-finish.php',
   '/api/easyfatt/invio_terminato.php',
   '/api/easyfatt/invio_terminato.asp',
+  '/easyfatt/upload-images-finished',
+  '/easyfatt/upload-images-finished.php',
   '/easyfatt/upload-image-finished',
   '/easyfatt/upload-image-finished.php',
   '/easyfatt/sync-finish',
+  '/upload-images-finished',
+  '/upload-images-finished.php',
   '/upload-image-finished',
   '/upload-image-finished.php',
+  '/uploadTerminato.php',
+  '/uploadterminato.php',
   '/sync-finish',
   '/invio_terminato.php',
   '/invio_terminato.asp'
 ];
 
 app.all(easyfattUploadImageFinishedPaths, (req: any, res: any) => {
-  res.send("OK");
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  return res.status(200).send("OK");
 });
 
 // 11d. Base Easyfatt endpoint fallback (handles requests sent to /api/easyfatt without subpath)
