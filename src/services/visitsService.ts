@@ -6,25 +6,37 @@ export interface CreateVisitInput {
   visit_date: string;
   time_slot?: string;
   notes?: string;
+  is_joint?: number;
+  host_agent_id?: number | null;
 }
 
 /**
  * Inserts a new agent visit into PostgreSQL.
- * Exactly 5 arguments align with the 5 placeholders ($1..$5).
+ * Exactly 7 arguments align with the 7 placeholders ($1..$7).
  */
 export async function createAgentVisit(
   agent_id: number,
   client_id: number,
   visit_date: string,
   time_slot: string = '09:00',
-  notes: string = ''
+  notes: string = '',
+  is_joint: number = 0,
+  host_agent_id?: number | null
 ) {
   const query = `
-    INSERT INTO agent_visits (agent_id, client_id, visit_date, time_slot, notes)
-    VALUES ($1, $2, $3, $4, $5)
+    INSERT INTO agent_visits (agent_id, client_id, visit_date, time_slot, notes, is_joint, host_agent_id)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
     RETURNING *
   `;
-  const params = [agent_id, client_id, visit_date, time_slot, notes];
+  const params = [
+    Number(agent_id),
+    Number(client_id),
+    String(visit_date),
+    String(time_slot || '09:00'),
+    String(notes || ''),
+    Number(is_joint || 0),
+    host_agent_id ? Number(host_agent_id) : Number(agent_id)
+  ];
   const result = await pool.query(query, params);
   return result.rows[0];
 }

@@ -268,6 +268,10 @@ export async function upsertClientInPostgres(
     const res = await clientOrPool.query('SELECT id FROM clients WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) LIMIT 1', [email]);
     if (res.rows.length > 0) existingId = res.rows[0].id;
   }
+  if (!existingId && c.pec && String(c.pec).trim()) {
+    const res = await clientOrPool.query('SELECT id FROM clients WHERE LOWER(TRIM(pec)) = LOWER(TRIM($1)) LIMIT 1', [String(c.pec).trim()]);
+    if (res.rows.length > 0) existingId = res.rows[0].id;
+  }
   if (!existingId) {
     const res = await clientOrPool.query('SELECT id FROM clients WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1', [name]);
     if (res.rows.length > 0) existingId = res.rows[0].id;
@@ -360,7 +364,7 @@ export async function upsertProductsBatchInPostgres(
   let totalInserted = 0;
   let totalUpdated = 0;
 
-  const BATCH_SIZE = 50;
+  const BATCH_SIZE = 100;
   for (let i = 0; i < validProducts.length; i += BATCH_SIZE) {
     const batch = validProducts.slice(i, i + BATCH_SIZE);
     try {
@@ -492,37 +496,80 @@ export async function upsertProductsBatchInPostgres(
         }
       }
 
-      // Handle variants & extra barcodes in PostgreSQL
+      // Handle variants & extra barcodes in PostgreSQL using batch queries
+      const batchProdIdsWithVariants: number[] = [];
+      const allVariantRows: { prodId: number; size: string | null; color: string | null; barcode: string | null; available_qty: number }[] = [];
+      const batchProdIdsWithBarcodes: number[] = [];
+      const allBarcodeRows: { prodId: number; barcode: string; package_qty: number | null }[] = [];
+
       for (const p of batch) {
         const prodId = codeToIdMap.get(String(p.code).trim());
         if (!prodId) continue;
 
         if (p.variants && p.variants.length > 0) {
-          try {
-            await clientOrPool.query('DELETE FROM product_variants WHERE product_id = $1', [prodId]);
-            for (const v of p.variants) {
-              await clientOrPool.query(
-                'INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES ($1, $2, $3, $4, $5)',
-                [prodId, v.size || null, v.color || null, v.barcode || null, Number(v.available_qty) || 0.0]
-              );
-            }
-          } catch (vErr: any) {
-            console.error(`[PostgreSQL Variants Warning] Error for product ${p.code}:`, vErr?.message || vErr);
+          batchProdIdsWithVariants.push(prodId);
+          for (const v of p.variants) {
+            allVariantRows.push({
+              prodId,
+              size: v.size || null,
+              color: v.color || null,
+              barcode: v.barcode || null,
+              available_qty: Number(v.available_qty) || 0.0
+            });
           }
         }
 
         if (p.extra_barcodes && p.extra_barcodes.length > 0) {
-          try {
-            await clientOrPool.query('DELETE FROM product_extra_barcodes WHERE product_id = $1', [prodId]);
-            for (const eb of p.extra_barcodes) {
-              await clientOrPool.query(
-                'INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES ($1, $2, $3)',
-                [prodId, eb.barcode, eb.package_qty !== null && eb.package_qty !== undefined ? Number(eb.package_qty) : null]
-              );
-            }
-          } catch (ebErr: any) {
-            console.error(`[PostgreSQL ExtraBarcodes Warning] Error for product ${p.code}:`, ebErr?.message || ebErr);
+          batchProdIdsWithBarcodes.push(prodId);
+          for (const eb of p.extra_barcodes) {
+            allBarcodeRows.push({
+              prodId,
+              barcode: eb.barcode,
+              package_qty: eb.package_qty !== null && eb.package_qty !== undefined ? Number(eb.package_qty) : null
+            });
           }
+        }
+      }
+
+      if (batchProdIdsWithVariants.length > 0) {
+        try {
+          await clientOrPool.query('DELETE FROM product_variants WHERE product_id = ANY($1)', [batchProdIdsWithVariants]);
+          if (allVariantRows.length > 0) {
+            const vPlaceholders: string[] = [];
+            const vParams: any[] = [];
+            let vIdx = 1;
+            for (const vr of allVariantRows) {
+              vPlaceholders.push(`($${vIdx++}, $${vIdx++}, $${vIdx++}, $${vIdx++}, $${vIdx++})`);
+              vParams.push(vr.prodId, vr.size, vr.color, vr.barcode, vr.available_qty);
+            }
+            await clientOrPool.query(
+              `INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES ${vPlaceholders.join(', ')}`,
+              vParams
+            );
+          }
+        } catch (vErr: any) {
+          console.error('[PostgreSQL Batch Variants Warning]', vErr?.message || vErr);
+        }
+      }
+
+      if (batchProdIdsWithBarcodes.length > 0) {
+        try {
+          await clientOrPool.query('DELETE FROM product_extra_barcodes WHERE product_id = ANY($1)', [batchProdIdsWithBarcodes]);
+          if (allBarcodeRows.length > 0) {
+            const bPlaceholders: string[] = [];
+            const bParams: any[] = [];
+            let bIdx = 1;
+            for (const br of allBarcodeRows) {
+              bPlaceholders.push(`($${bIdx++}, $${bIdx++}, $${bIdx++})`);
+              bParams.push(br.prodId, br.barcode, br.package_qty);
+            }
+            await clientOrPool.query(
+              `INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES ${bPlaceholders.join(', ')}`,
+              bParams
+            );
+          }
+        } catch (ebErr: any) {
+          console.error('[PostgreSQL Batch ExtraBarcodes Warning]', ebErr?.message || ebErr);
         }
       }
     } catch (batchErr: any) {
@@ -569,15 +616,171 @@ export async function upsertClientsBatchInPostgres(
   let totalInserted = 0;
   let totalUpdated = 0;
 
-  const BATCH_SIZE = 50;
+  const BATCH_SIZE = 100;
   for (let i = 0; i < validClients.length; i += BATCH_SIZE) {
     const batch = validClients.slice(i, i + BATCH_SIZE);
+    let batchInserted = 0;
+    let batchUpdated = 0;
+
     try {
-      for (const c of batch) {
-        const res = await upsertClientInPostgres(c, clientOrPool);
-        if (res.status === 'inserted') totalInserted++;
-        if (res.status === 'updated') totalUpdated++;
+      // 1. Pre-insert payment methods in bulk if provided
+      const paymentMethods = Array.from(
+        new Set(batch.map(c => c.payment_name ? String(c.payment_name).trim() : '').filter(Boolean))
+      );
+      if (paymentMethods.length > 0) {
+        try {
+          await clientOrPool.query(
+            'INSERT INTO payment_methods (name) SELECT unnest($1::text[]) ON CONFLICT (name) DO NOTHING',
+            [paymentMethods]
+          );
+        } catch (pmErr) {
+          // Non-blocking fallback
+        }
       }
+
+      // 2. Separate clients with code vs without code
+      const clientsWithCode: ClientUpsertPayload[] = [];
+      const clientsWithoutCode: ClientUpsertPayload[] = [];
+
+      for (const c of batch) {
+        if (c.code && String(c.code).trim()) {
+          clientsWithCode.push(c);
+        } else {
+          clientsWithoutCode.push(c);
+        }
+      }
+
+      // 3. Process clients with code using single multi-row INSERT ... ON CONFLICT (code)
+      if (clientsWithCode.length > 0) {
+        const batchCodes = clientsWithCode.map(c => String(c.code).trim());
+        const existingRes = await clientOrPool.query(
+          'SELECT code FROM clients WHERE code = ANY($1)',
+          [batchCodes]
+        );
+        const existingCodeSet = new Set(existingRes.rows.map(r => r.code));
+
+        const valueRows: string[] = [];
+        const queryParams: any[] = [];
+        let paramIdx = 1;
+
+        for (const c of clientsWithCode) {
+          const code = String(c.code).trim();
+          const name = String(c.name).trim();
+          const webLogin = c.web_login ? String(c.web_login).trim() : null;
+          const address = c.address ? String(c.address).trim() : null;
+          const postcode = c.postcode ? String(c.postcode).trim() : null;
+          const city = c.city ? String(c.city).trim() : null;
+          const province = c.province ? String(c.province).trim() : null;
+          const country = c.country ? String(c.country).trim() : 'Italia';
+          const fiscalCode = c.fiscal_code ? String(c.fiscal_code).trim() : null;
+          const vatCode = c.vat_code ? String(c.vat_code).trim() : null;
+          const sdiPec = c.sdi_pec ? String(c.sdi_pec).trim() : null;
+          const phone = c.phone ? String(c.phone).trim() : null;
+          const cellPhone = c.cell_phone ? String(c.cell_phone).trim() : null;
+          const fax = c.fax ? String(c.fax).trim() : null;
+          const email = c.email ? String(c.email).trim() : null;
+          const pec = c.pec ? String(c.pec).trim() : null;
+          const contact = c.contact ? String(c.contact).trim() : null;
+          const agente = c.agente ? String(c.agente).trim() : null;
+          const deliveryName = c.delivery_name ? String(c.delivery_name).trim() : null;
+          const deliveryAddress = c.delivery_address ? String(c.delivery_address).trim() : null;
+          const deliveryPostcode = c.delivery_postcode ? String(c.delivery_postcode).trim() : null;
+          const deliveryCity = c.delivery_city ? String(c.delivery_city).trim() : null;
+          const deliveryProvince = c.delivery_province ? String(c.delivery_province).trim() : null;
+          const deliveryCountry = c.delivery_country ? String(c.delivery_country).trim() : null;
+          const priceList = c.price_list ? String(c.price_list).trim() : null;
+          const paymentName = c.payment_name ? String(c.payment_name).trim() : null;
+          const paymentBank = c.payment_bank ? String(c.payment_bank).trim() : null;
+          const customField1 = c.custom_field1 ? String(c.custom_field1).trim() : null;
+          const customField2 = c.custom_field2 ? String(c.custom_field2).trim() : null;
+          const customField3 = c.custom_field3 ? String(c.custom_field3).trim() : null;
+          const customField4 = c.custom_field4 ? String(c.custom_field4).trim() : null;
+          const notes = c.notes ? String(c.notes).trim() : null;
+
+          const rowPlaceholders: string[] = [];
+          const rowVals = [
+            code, name, webLogin, address, postcode, city, province, country,
+            fiscalCode, vatCode, sdiPec, phone, cellPhone, fax, email, pec,
+            contact, agente, deliveryName, deliveryAddress, deliveryPostcode,
+            deliveryCity, deliveryProvince, deliveryCountry, priceList, paymentName, paymentBank,
+            customField1, customField2, customField3, customField4, notes
+          ];
+
+          for (const val of rowVals) {
+            rowPlaceholders.push(`$${paramIdx++}`);
+            queryParams.push(val);
+          }
+          valueRows.push(`(${rowPlaceholders.join(', ')})`);
+        }
+
+        const sql = `
+          INSERT INTO clients (
+            code, name, web_login, address, postcode, city, province, country,
+            fiscal_code, vat_code, sdi_pec, phone, cell_phone, fax, email, pec,
+            contact, agente, delivery_name, delivery_address, delivery_postcode,
+            delivery_city, delivery_province, delivery_country, price_list, payment_name, payment_bank,
+            custom_field1, custom_field2, custom_field3, custom_field4, notes
+          )
+          VALUES ${valueRows.join(', ')}
+          ON CONFLICT (code) DO UPDATE SET
+            name = EXCLUDED.name,
+            web_login = EXCLUDED.web_login,
+            address = EXCLUDED.address,
+            postcode = EXCLUDED.postcode,
+            city = EXCLUDED.city,
+            province = EXCLUDED.province,
+            country = EXCLUDED.country,
+            fiscal_code = EXCLUDED.fiscal_code,
+            vat_code = EXCLUDED.vat_code,
+            sdi_pec = EXCLUDED.sdi_pec,
+            phone = EXCLUDED.phone,
+            cell_phone = EXCLUDED.cell_phone,
+            fax = EXCLUDED.fax,
+            email = EXCLUDED.email,
+            pec = EXCLUDED.pec,
+            contact = EXCLUDED.contact,
+            agente = COALESCE(EXCLUDED.agente, clients.agente),
+            delivery_name = EXCLUDED.delivery_name,
+            delivery_address = EXCLUDED.delivery_address,
+            delivery_postcode = EXCLUDED.delivery_postcode,
+            delivery_city = EXCLUDED.delivery_city,
+            delivery_province = EXCLUDED.delivery_province,
+            delivery_country = EXCLUDED.delivery_country,
+            price_list = EXCLUDED.price_list,
+            payment_name = EXCLUDED.payment_name,
+            payment_bank = EXCLUDED.payment_bank,
+            custom_field1 = EXCLUDED.custom_field1,
+            custom_field2 = EXCLUDED.custom_field2,
+            custom_field3 = EXCLUDED.custom_field3,
+            custom_field4 = EXCLUDED.custom_field4,
+            notes = EXCLUDED.notes
+          RETURNING id, code;
+        `;
+
+        const res = await clientOrPool.query(sql, queryParams);
+        const returnedRows = res.rows || [];
+
+        for (const r of returnedRows) {
+          if (existingCodeSet.has(r.code)) {
+            batchUpdated++;
+          } else {
+            batchInserted++;
+          }
+        }
+      }
+
+      // 4. Handle any clients without code safely
+      for (const c of clientsWithoutCode) {
+        const res = await upsertClientInPostgres(c, clientOrPool);
+        if (res.status === 'inserted') batchInserted++;
+        if (res.status === 'updated') batchUpdated++;
+      }
+
+      totalInserted += batchInserted;
+      totalUpdated += batchUpdated;
+
+      // 5. Single summary log per batch
+      console.log(`[SYNC] Batch of ${batch.length} clients processed successfully (${batchInserted} inserted, ${batchUpdated} updated)`);
     } catch (batchErr: any) {
       console.error(`[PostgreSQL Batch Clients ERROR] Failed batch chunk starting at index ${i}:`, batchErr?.message || batchErr);
     }
@@ -588,7 +791,16 @@ export async function upsertClientsBatchInPostgres(
 
 export function formatQuery(sql: string): string {
   let paramIndex = 1;
-  return sql.replace(/\?/g, () => `$${paramIndex++}`);
+  let formatted = sql
+    .replace(/datetime\s*\(\s*'now'\s*,\s*'-(\d+)\s*hours?'\s*\)/gi, "(NOW() - INTERVAL '$1 hours')")
+    .replace(/datetime\s*\(\s*'now'\s*,\s*'\+(\d+)\s*hours?'\s*\)/gi, "(NOW() + INTERVAL '$1 hours')")
+    .replace(/datetime\s*\(\s*'now'\s*,\s*'-(\d+)\s*days?'\s*\)/gi, "(NOW() - INTERVAL '$1 days')")
+    .replace(/datetime\s*\(\s*'now'\s*,\s*'\+(\d+)\s*days?'\s*\)/gi, "(NOW() + INTERVAL '$1 days')")
+    .replace(/date\s*\(\s*'now'\s*,\s*'-(\d+)\s*days?'\s*\)/gi, "(CURRENT_DATE - INTERVAL '$1 days')")
+    .replace(/date\s*\(\s*'now'\s*,\s*'\+(\d+)\s*days?'\s*\)/gi, "(CURRENT_DATE + INTERVAL '$1 days')")
+    .replace(/datetime\s*\(\s*'now'\s*\)/gi, 'NOW()')
+    .replace(/date\s*\(\s*'now'\s*\)/gi, 'CURRENT_DATE');
+  return formatted.replace(/\?/g, () => `$${paramIndex++}`);
 }
 
 export function sanitizeSql(sql: string): string {
@@ -602,39 +814,60 @@ export function sanitizeSql(sql: string): string {
     .replace(/INSERT\s+OR\s+IGNORE\s+/gi, 'INSERT ');
 }
 
+export function normalizeParams(sql: string, params: any[] = []): any[] {
+  if (!Array.isArray(params)) return [];
+  // If params is [[...]] and the query placeholders count matches the inner array (or 0 when empty)
+  if (params.length === 1 && Array.isArray(params[0])) {
+    const questionMarks = (sql.match(/\?/g) || []).length;
+    const dollarMatches = (sql.match(/\$\d+/g) || []).length;
+    const placeholderCount = Math.max(questionMarks, dollarMatches);
+    if (placeholderCount === 0 && params[0].length === 0) {
+      return [];
+    }
+    if (placeholderCount === params[0].length) {
+      return params[0];
+    }
+  }
+  return params;
+}
+
 export async function query<T = any>(sql: string, params: any[] = []): Promise<pg.QueryResult<T>> {
+  const normParams = normalizeParams(sql, params);
   const formattedSql = formatQuery(sql);
   try {
-    return await pool.query<T>(formattedSql, params);
+    return await pool.query<T>(formattedSql, normParams);
   } catch (err: any) {
-    console.error(`[DB ERROR - Neon PostgreSQL query failed] SQL: "${formattedSql}", Params: ${JSON.stringify(params)} - Error: ${err?.message || err}`);
+    console.error(`[DB ERROR - Neon PostgreSQL query failed] SQL: "${formattedSql}", Params: ${JSON.stringify(normParams)} - Error: ${err?.message || err}`);
     throw err;
   }
 }
 
 export async function queryGet<T = any>(sql: string, params: any[] = []): Promise<T | undefined> {
+  const normParams = normalizeParams(sql, params);
   const formattedSql = formatQuery(sql);
   try {
-    const res = await pool.query(formattedSql, params);
+    const res = await pool.query(formattedSql, normParams);
     return res.rows[0];
   } catch (err: any) {
-    console.error(`[DB ERROR - Neon PostgreSQL queryGet failed] SQL: "${formattedSql}", Params: ${JSON.stringify(params)} - Error: ${err?.message || err}`);
+    console.error(`[DB ERROR - Neon PostgreSQL queryGet failed] SQL: "${formattedSql}", Params: ${JSON.stringify(normParams)} - Error: ${err?.message || err}`);
     throw err;
   }
 }
 
 export async function queryAll<T = any>(sql: string, params: any[] = []): Promise<T[]> {
+  const normParams = normalizeParams(sql, params);
   const formattedSql = formatQuery(sql);
   try {
-    const res = await pool.query(formattedSql, params);
+    const res = await pool.query(formattedSql, normParams);
     return res.rows;
   } catch (err: any) {
-    console.error(`[DB ERROR - Neon PostgreSQL queryAll failed] SQL: "${formattedSql}", Params: ${JSON.stringify(params)} - Error: ${err?.message || err}`);
+    console.error(`[DB ERROR - Neon PostgreSQL queryAll failed] SQL: "${formattedSql}", Params: ${JSON.stringify(normParams)} - Error: ${err?.message || err}`);
     throw err;
   }
 }
 
 export async function queryRun(sql: string, params: any[] = []): Promise<{ changes: number; rowCount: number; lastInsertRowid?: number | string }> {
+  const normParams = normalizeParams(sql, params);
   let formattedSql = formatQuery(sql);
   const isInsert = /^\s*INSERT\s+/i.test(formattedSql);
   const hasReturning = /\bRETURNING\b/i.test(formattedSql);
@@ -644,7 +877,7 @@ export async function queryRun(sql: string, params: any[] = []): Promise<{ chang
   }
 
   try {
-    const res = await pool.query(formattedSql, params);
+    const res = await pool.query(formattedSql, normParams);
     const insertedRow = res.rows[0];
     const lastInsertRowid = insertedRow ? (insertedRow.id ?? insertedRow.user_id ?? insertedRow.task_id) : undefined;
 
@@ -654,7 +887,7 @@ export async function queryRun(sql: string, params: any[] = []): Promise<{ chang
       lastInsertRowid,
     };
   } catch (err: any) {
-    console.error(`[DB ERROR - Neon PostgreSQL queryRun failed] SQL: "${formattedSql}", Params: ${JSON.stringify(params)} - Error: ${err?.message || err}`);
+    console.error(`[DB ERROR - Neon PostgreSQL queryRun failed] SQL: "${formattedSql}", Params: ${JSON.stringify(normParams)} - Error: ${err?.message || err}`);
     throw err;
   }
 }
@@ -856,8 +1089,8 @@ export async function initDatabase(): Promise<void> {
       notes TEXT,
       total REAL DEFAULT 0.0,
       status TEXT DEFAULT 'Nuovo',
-      is_imported INTEGER DEFAULT 0,
-      is_synced INTEGER DEFAULT 0,
+      is_imported BOOLEAN DEFAULT false,
+      is_synced BOOLEAN DEFAULT false,
       synced_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
@@ -901,7 +1134,7 @@ export async function initDatabase(): Promise<void> {
       visit_date TEXT NOT NULL,
       time_slot TEXT DEFAULT '09:00',
       notes TEXT,
-      is_joint INTEGER DEFAULT 0,
+      is_joint BOOLEAN DEFAULT false,
       host_agent_id INTEGER,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(agent_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -939,9 +1172,64 @@ export async function initDatabase(): Promise<void> {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(client_id) REFERENCES clients(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS order_payments (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER,
+      client_id INTEGER,
+      amount NUMERIC(12,4) NOT NULL DEFAULT 0.0,
+      due_date TEXT NOT NULL,
+      is_paid BOOLEAN DEFAULT FALSE,
+      paid_date TEXT,
+      payment_method VARCHAR(100),
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
+      FOREIGN KEY(client_id) REFERENCES clients(id) ON DELETE CASCADE
+    );
     `);
     } catch (tableErr) {
       console.error('[PostgreSQL Engine ERROR] Error creating initial tables:', tableErr);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS order_payments (
+          id SERIAL PRIMARY KEY,
+          order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+          client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+          due_date DATE NOT NULL,
+          amount NUMERIC(12,4) NOT NULL DEFAULT 0.0,
+          is_advance BOOLEAN DEFAULT FALSE,
+          advance BOOLEAN DEFAULT FALSE,
+          is_paid BOOLEAN DEFAULT FALSE,
+          paid BOOLEAN DEFAULT FALSE,
+          paid_date DATE,
+          source_type VARCHAR(50) DEFAULT 'AUTO',
+          payment_method VARCHAR(150),
+          notes TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS is_advance BOOLEAN DEFAULT FALSE`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS advance BOOLEAN DEFAULT FALSE`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS paid BOOLEAN DEFAULT FALSE`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS paid_date DATE`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS source_type VARCHAR(50) DEFAULT 'AUTO'`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS notes TEXT`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS payment_method VARCHAR(150)`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+      await pool.query(`ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_payments_client ON order_payments(client_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_payments_order_id ON order_payments(order_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_payments_due_date ON order_payments(due_date)`);
+    } catch (e) {
+      console.error('[PostgreSQL Engine ERROR] order_payments table error:', e);
     }
 
   // Column additions safely in fast combined statements
@@ -956,15 +1244,132 @@ export async function initDatabase(): Promise<void> {
   try {
     const clientAddCols = clientCols.map(c => `ADD COLUMN IF NOT EXISTS ${c}`).join(', ');
     await pool.query(`ALTER TABLE clients ${clientAddCols}`);
+    
+    // Clean empty or blank codes to NULL to avoid duplicate empty string violations
+    await pool.query(`UPDATE clients SET code = NULL WHERE code IS NOT NULL AND TRIM(code) = ''`);
+    
+    // Deduplicate any existing duplicate client codes safely
+    await pool.query(`
+      WITH duplicate_codes AS (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(code)) ORDER BY id ASC) as rn
+        FROM clients
+        WHERE code IS NOT NULL AND TRIM(code) != ''
+      )
+      UPDATE clients
+      SET code = clients.code || '-dup-' || clients.id
+      FROM duplicate_codes
+      WHERE clients.id = duplicate_codes.id AND duplicate_codes.rn > 1
+    `);
+    
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_code ON clients (code) WHERE code IS NOT NULL AND code != ''`);
   } catch (e) {
-    console.error('[PostgreSQL Engine ERROR] clientCols alter table error:', e);
+    console.error('[PostgreSQL Engine ERROR] clientCols alter table / index error:', e);
   }
 
-  try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_imported INTEGER DEFAULT 0`); } catch (e) {
+  try {
+    await pool.query(`
+      DO $$ 
+      BEGIN 
+        -- Orders is_imported
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'orders' AND column_name = 'is_imported' AND data_type IN ('integer', 'smallint', 'bigint', 'numeric', 'text', 'character varying')
+        ) THEN
+          ALTER TABLE orders ALTER COLUMN is_imported DROP DEFAULT;
+          ALTER TABLE orders ALTER COLUMN is_imported TYPE BOOLEAN USING (CASE WHEN is_imported::text IN ('1', 'true', 't', 'TRUE') THEN true ELSE false END);
+          ALTER TABLE orders ALTER COLUMN is_imported SET DEFAULT false;
+        END IF;
+
+        -- Orders is_synced
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'orders' AND column_name = 'is_synced' AND data_type IN ('integer', 'smallint', 'bigint', 'numeric', 'text', 'character varying')
+        ) THEN
+          ALTER TABLE orders ALTER COLUMN is_synced DROP DEFAULT;
+          ALTER TABLE orders ALTER COLUMN is_synced TYPE BOOLEAN USING (CASE WHEN is_synced::text IN ('1', 'true', 't', 'TRUE') THEN true ELSE false END);
+          ALTER TABLE orders ALTER COLUMN is_synced SET DEFAULT false;
+        END IF;
+
+        -- Agent visits is_joint
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'agent_visits' AND column_name = 'is_joint' AND data_type IN ('integer', 'smallint', 'bigint', 'numeric', 'text', 'character varying')
+        ) THEN
+          ALTER TABLE agent_visits ALTER COLUMN is_joint DROP DEFAULT;
+          ALTER TABLE agent_visits ALTER COLUMN is_joint TYPE BOOLEAN USING (CASE WHEN is_joint::text IN ('1', 'true', 't', 'TRUE') THEN true ELSE false END);
+          ALTER TABLE agent_visits ALTER COLUMN is_joint SET DEFAULT false;
+        END IF;
+
+        -- Products manage_warehouse
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'products' AND column_name = 'manage_warehouse' AND data_type IN ('integer', 'smallint', 'bigint', 'numeric', 'text', 'character varying')
+        ) THEN
+          ALTER TABLE products ALTER COLUMN manage_warehouse DROP DEFAULT;
+          ALTER TABLE products ALTER COLUMN manage_warehouse TYPE BOOLEAN USING (CASE WHEN manage_warehouse::text IN ('1', 'true', 't', 'TRUE') THEN true ELSE false END);
+          ALTER TABLE products ALTER COLUMN manage_warehouse SET DEFAULT true;
+        END IF;
+
+        -- Products online_customized
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'products' AND column_name = 'online_customized' AND data_type IN ('integer', 'smallint', 'bigint', 'numeric', 'text', 'character varying')
+        ) THEN
+          ALTER TABLE products ALTER COLUMN online_customized DROP DEFAULT;
+          ALTER TABLE products ALTER COLUMN online_customized TYPE BOOLEAN USING (CASE WHEN online_customized::text IN ('1', 'true', 't', 'TRUE') THEN true ELSE false END);
+          ALTER TABLE products ALTER COLUMN online_customized SET DEFAULT false;
+        END IF;
+
+        -- Payment methods fine_mese
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'payment_methods' AND column_name = 'fine_mese' AND data_type IN ('integer', 'smallint', 'bigint', 'numeric', 'text', 'character varying')
+        ) THEN
+          ALTER TABLE payment_methods ALTER COLUMN fine_mese DROP DEFAULT;
+          ALTER TABLE payment_methods ALTER COLUMN fine_mese TYPE BOOLEAN USING (CASE WHEN fine_mese::text IN ('1', 'true', 't', 'TRUE') THEN true ELSE false END);
+          ALTER TABLE payment_methods ALTER COLUMN fine_mese SET DEFAULT false;
+        END IF;
+
+        -- User notifications is_read
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'user_notifications' AND column_name = 'is_read' AND data_type IN ('integer', 'smallint', 'bigint', 'numeric', 'text', 'character varying')
+        ) THEN
+          ALTER TABLE user_notifications ALTER COLUMN is_read DROP DEFAULT;
+          ALTER TABLE user_notifications ALTER COLUMN is_read TYPE BOOLEAN USING (CASE WHEN is_read::text IN ('1', 'true', 't', 'TRUE') THEN true ELSE false END);
+          ALTER TABLE user_notifications ALTER COLUMN is_read SET DEFAULT false;
+        END IF;
+      END $$;
+    `);
+  } catch (e) {
+    console.error('[PostgreSQL Engine ERROR] boolean column type conversion error:', e);
+  }
+
+  try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_imported BOOLEAN DEFAULT false`); } catch (e) {
     console.error('[PostgreSQL Engine ERROR] orders is_imported alter error:', e);
   }
-  try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_synced INTEGER DEFAULT 0, ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP`); } catch (e) {
+  try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_synced BOOLEAN DEFAULT false, ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP`); } catch (e) {
     console.error('[PostgreSQL Engine ERROR] orders is_synced alter error:', e);
+  }
+
+  try {
+    // Clean and deduplicate products before unique index creation
+    await pool.query(`UPDATE products SET code = 'PROD-' || id WHERE code IS NULL OR TRIM(code) = ''`);
+    await pool.query(`
+      WITH duplicate_prod_codes AS (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(code)) ORDER BY id ASC) as rn
+        FROM products
+        WHERE code IS NOT NULL AND TRIM(code) != ''
+      )
+      UPDATE products
+      SET code = products.code || '-dup-' || products.id
+      FROM duplicate_prod_codes
+      WHERE products.id = duplicate_prod_codes.id AND duplicate_prod_codes.rn > 1
+    `);
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_products_code ON products (code)');
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_code ON clients (code) WHERE code IS NOT NULL AND code != ''`);
+  } catch (e) {
+    console.error('[PostgreSQL Engine ERROR] unique indexes error:', e);
   }
 
   // Ensure non-imported orders have '/conn' suffix in their order number
@@ -976,7 +1381,7 @@ export async function initDatabase(): Promise<void> {
         WHEN number IS NULL OR number = '' THEN id::text || '/conn'
         ELSE number 
       END
-      WHERE (is_imported = 0 OR is_imported IS NULL) AND (number NOT LIKE '%/conn' OR number IS NULL OR number = '')
+      WHERE (is_imported = false OR is_imported IS NULL) AND (number NOT LIKE '%/conn' OR number IS NULL OR number = '')
     `);
   } catch (e) {
     console.error('[PostgreSQL Engine ERROR] orders /conn suffix migration error:', e);
@@ -993,17 +1398,27 @@ export async function initDatabase(): Promise<void> {
   }
 
   const productCols = [
-    'barcode TEXT', 'category TEXT', 'subcategory TEXT', 'description_html TEXT', 'producer_name TEXT',
+    'internal_id INTEGER', 'barcode TEXT', 'category TEXT', 'subcategory TEXT', 'description_html TEXT', 'producer_name TEXT',
     'link TEXT', 'notes TEXT', 'image_file_name TEXT', 'supplier_code TEXT', 'supplier_name TEXT',
-    'supplier_product_code TEXT', 'supplier_net_price REAL DEFAULT 0.0', 'supplier_gross_price REAL DEFAULT 0.0',
+    'supplier_product_code TEXT', 'supplier_net_price NUMERIC(12,4) DEFAULT 0.0', 'supplier_gross_price NUMERIC(12,4) DEFAULT 0.0',
     'supplier_notes TEXT', 'manage_warehouse BOOLEAN DEFAULT TRUE', 'warehouse_location TEXT',
-    'min_stock REAL DEFAULT 0.0', 'ordered_qty REAL DEFAULT 0.0', 'weight_um TEXT',
-    'net_weight REAL DEFAULT 0.0', 'gross_weight REAL DEFAULT 0.0', 'size_um TEXT',
-    'net_size_x REAL DEFAULT 0.0', 'net_size_y REAL DEFAULT 0.0', 'net_size_z REAL DEFAULT 0.0',
+    'order_wait_days NUMERIC(12,4) DEFAULT 0.0', 'order_step NUMERIC(12,4) DEFAULT 0.0',
+    'min_stock NUMERIC(12,4) DEFAULT 0.0', 'available_qty NUMERIC(12,4) DEFAULT 0.0', 'ordered_qty NUMERIC(12,4) DEFAULT 0.0', 'weight_um TEXT',
+    'net_weight NUMERIC(12,4) DEFAULT 0.0', 'gross_weight NUMERIC(12,4) DEFAULT 0.0', 'size_um TEXT',
+    'net_size_x NUMERIC(12,4) DEFAULT 0.0', 'net_size_y NUMERIC(12,4) DEFAULT 0.0', 'net_size_z NUMERIC(12,4) DEFAULT 0.0',
+    'packing_size_x NUMERIC(12,4) DEFAULT 0.0', 'packing_size_y NUMERIC(12,4) DEFAULT 0.0', 'packing_size_z NUMERIC(12,4) DEFAULT 0.0',
     'custom_field1 TEXT', 'custom_field2 TEXT', 'custom_field3 TEXT', 'custom_field4 TEXT',
     'online_promo TEXT', 'online_warranty TEXT', 'online_category_image TEXT', 'online_notes TEXT',
     'online_customized BOOLEAN DEFAULT FALSE',
-    'classe_provvigione TEXT'
+    'classe_provvigione TEXT',
+    'net_price_1 NUMERIC(12,4) DEFAULT 0.0', 'net_price_2 NUMERIC(12,4) DEFAULT 0.0', 'net_price_3 NUMERIC(12,4) DEFAULT 0.0',
+    'net_price_4 NUMERIC(12,4) DEFAULT 0.0', 'net_price_5 NUMERIC(12,4) DEFAULT 0.0', 'net_price_6 NUMERIC(12,4) DEFAULT 0.0',
+    'net_price_7 NUMERIC(12,4) DEFAULT 0.0', 'net_price_8 NUMERIC(12,4) DEFAULT 0.0', 'net_price_9 NUMERIC(12,4) DEFAULT 0.0',
+    'gross_price_1 NUMERIC(12,4) DEFAULT 0.0', 'gross_price_2 NUMERIC(12,4) DEFAULT 0.0', 'gross_price_3 NUMERIC(12,4) DEFAULT 0.0',
+    'gross_price_4 NUMERIC(12,4) DEFAULT 0.0', 'gross_price_5 NUMERIC(12,4) DEFAULT 0.0', 'gross_price_6 NUMERIC(12,4) DEFAULT 0.0',
+    'gross_price_7 NUMERIC(12,4) DEFAULT 0.0', 'gross_price_8 NUMERIC(12,4) DEFAULT 0.0', 'gross_price_9 NUMERIC(12,4) DEFAULT 0.0',
+    'net_eco_fee NUMERIC(12,4) DEFAULT 0.0', 'gross_eco_fee NUMERIC(12,4) DEFAULT 0.0', 'eco_fee NUMERIC(12,4) DEFAULT 0.0',
+    'vat_perc NUMERIC(5,2)', 'vat_class TEXT', 'vat_description TEXT'
   ];
   try {
     const productAddCols = productCols.map(c => `ADD COLUMN IF NOT EXISTS ${c}`).join(', ');
@@ -1116,18 +1531,45 @@ export async function initDatabase(): Promise<void> {
     await queryExec(`
       CREATE TABLE IF NOT EXISTS payment_methods (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
+        name VARCHAR(150) NOT NULL UNIQUE,
         offset_days INTEGER DEFAULT 0,
         installments INTEGER DEFAULT 1,
-        fine_mese INTEGER DEFAULT 0,
-        custom_offsets TEXT
+        fine_mese BOOLEAN DEFAULT false,
+        custom_offsets VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    await pool.query("INSERT INTO payment_methods (name, offset_days, installments, fine_mese) VALUES ('Bonifico bancario', 0, 1, 0) ON CONFLICT (name) DO NOTHING");
-    await pool.query("INSERT INTO payment_methods (name, offset_days, installments, fine_mese) VALUES ('R.B. 30/60 gg F.M.', 30, 2, 1) ON CONFLICT (name) DO NOTHING");
-    await pool.query("INSERT INTO payment_methods (name, offset_days, installments, fine_mese) VALUES ('Contanti', 0, 1, 0) ON CONFLICT (name) DO NOTHING");
-    await pool.query("INSERT INTO payment_methods (name, offset_days, installments, fine_mese) VALUES ('Carta di Credito', 0, 1, 0) ON CONFLICT (name) DO NOTHING");
-    await pool.query("INSERT INTO payment_methods (name, offset_days, installments, fine_mese) VALUES ('Contrassegno', 0, 1, 0) ON CONFLICT (name) DO NOTHING");
+    await pool.query(`ALTER TABLE payment_methods ADD COLUMN IF NOT EXISTS offset_days INTEGER DEFAULT 0`);
+    await pool.query(`ALTER TABLE payment_methods ADD COLUMN IF NOT EXISTS installments INTEGER DEFAULT 1`);
+    await pool.query(`ALTER TABLE payment_methods ADD COLUMN IF NOT EXISTS fine_mese BOOLEAN DEFAULT false`);
+    await pool.query(`ALTER TABLE payment_methods ADD COLUMN IF NOT EXISTS custom_offsets VARCHAR(255)`);
+    await pool.query(`ALTER TABLE payment_methods ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+
+    const standardPaymentMethods = [
+      { name: 'Bonifico bancario', offset_days: 0, installments: 1, fine_mese: false, custom_offsets: null },
+      { name: 'R.B. 30/60/90 GG F.M.', offset_days: 30, installments: 3, fine_mese: true, custom_offsets: '30,60,90' },
+      { name: 'R.B. 30/60 gg F.M.', offset_days: 30, installments: 2, fine_mese: true, custom_offsets: '30,60' },
+      { name: 'R.B. 30 gg F.M.', offset_days: 30, installments: 1, fine_mese: true, custom_offsets: '30' },
+      { name: 'Bonifico Bancario 30 gg', offset_days: 30, installments: 1, fine_mese: false, custom_offsets: '30' },
+      { name: 'Bonifico Bancario 60 gg', offset_days: 60, installments: 1, fine_mese: false, custom_offsets: '60' },
+      { name: 'Rimessa Diretta / Contanti', offset_days: 0, installments: 1, fine_mese: false, custom_offsets: null },
+      { name: 'Contanti', offset_days: 0, installments: 1, fine_mese: false, custom_offsets: null },
+      { name: 'Carta di Credito', offset_days: 0, installments: 1, fine_mese: false, custom_offsets: null },
+      { name: 'Contrassegno', offset_days: 0, installments: 1, fine_mese: false, custom_offsets: null }
+    ];
+
+    for (const pm of standardPaymentMethods) {
+      await pool.query(
+        `INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (name) DO UPDATE SET
+           offset_days = EXCLUDED.offset_days,
+           installments = EXCLUDED.installments,
+           fine_mese = EXCLUDED.fine_mese,
+           custom_offsets = EXCLUDED.custom_offsets`,
+        [pm.name, pm.offset_days, pm.installments, pm.fine_mese, pm.custom_offsets]
+      );
+    }
   } catch (e) {
     console.error("[PostgreSQL Engine ERROR] Error setting up payment_methods table:", e);
   }
@@ -1253,18 +1695,18 @@ export async function initDatabase(): Promise<void> {
 
       if (mario && client1) {
         await queryRun(`
-          INSERT INTO agent_visits (agent_id, client_id, visit_date, time_slot, notes)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO agent_visits (agent_id, client_id, visit_date, time_slot, notes, is_joint, host_agent_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT DO NOTHING
-        `, [mario.id, client1.id, todayStr, '10:00', 'Presentazione nuovo siero antietà Visage Seta']);
+        `, [mario.id, client1.id, todayStr, '10:00', 'Presentazione nuovo siero antietà Visage Seta', 0, mario.id]);
       }
 
       if (luigi && client3) {
         await queryRun(`
-          INSERT INTO agent_visits (agent_id, client_id, visit_date, time_slot, notes)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO agent_visits (agent_id, client_id, visit_date, time_slot, notes, is_joint, host_agent_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT DO NOTHING
-        `, [luigi.id, client3.id, todayStr, '14:30', 'Dimostrazione trattamenti olio corpo ThermaSpa']);
+        `, [luigi.id, client3.id, todayStr, '14:30', 'Dimostrazione trattamenti olio corpo ThermaSpa', 0, luigi.id]);
       }
     }
   } catch (err) {
@@ -1277,7 +1719,7 @@ export async function initDatabase(): Promise<void> {
 
 export const initPgSchema = initDatabase;
 
-export async function ensureClientInSqlite(clientId: any, _sqliteDb?: any): Promise<number | null> {
+export async function ensureClientInPostgres(clientId: any): Promise<number | null> {
   if (clientId === undefined || clientId === null || clientId === '') return null;
   const numId = Number(clientId);
 
@@ -1286,7 +1728,7 @@ export async function ensureClientInSqlite(clientId: any, _sqliteDb?: any): Prom
       const pgRes = await pool.query('SELECT id FROM clients WHERE id = $1', [numId]);
       if (pgRes.rows && pgRes.rows.length > 0) return pgRes.rows[0].id;
     } catch (e) {
-      console.error('[ensureClientInSqlite] Error checking Postgres by id:', e);
+      console.error('[ensureClientInPostgres] Error checking Postgres by id:', e);
     }
   }
 
@@ -1297,13 +1739,11 @@ export async function ensureClientInSqlite(clientId: any, _sqliteDb?: any): Prom
       if (pgMatch.rows && pgMatch.rows.length > 0) return pgMatch.rows[0].id;
     }
   } catch (err) {
-    console.error('[ensureClientInSqlite] Error in Postgres client matching:', err);
+    console.error('[ensureClientInPostgres] Error in Postgres client matching:', err);
   }
 
   return null;
 }
-
-export const ensureClientInPostgres = ensureClientInSqlite;
 
 export const TABLE_DEPENDENCY_ORDER = [
   'users',
@@ -1333,27 +1773,12 @@ export const TABLE_DEPENDENCY_ORDER = [
   'client_sales_history'
 ];
 
-/**
- * Historical SQLite migration and sync functions - now no-ops in 100% PostgreSQL architecture.
- */
-export async function migrateAllSqliteToPostgres(_sqliteDb?: any): Promise<{ migratedTables: Record<string, number> }> {
-  return { migratedTables: {} };
-}
-
-export async function fullSyncAllTablesFromPostgresToSqlite(_sqliteDb?: any): Promise<void> {
-  // No-op: The system runs exclusively on PostgreSQL.
-}
-
 export function runWithoutReplication<T>(fn: () => T): T {
   return fn();
 }
 
 export async function replicateMutationToPostgres(_sql: string, _params: any[], _result: any): Promise<void> {
   // No-op: Mutations run directly against PostgreSQL.
-}
-
-export function installPostgresReplicationHook(_sqliteDb?: any): void {
-  // No-op: The system runs exclusively on PostgreSQL.
 }
 
 /**
@@ -1376,7 +1801,6 @@ export async function createOrderInPostgres(orderData: {
     um: string;
   }>;
   status: string;
-  sqliteDb?: any;
 }): Promise<{ orderId: number; formattedNumber: string }> {
   const { client_id, agent_id, date, payment_name, payment_bank, notes, items, status } = orderData;
 
@@ -1445,6 +1869,23 @@ export async function createOrderInPostgres(orderData: {
       }
     }
 
+    // 4. Automatically schedule order payments/installments in PostgreSQL
+    try {
+      const { schedulePaymentsForOrder } = await import('../services/paymentScheduler');
+      await schedulePaymentsForOrder(
+        orderId,
+        {
+          client_id,
+          total,
+          date: date || new Date().toISOString().split('T')[0],
+          payment_name: payment_name || 'Bonifico bancario'
+        },
+        { pgClient, sourceType: 'AUTO' }
+      );
+    } catch (schedErr) {
+      console.warn(`[createOrderInPostgres] Payment scheduling warning for order ${orderId}:`, schedErr);
+    }
+
     return { orderId, formattedNumber };
   }, 'CreateOrderPostgres');
 }
@@ -1467,7 +1908,6 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
     um: string;
   }>;
   status: string;
-  sqliteDb?: any;
 }): Promise<void> {
   const { client_id, date, payment_name, payment_bank, notes, items, status } = orderData;
 
@@ -1492,13 +1932,30 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
         [orderId, item.product_code, item.description, Number(item.qty) || 1, Number(item.price) || 0, item.vat_code || '22', item.um || 'pz']
       );
     }
+
+    // 3. Re-schedule payments if order total, date, or payment method changed
+    try {
+      const { schedulePaymentsForOrder } = await import('../services/paymentScheduler');
+      await schedulePaymentsForOrder(
+        orderId,
+        {
+          client_id,
+          total,
+          date: date || new Date().toISOString().split('T')[0],
+          payment_name: payment_name || 'Bonifico bancario'
+        },
+        { pgClient, sourceType: 'AUTO' }
+      );
+    } catch (schedErr) {
+      console.warn(`[updateOrderInPostgres] Payment scheduling warning for order ${orderId}:`, schedErr);
+    }
   }, 'UpdateOrderPostgres');
 }
 
 /**
  * Deletes an order from PostgreSQL.
  */
-export async function deleteOrderInPostgres(orderId: number, _sqliteDb?: any): Promise<void> {
+export async function deleteOrderInPostgres(orderId: number): Promise<void> {
   await withTransaction(async (pgClient) => {
     await pgClient.query('DELETE FROM order_items WHERE order_id = $1', [orderId]);
     await pgClient.query('DELETE FROM orders WHERE id = $1', [orderId]);
@@ -1508,11 +1965,11 @@ export async function deleteOrderInPostgres(orderId: number, _sqliteDb?: any): P
 /**
  * Diagnostic database status report for PostgreSQL.
  */
-export async function getDatabaseStatus(_sqliteDb?: any): Promise<any> {
+export async function getDatabaseStatus(): Promise<any> {
   const t0 = Date.now();
   let pgConnected = false;
   let latencyMs = -1;
-  const tableCounts: Record<string, { postgres: number; sqlite: number }> = {};
+  const tableCounts: Record<string, { postgres: number }> = {};
 
   try {
     const pingRes = await pool.query('SELECT 1 as ping');
@@ -1534,7 +1991,7 @@ export async function getDatabaseStatus(_sqliteDb?: any): Promise<any> {
       } catch (e) {}
     }
 
-    tableCounts[table] = { postgres: pgCount, sqlite: pgCount };
+    tableCounts[table] = { postgres: pgCount };
   }
 
   return {

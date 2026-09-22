@@ -9,15 +9,21 @@ import AdmZip from 'adm-zip';
 import * as XLSXModule from 'xlsx';
 const XLSX: typeof XLSXModule = (XLSXModule as any).default || XLSXModule;
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
+import iconv from 'iconv-lite';
 import { exec } from 'child_process';
 import crypto from 'crypto';
 import { 
   pool, 
   queryWithRetry,
+  query,
+  queryGet,
+  queryAll,
+  queryRun,
+  queryExec,
   withTransaction, 
   upsertClientInPostgres, 
   getMaskedDbUrl, 
-  ensureClientInSqlite,
+  ensureClientInPostgres,
   initDatabase,
   initPgSchema,
   createOrderInPostgres,
@@ -28,7 +34,7 @@ import {
   deleteProductsByCodesInPostgres,
   upsertClientsBatchInPostgres
 } from './src/lib/db.ts';
-import { pgDb as db } from './src/lib/pgSyncDriver.ts';
+import { calculateInstallments, schedulePaymentsForOrder } from './src/services/paymentScheduler.ts';
 
 const getFilenameAndDirname = () => {
   // Safe lookup of import.meta.url to avoid esbuild warnings and runtime TypeError in CJS
@@ -46,7 +52,6 @@ const getFilenameAndDirname = () => {
 const { filename: __filename, dirname: __dirname } = getFilenameAndDirname();
 
 // PostgreSQL Database Driver directly connected to Neon PostgreSQL
-export { db };
 
 // Global Crash Prevention
 process.on('uncaughtException', (err) => console.error('Uncaught Exception:', err));
@@ -70,9 +75,9 @@ function parsePaymentMethodDefaults(pName: string) {
   const clean = pName.trim();
   const lower = clean.toLowerCase();
 
-  let fineMese = 0;
+  let fineMese = false;
   if (lower.includes('f.m.') || lower.includes('fine mese') || lower.includes('fm')) {
-    fineMese = 1;
+    fineMese = true;
   }
 
   let offsetDays = 30;
@@ -115,7 +120,7 @@ function parsePaymentMethodDefaults(pName: string) {
     if (!clean.match(/\d+/)) {
       offsetDays = 0;
       installments = 1;
-      fineMese = 0;
+      fineMese = false;
       customOffsets = null;
     }
   }
@@ -129,21 +134,19 @@ function parsePaymentMethodDefaults(pName: string) {
 }
 
 // Ensures a payment method exists in database and returns its record, auto-registering with intelligent defaults if missing
-function ensurePaymentMethodExists(paymentName: string) {
+async function ensurePaymentMethodExists(paymentName: string) {
   if (!paymentName) return null;
   const clean = paymentName.trim();
   if (!clean) return null;
 
-  const existing = db.prepare('SELECT * FROM payment_methods WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(clean) as any;
+  const existing = await queryGet('SELECT * FROM payment_methods WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))', [clean]) as any;
   if (existing) {
     return { ...existing, is_new: false };
   }
 
   const defaults = parsePaymentMethodDefaults(clean);
   try {
-    const result = db.prepare('INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets) VALUES (?, ?, ?, ?, ?)').run(
-      clean, defaults.offset_days, defaults.installments, defaults.fine_mese, defaults.custom_offsets
-    );
+    const result = await queryRun('INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets) VALUES (?, ?, ?, ?, ?)', [clean, defaults.offset_days, defaults.installments, defaults.fine_mese, defaults.custom_offsets]);
 
     return {
       id: result.lastInsertRowid,
@@ -155,7 +158,7 @@ function ensurePaymentMethodExists(paymentName: string) {
       is_new: true
     };
   } catch (err) {
-    const fallback = db.prepare('SELECT * FROM payment_methods WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(clean) as any;
+    const fallback = await queryGet('SELECT * FROM payment_methods WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))', [clean]) as any;
     return fallback ? { ...fallback, is_new: false } : null;
   }
 }
@@ -164,8 +167,8 @@ function ensurePaymentMethodExists(paymentName: string) {
 const PAYLOAD_SECRET = process.env.PAYLOAD_SECRET;
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(cookieParser(PAYLOAD_SECRET));
 
 // CORS & Cross-Origin Auth Middleware for Railway, iFrame, and local development
@@ -187,15 +190,15 @@ app.use((req: any, res: any, next: any) => {
 });
 
 // Healthcheck endpoints for Railway, Load Balancers, Docker, and K8s
-app.get('/healthcheck', (req: any, res: any) => {
+app.get('/healthcheck', async (req: any, res: any) => {
   res.status(200).send('OK');
 });
 
-app.get('/health', (req: any, res: any) => {
+app.get('/health', async (req: any, res: any) => {
   res.status(200).send('OK');
 });
 
-app.get('/api/health', (req: any, res: any) => {
+app.get('/api/health', async (req: any, res: any) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -278,7 +281,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ 
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // increase limit to 10MB to support larger catalogs and high-res images
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit to support large catalogs, XML sync and high-res images
 });
 
 const zipUpload = multer({
@@ -298,12 +301,12 @@ const zipUpload = multer({
 });
 
 // Helper for creating notifications
-const createNotification = (userId: number, type: string, title: string, message: string, relatedId?: number) => {
+const createNotification = async (userId: number, type: string, title: string, message: string, relatedId?: number) => {
   try {
-    let settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(userId) as any;
+    let settings = await queryGet('SELECT * FROM user_notification_settings WHERE user_id = ?', [userId]) as any;
     if (!settings) {
-      db.prepare('INSERT INTO user_notification_settings (user_id) VALUES (?)').run(userId);
-      settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(userId) as any;
+      await queryRun('INSERT INTO user_notification_settings (user_id) VALUES (?)', [userId]);
+      settings = await queryGet('SELECT * FROM user_notification_settings WHERE user_id = ?', [userId]) as any;
     }
     if (settings) {
       if (type === 'assignment' && !settings.new_task) return;
@@ -311,8 +314,7 @@ const createNotification = (userId: number, type: string, title: string, message
       if (type === 'comment' && !settings.comments) return;
     }
     
-    db.prepare('INSERT INTO user_notifications (user_id, type, title, message, related_id) VALUES (?, ?, ?, ?, ?)')
-      .run(userId, type, title, message, relatedId || null);
+    await queryRun('INSERT INTO user_notifications (user_id, type, title, message, related_id) VALUES (?, ?, ?, ?, ?)', [userId, type, title, message, relatedId || null]);
   } catch (err) {
     console.error('Error creating notification:', err);
   }
@@ -412,7 +414,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-app.post('/api/logout', (req, res) => {
+app.post('/api/logout', async (req, res) => {
   res.clearCookie('userId', { sameSite: 'none', secure: true });
   res.json({ success: true });
 });
@@ -439,12 +441,12 @@ app.get('/api/me', async (req, res) => {
   }
 });
 
-app.get('/api/users', authMiddleware, (req, res) => {
-  const users = db.prepare('SELECT id, name, email, department, role, avatar, created_at FROM users').all();
+app.get('/api/users', authMiddleware, async (req, res) => {
+  const users = await queryAll('SELECT id, name, email, department, role, avatar, created_at FROM users');
   res.json(users);
 });
 
-app.post('/api/users', authMiddleware, (req: any, res) => {
+app.post('/api/users', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   const { name, email, department, role, password, avatar } = req.body;
   
@@ -452,7 +454,7 @@ app.post('/api/users', authMiddleware, (req: any, res) => {
     return res.status(400).json({ error: 'Email richiesta' });
   }
 
-  const existing = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email);
+  const existing = await queryGet('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [email]);
   if (existing) {
     return res.status(400).json({ error: 'Email già in uso' });
   }
@@ -461,8 +463,7 @@ app.post('/api/users', authMiddleware, (req: any, res) => {
   const userAvatar = avatar || null;
 
   try {
-    const result = db.prepare('INSERT INTO users (name, email, password, department, role, avatar) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(name, email, userPassword, department || null, role || 'user', userAvatar);
+    const result = await queryRun('INSERT INTO users (name, email, password, department, role, avatar) VALUES (?, ?, ?, ?, ?, ?)', [name, email, userPassword, department || null, role || 'user', userAvatar]);
     res.json({ id: result.lastInsertRowid });
   } catch (err: any) {
     console.error('Error inserting user:', err);
@@ -470,10 +471,10 @@ app.post('/api/users', authMiddleware, (req: any, res) => {
   }
 });
 
-app.patch('/api/users/:id', authMiddleware, (req: any, res) => {
+app.patch('/api/users/:id', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin' && req.user.id !== Number(req.params.id)) return res.status(403).json({ error: 'Forbidden' });
   const { name, email, department, role, password, avatar } = req.body;
-  const current = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id) as any;
+  const current = await queryGet('SELECT * FROM users WHERE id = ?', [req.params.id]) as any;
   if (!current) return res.status(404).json({ error: 'User not found' });
 
   const updatedName = name || current.name;
@@ -484,15 +485,14 @@ app.patch('/api/users/:id', authMiddleware, (req: any, res) => {
   const updatedAvatar = avatar || current.avatar;
 
   if (updatedEmail !== current.email) {
-    const existing = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id != ?').get(updatedEmail, req.params.id);
+    const existing = await queryGet('SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id != ?', [updatedEmail, req.params.id]);
     if (existing) {
       return res.status(400).json({ error: 'Email già in uso' });
     }
   }
 
   try {
-    db.prepare('UPDATE users SET name = ?, email = ?, department = ?, role = ?, password = ?, avatar = ? WHERE id = ?')
-      .run(updatedName, updatedEmail, updatedDept, updatedRole, updatedPass, updatedAvatar, req.params.id);
+    await queryRun('UPDATE users SET name = ?, email = ?, department = ?, role = ?, password = ?, avatar = ? WHERE id = ?', [updatedName, updatedEmail, updatedDept, updatedRole, updatedPass, updatedAvatar, req.params.id]);
     res.json({ success: true });
   } catch (err: any) {
     console.error('Error updating user:', err);
@@ -500,9 +500,9 @@ app.patch('/api/users/:id', authMiddleware, (req: any, res) => {
   }
 });
 
-app.delete('/api/users/:id', authMiddleware, (req: any, res) => {
+app.delete('/api/users/:id', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  await queryRun('DELETE FROM users WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
@@ -617,36 +617,37 @@ app.get('/api/clients', authMiddleware, async (req: any, res) => {
     }
 
     if (searchTerm) {
-      const fts = formatFtsQuery(searchTerm);
       let ftsMatchedIds: number[] = [];
-      if (fts) {
-        try {
-          const rows = db.prepare('SELECT rowid FROM clients_fts WHERE clients_fts MATCH ? LIMIT 300').all(fts) as { rowid: number }[];
-          ftsMatchedIds = rows.map(r => r.rowid);
-        } catch (e) {}
-      }
+      try {
+        const rows = await queryAll<{ id: number }>(
+          `SELECT id FROM clients 
+           WHERE name ILIKE $1 OR code ILIKE $1 OR city ILIKE $1 OR vat_code ILIKE $1 OR fiscal_code ILIKE $1 OR agente ILIKE $1 
+           LIMIT 300`,
+          [`%${searchTerm}%`]
+        );
+        ftsMatchedIds = rows.map(r => r.id);
+      } catch (e) {}
 
       if (ftsMatchedIds.length > 0) {
         whereConditions.push(`id IN (${ftsMatchedIds.join(',')})`);
       } else {
-        // Fast prefix search using B-tree indexes
-        whereConditions.push(`(name LIKE ? OR code LIKE ? OR city LIKE ?)`);
-        const prefix = `${searchTerm}%`;
-        params.push(prefix, prefix, prefix);
+        whereConditions.push(`(name ILIKE ? OR code ILIKE ? OR city ILIKE ?)`);
+        const searchPattern = `%${searchTerm}%`;
+        params.push(searchPattern, searchPattern, searchPattern);
       }
     }
 
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-    const countRow = db.prepare(`SELECT COUNT(*) as total FROM clients ${whereClause}`).get(...params) as any;
+    const countRow = await queryGet(`SELECT COUNT(*) as total FROM clients ${whereClause}`, [...params]) as any;
     const totalItems = countRow ? Number(countRow.total) : 0;
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
 
     let query = `SELECT id, code, name, contact, phone, email, address, city, postcode, province, country, fiscal_code, vat_code, agente, price_list, payment_name FROM clients ${whereClause} ORDER BY name ASC`;
     let clients: any[] = [];
     if (isPaginated) {
-      clients = db.prepare(`${query} LIMIT ? OFFSET ?`).all(...params, limit, offset) as any[];
+      clients = await queryAll(`${query} LIMIT ? OFFSET ?`, [...params, limit, offset]) as any[];
     } else {
-      clients = db.prepare(query).all(...params) as any[];
+      clients = await queryAll(query, [...params]) as any[];
     }
 
     res.setHeader('X-Total-Count', totalItems);
@@ -689,11 +690,11 @@ app.get('/api/clients/:id', authMiddleware, async (req: any, res) => {
   }
 
   if (!client) {
-    client = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id) as any;
+    client = await queryGet('SELECT * FROM clients WHERE id = ?', [req.params.id]) as any;
   }
   if (!client) return res.status(404).json({ error: 'Client not found' });
   
-  const activities = db.prepare(`
+  const activities = await queryAll(`
     SELECT * FROM (
       SELECT 
         t.id, t.title, t.description, t.status, t.priority, t.deadline, t.created_at, 
@@ -713,7 +714,7 @@ app.get('/api/clients/:id', authMiddleware, async (req: any, res) => {
       WHERE c.client_id = ? OR (c.caller_name = ? AND c.caller_type = 'cliente')
     )
     ORDER BY created_at DESC
-  `).all(req.params.id, req.params.id, client.name);
+  `, [req.params.id, req.params.id, client.name]);
   
   res.json({ ...client, activities });
 });
@@ -722,11 +723,11 @@ app.get('/api/clients/:id', authMiddleware, async (req: any, res) => {
 // CLIENT SALES HISTORY & CONSUMPTION ENDPOINTS
 // ==========================================
 
-app.get('/api/clients/:id/sales-history', authMiddleware, (req: any, res) => {
+app.get('/api/clients/:id/sales-history', authMiddleware, async (req: any, res) => {
   const clientId = req.params.id;
   try {
-    const history = db.prepare('SELECT * FROM client_sales_history WHERE client_id = ? ORDER BY id DESC').all(clientId) as any[];
-    const catalogProducts = db.prepare('SELECT * FROM products').all() as any[];
+    const history = await queryAll('SELECT * FROM client_sales_history WHERE client_id = ? ORDER BY id DESC', [clientId]) as any[];
+    const catalogProducts = await queryAll('SELECT * FROM products') as any[];
 
     const mappedHistory: any[] = [];
 
@@ -797,23 +798,23 @@ app.get('/api/clients/:id/sales-history', authMiddleware, (req: any, res) => {
     }
 
     // Fetch client record for name and code matching
-    const clientRecord = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId) as any;
+    const clientRecord = await queryGet('SELECT * FROM clients WHERE id = ?', [clientId]) as any;
     const clientName = clientRecord?.name ? clientRecord.name.trim() : '';
     const clientCode = clientRecord?.code ? clientRecord.code.trim() : '';
 
     // Fetch system orders for this client (excluding cancelled ones)
-    const systemOrders = db.prepare(`
+    const systemOrders = await queryAll(`
       SELECT o.*, c.name as client_name 
       FROM orders o
       LEFT JOIN clients c ON o.client_id = c.id
       WHERE (o.client_id = ? OR (? != '' AND LOWER(TRIM(COALESCE(c.name, ''))) = LOWER(TRIM(?))))
         AND (o.status IS NULL OR o.status != 'Annullato')
       ORDER BY o.id DESC
-    `).all(clientId, clientName, clientName) as any[];
+    `, [clientId, clientName, clientName]) as any[];
 
     const mappedSystemOrders: any[] = [];
     for (const order of systemOrders) {
-      const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id) as any[];
+      const items = await queryAll('SELECT * FROM order_items WHERE order_id = ?', [order.id]) as any[];
       const docDate = order.date ? String(order.date).split('T')[0] : (order.created_at ? String(order.created_at).split('T')[0] : '');
       const docNum = order.number ? String(order.number) : `ORD-${order.id}`;
       const docStatus = order.status || 'In essere';
@@ -874,9 +875,9 @@ app.get('/api/clients/:id/sales-history', authMiddleware, (req: any, res) => {
   }
 });
 
-app.post('/api/clients/:id/sales-history/import', authMiddleware, upload.single('file'), (req: any, res) => {
+app.post('/api/clients/:id/sales-history/import', authMiddleware, upload.single('file'), async (req: any, res) => {
   const clientId = req.params.id;
-  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId);
+  const client = await queryGet('SELECT * FROM clients WHERE id = ?', [clientId]);
   if (!client) return res.status(404).json({ error: 'Cliente non trovato' });
 
   let itemsToInsert: any[] = [];
@@ -1136,7 +1137,7 @@ app.post('/api/clients/:id/sales-history/import', authMiddleware, upload.single(
   // =========================================================
   // ASSOCIATE IMPORTED CODES WITH ONLINE CATALOG PRODUCTS ONLY
   // =========================================================
-  const catalogProducts = db.prepare('SELECT * FROM products').all() as any[];
+  const catalogProducts = await queryAll('SELECT * FROM products') as any[];
   const finalItemsToInsert: any[] = [];
 
   for (const item of itemsToInsert) {
@@ -1202,46 +1203,40 @@ app.post('/api/clients/:id/sales-history/import', authMiddleware, upload.single(
     return res.status(400).json({ error: 'Nessun prodotto del file corrisponde al catalogo online. L\'importazione considera solo i prodotti già presenti nel catalogo.' });
   }
 
-  const insertStmt = db.prepare(`
-    INSERT INTO client_sales_history (
-      client_id, type, code, description, quantity, amount, 
-      document_number, document_date, category, unit_of_measure, unit_price, is_imported
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-  `);
+  for (const item of finalItemsToInsert) {
+    const qty = Number(item.quantity) || 1;
+    const amt = Number(item.amount) || 0;
+    const price = Number(item.unit_price) || (qty > 0 ? amt / qty : amt);
 
-  const insertMany = db.transaction((rows: any[]) => {
-    for (const item of rows) {
-      const qty = Number(item.quantity) || 1;
-      const amt = Number(item.amount) || 0;
-      const price = Number(item.unit_price) || (qty > 0 ? amt / qty : amt);
+    await queryRun(`
+      INSERT INTO client_sales_history (
+        client_id, type, code, description, quantity, amount, 
+        document_number, document_date, category, unit_of_measure, unit_price, is_imported
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `, [
+      clientId,
+      item.type || 'product',
+      item.code || '',
+      item.description || 'Prodotto',
+      qty,
+      amt,
+      item.document_number || '',
+      item.document_date || '',
+      item.category || 'Importati',
+      item.unit_of_measure || 'pz',
+      price
+    ]);
+  }
 
-      insertStmt.run(
-        clientId,
-        item.type || 'product',
-        item.code || '',
-        item.description || 'Prodotto',
-        qty,
-        amt,
-        item.document_number || '',
-        item.document_date || '',
-        item.category || 'Importati',
-        item.unit_of_measure || 'pz',
-        price
-      );
-    }
-  });
-
-  insertMany(finalItemsToInsert);
-
-  const updatedHistory = db.prepare('SELECT * FROM client_sales_history WHERE client_id = ? ORDER BY id DESC').all(clientId);
+  const updatedHistory = await queryAll('SELECT * FROM client_sales_history WHERE client_id = ? ORDER BY id DESC', [clientId]);
   res.json({ success: true, count: itemsToInsert.length, history: updatedHistory });
 });
 
-app.delete('/api/clients/:id/sales-history', authMiddleware, (req: any, res) => {
+app.delete('/api/clients/:id/sales-history', authMiddleware, async (req: any, res) => {
   const clientId = req.params.id;
   try {
-    db.prepare('DELETE FROM client_sales_history WHERE client_id = ?').run(clientId);
+    await queryRun('DELETE FROM client_sales_history WHERE client_id = ?', [clientId]);
     res.json({ success: true, message: 'Storico dati importati cancellato con successo. Gli ordini CRM sono stati conservati.' });
   } catch (err: any) {
     console.error('Error deleting sales history:', err);
@@ -1287,13 +1282,13 @@ function formatInviteRecord(i: any) {
 }
 
 // iCal Feed Helpers
-function getOrCreateIcalToken(userId: number): string {
-  const user = db.prepare('SELECT ical_token FROM users WHERE id = ?').get(userId) as any;
+async function getOrCreateIcalToken(userId: number): Promise<string> {
+  const user = await queryGet('SELECT ical_token FROM users WHERE id = ?', [userId]) as any;
   if (user && user.ical_token) {
     return user.ical_token;
   }
   const newToken = 'ical_' + crypto.randomBytes(16).toString('hex');
-  db.prepare('UPDATE users SET ical_token = ? WHERE id = ?').run(newToken, userId);
+  await queryRun('UPDATE users SET ical_token = ? WHERE id = ?', [newToken, userId]);
   return newToken;
 }
 
@@ -1332,10 +1327,10 @@ function formatIcalDateTime(dateStr: string, timeSlotStr: string, durationMinute
 }
 
 // iCal Feed Subscription Endpoints
-app.get('/api/girovisite/ical-url', authMiddleware, (req: any, res) => {
+app.get('/api/girovisite/ical-url', authMiddleware, async (req: any, res) => {
   try {
     const userId = Number(req.user.id);
-    const token = getOrCreateIcalToken(userId);
+    const token = await getOrCreateIcalToken(userId);
     
     const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
     const host = req.headers['x-forwarded-host'] || req.headers.host;
@@ -1355,11 +1350,11 @@ app.get('/api/girovisite/ical-url', authMiddleware, (req: any, res) => {
   }
 });
 
-app.post('/api/girovisite/ical-url/regenerate', authMiddleware, (req: any, res) => {
+app.post('/api/girovisite/ical-url/regenerate', authMiddleware, async (req: any, res) => {
   try {
     const userId = Number(req.user.id);
     const newToken = 'ical_' + crypto.randomBytes(16).toString('hex');
-    db.prepare('UPDATE users SET ical_token = ? WHERE id = ?').run(newToken, userId);
+    await queryRun('UPDATE users SET ical_token = ? WHERE id = ?', [newToken, userId]);
 
     const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
     const host = req.headers['x-forwarded-host'] || req.headers.host;
@@ -1380,20 +1375,20 @@ app.post('/api/girovisite/ical-url/regenerate', authMiddleware, (req: any, res) 
 });
 
 // Public iCal Feed Endpoint (No Auth Required for External Calendar Sync)
-app.all(['/api/girovisite/ical/:token', '/api/girovisite/ical/:token.ics'], (req: any, res) => {
+app.all(['/api/girovisite/ical/:token', '/api/girovisite/ical/:token.ics'], async (req: any, res) => {
   try {
     let rawToken = req.params.token || '';
     if (rawToken.endsWith('.ics')) {
       rawToken = rawToken.slice(0, -4);
     }
 
-    const agent = db.prepare('SELECT id, name, email, role FROM users WHERE ical_token = ?').get(rawToken) as any;
+    const agent = await queryGet('SELECT id, name, email, role FROM users WHERE ical_token = ?', [rawToken]) as any;
     if (!agent) {
       return res.status(404).setHeader('Content-Type', 'text/plain; charset=utf-8').send('Feed iCal non trovato o token non valido.');
     }
 
     const userId = agent.id;
-    const rawVisits = db.prepare(`
+    const rawVisits = await queryAll(`
       SELECT v.*, 
              c.name as client_name, c.address as client_address, c.city as client_city, 
              c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
@@ -1411,7 +1406,7 @@ app.all(['/api/girovisite/ical/:token', '/api/girovisite/ical/:token.ics'], (req
          OR v.host_agent_id = ?
          OR v.id IN (SELECT visit_id FROM co_visit_invites WHERE guest_agent_id = ? AND status = 'ACCEPTED')
       ORDER BY v.visit_date ASC, v.time_slot ASC
-    `).all(userId, userId, userId);
+    `, [userId, userId, userId]);
 
     const nowIso = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
 
@@ -1503,7 +1498,7 @@ app.all(['/api/girovisite/ical/:token', '/api/girovisite/ical/:token.ics'], (req
 });
 
 // 1. Get visits for the logged in agent (including joint co-visits)
-app.get('/api/girovisite/visits', authMiddleware, (req: any, res) => {
+app.get('/api/girovisite/visits', authMiddleware, async (req: any, res) => {
   try {
     const userId = Number(req.user.id);
     const admin = isUserAdmin(req.user);
@@ -1511,7 +1506,7 @@ app.get('/api/girovisite/visits', authMiddleware, (req: any, res) => {
 
     let rawVisits;
     if (admin || isRoleplay) {
-      rawVisits = db.prepare(`
+      rawVisits = await queryAll(`
         SELECT v.*, 
                c.name as client_name, c.address as client_address, c.city as client_city, 
                c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
@@ -1528,9 +1523,9 @@ app.get('/api/girovisite/visits', authMiddleware, (req: any, res) => {
         LEFT JOIN co_visit_invites i ON (i.visit_id = v.id AND i.status = 'ACCEPTED')
         LEFT JOIN users gu ON i.guest_agent_id = gu.id
         ORDER BY v.visit_date ASC, v.time_slot ASC
-      `).all();
+      `);
     } else {
-      rawVisits = db.prepare(`
+      rawVisits = await queryAll(`
         SELECT v.*, 
                c.name as client_name, c.address as client_address, c.city as client_city, 
                c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
@@ -1550,11 +1545,11 @@ app.get('/api/girovisite/visits', authMiddleware, (req: any, res) => {
            OR v.host_agent_id = ?
            OR v.id IN (SELECT visit_id FROM co_visit_invites WHERE guest_agent_id = ? AND status = 'ACCEPTED')
         ORDER BY v.visit_date ASC, v.time_slot ASC
-      `).all(userId, userId, userId);
+      `, [userId, userId, userId]);
 
       // If user has 0 specific visits, fallback to all visits so calendar is never empty during simulations
       if (!rawVisits || rawVisits.length === 0) {
-        rawVisits = db.prepare(`
+        rawVisits = await queryAll(`
           SELECT v.*, 
                  c.name as client_name, c.address as client_address, c.city as client_city, 
                  c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
@@ -1571,7 +1566,7 @@ app.get('/api/girovisite/visits', authMiddleware, (req: any, res) => {
           LEFT JOIN co_visit_invites i ON (i.visit_id = v.id AND i.status = 'ACCEPTED')
           LEFT JOIN users gu ON i.guest_agent_id = gu.id
           ORDER BY v.visit_date ASC, v.time_slot ASC
-        `).all();
+        `);
       }
     }
 
@@ -1591,12 +1586,12 @@ app.post('/api/girovisite/visits', authMiddleware, async (req: any, res) => {
       return res.status(400).json({ error: 'Client e Data visita sono obbligatori' });
     }
 
-    const validClientId = await ensureClientInSqlite(client_id, db);
+    const validClientId = await ensureClientInPostgres(client_id);
     if (!validClientId) {
       return res.status(404).json({ error: 'Cliente non trovato' });
     }
 
-    const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(validClientId) as any;
+    const client = await queryGet('SELECT * FROM clients WHERE id = ?', [validClientId]) as any;
     if (!client) {
       return res.status(404).json({ error: 'Cliente non trovato' });
     }
@@ -1608,13 +1603,12 @@ app.post('/api/girovisite/visits', authMiddleware, async (req: any, res) => {
     }
 
     const slot = time_slot || '09:00';
-    const stmt = db.prepare(`
+    const info = await queryRun(`
       INSERT INTO agent_visits (agent_id, client_id, visit_date, time_slot, notes, is_joint, host_agent_id)
       VALUES (?, ?, ?, ?, ?, 0, ?)
-    `);
-    const info = stmt.run(req.user.id, validClientId, visit_date, slot, notes || '', req.user.id);
+    `, [req.user.id, validClientId, visit_date, slot, notes || '', req.user.id]);
 
-    const rawVisit = db.prepare(`
+    const rawVisit = await queryGet(`
       SELECT v.*, 
              c.name as client_name, c.address as client_address, c.city as client_city, 
              c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
@@ -1624,7 +1618,7 @@ app.post('/api/girovisite/visits', authMiddleware, async (req: any, res) => {
       LEFT JOIN users u ON v.agent_id = u.id
       LEFT JOIN users hu ON v.host_agent_id = hu.id
       WHERE v.id = ?
-    `).get(info.lastInsertRowid);
+    `, [info.lastInsertRowid]);
 
     res.json(formatVisitRecord(rawVisit));
   } catch (err: any) {
@@ -1634,10 +1628,10 @@ app.post('/api/girovisite/visits', authMiddleware, async (req: any, res) => {
 });
 
 // 3. Delete a visit or cancel participation in a co-visit
-app.delete('/api/girovisite/visits/:id', authMiddleware, (req: any, res) => {
+app.delete('/api/girovisite/visits/:id', authMiddleware, async (req: any, res) => {
   try {
     const visitId = Number(req.params.id);
-    const visit = db.prepare('SELECT v.*, c.name as client_name FROM agent_visits v LEFT JOIN clients c ON v.client_id = c.id WHERE v.id = ?').get(visitId) as any;
+    const visit = await queryGet('SELECT v.*, c.name as client_name FROM agent_visits v LEFT JOIN clients c ON v.client_id = c.id WHERE v.id = ?', [visitId]) as any;
     if (!visit) {
       return res.status(404).json({ error: 'Visita non trovata' });
     }
@@ -1646,26 +1640,26 @@ app.delete('/api/girovisite/visits/:id', authMiddleware, (req: any, res) => {
     const admin = isUserAdmin(req.user);
 
     // Check if current user is guest agent on an accepted co-visit invite for this visit
-    const guestInvite = db.prepare(`
+    const guestInvite = await queryGet(`
       SELECT * FROM co_visit_invites 
       WHERE visit_id = ? AND guest_agent_id = ? AND status = 'ACCEPTED'
-    `).get(visitId, currentUserId) as any;
+    `, [visitId, currentUserId]) as any;
 
     if (guestInvite && Number(visit.agent_id) !== currentUserId && Number(visit.host_agent_id) !== currentUserId && !admin) {
       // Guest agent wants to cancel their participation in the co-visit
-      db.prepare(`
+      await queryRun(`
         UPDATE co_visit_invites 
         SET status = 'DECLINED', updated_at = CURRENT_TIMESTAMP 
         WHERE id = ?
-      `).run(guestInvite.id);
+      `, [guestInvite.id]);
 
       // Check if any other guest is still accepted for this visit
-      const remainingAccepted = db.prepare(`
+      const remainingAccepted = await queryGet(`
         SELECT COUNT(*) as count FROM co_visit_invites WHERE visit_id = ? AND status = 'ACCEPTED'
-      `).get(visitId) as any;
+      `, [visitId]) as any;
 
       if (!remainingAccepted || remainingAccepted.count === 0) {
-        db.prepare('UPDATE agent_visits SET is_joint = 0 WHERE id = ?').run(visitId);
+        await queryRun('UPDATE agent_visits SET is_joint = false WHERE id = ?', [visitId]);
       }
 
       // Notify the host agent
@@ -1685,9 +1679,9 @@ app.delete('/api/girovisite/visits/:id', authMiddleware, (req: any, res) => {
     }
 
     // Host agent or admin deleting the visit: notify guests
-    const acceptedInvites = db.prepare(`
+    const acceptedInvites = await queryAll(`
       SELECT * FROM co_visit_invites WHERE visit_id = ? AND status IN ('PENDING', 'ACCEPTED')
-    `).all(visitId) as any[];
+    `, [visitId]) as any[];
 
     for (const inv of acceptedInvites) {
       createNotification(
@@ -1699,8 +1693,8 @@ app.delete('/api/girovisite/visits/:id', authMiddleware, (req: any, res) => {
       );
     }
 
-    db.prepare('DELETE FROM agent_visits WHERE id = ?').run(visitId);
-    db.prepare('DELETE FROM co_visit_invites WHERE visit_id = ?').run(visitId);
+    await queryRun('DELETE FROM agent_visits WHERE id = ?', [visitId]);
+    await queryRun('DELETE FROM co_visit_invites WHERE visit_id = ?', [visitId]);
 
     res.json({ success: true });
   } catch (err: any) {
@@ -1710,14 +1704,14 @@ app.delete('/api/girovisite/visits/:id', authMiddleware, (req: any, res) => {
 });
 
 // 4. Get peer agents (colleagues) to invite for shadowing (only agent & admin roles)
-app.get('/api/girovisite/colleagues', authMiddleware, (req: any, res) => {
+app.get('/api/girovisite/colleagues', authMiddleware, async (req: any, res) => {
   try {
-    const colleagues = db.prepare(`
+    const colleagues = await queryAll(`
       SELECT id, name, email, department, role, avatar 
       FROM users 
       WHERE id != ? 
       ORDER BY name ASC
-    `).all(req.user.id);
+    `, [req.user.id]);
 
     const allowedRoles = ['admin', 'amministratore', 'agent', 'agente', 'capoarea', 'capo_area', 'area_manager'];
 
@@ -1735,14 +1729,14 @@ app.get('/api/girovisite/colleagues', authMiddleware, (req: any, res) => {
 });
 
 // Helper for invite creation handler
-const handleCreateInvite = (req: any, res: any) => {
+const handleCreateInvite = async (req: any, res: any) => {
   try {
     const { visit_id, guest_agent_id } = req.body;
     if (!visit_id || !guest_agent_id) {
       return res.status(400).json({ error: 'ID Visita e ID Agente Ospite sono obbligatori' });
     }
 
-    const guestUser = db.prepare('SELECT id, name, role FROM users WHERE id = ?').get(guest_agent_id) as any;
+    const guestUser = await queryGet('SELECT id, name, role FROM users WHERE id = ?', [guest_agent_id]) as any;
     if (!guestUser) {
       return res.status(404).json({ error: 'Utente ospite non trovato' });
     }
@@ -1752,7 +1746,7 @@ const handleCreateInvite = (req: any, res: any) => {
       return res.status(400).json({ error: 'Puoi invitare in affiancamento solo agenti, capi area o amministratori' });
     }
 
-    const visit = db.prepare('SELECT v.*, c.name as client_name FROM agent_visits v LEFT JOIN clients c ON v.client_id = c.id WHERE v.id = ?').get(visit_id) as any;
+    const visit = await queryGet('SELECT v.*, c.name as client_name FROM agent_visits v LEFT JOIN clients c ON v.client_id = c.id WHERE v.id = ?', [visit_id]) as any;
     if (!visit) {
       return res.status(404).json({ error: 'Visita non trovata' });
     }
@@ -1765,30 +1759,29 @@ const handleCreateInvite = (req: any, res: any) => {
       return res.status(400).json({ error: 'Non puoi invitare te stesso' });
     }
 
-    const existingInvite = db.prepare(`
+    const existingInvite = await queryGet(`
       SELECT * FROM co_visit_invites 
       WHERE visit_id = ? AND guest_agent_id = ? AND status = 'PENDING'
-    `).get(visit_id, guest_agent_id);
+    `, [visit_id, guest_agent_id]);
 
     if (existingInvite) {
       return res.status(400).json({ error: 'Invito per questa visita già inviato a questo collega' });
     }
 
-    const stmt = db.prepare(`
+    const info = await queryRun(`
       INSERT INTO co_visit_invites (visit_id, host_agent_id, guest_agent_id, client_id, visit_date, time_slot, status)
       VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
-    `);
-    const info = stmt.run(visit_id, req.user.id, guest_agent_id, visit.client_id, visit.visit_date, visit.time_slot || '09:00');
+    `, [visit_id, req.user.id, guest_agent_id, visit.client_id, visit.visit_date, visit.time_slot || '09:00']);
 
     createNotification(
       guest_agent_id,
       'invito_affiancamento',
       'Richiesta di Affiancamento',
       `${req.user.name} ti chiede di affiancarlo il ${visit.visit_date} dal cliente "${visit.client_name}"`,
-      info.lastInsertRowid
+      Number(info.lastInsertRowid || 0)
     );
 
-    const createdInvite = db.prepare(`
+    const createdInvite = await queryGet(`
       SELECT i.*, 
              c.name as client_name, c.city as client_city, c.address as client_address, c.notes as client_notes,
              hu.name as host_agent_name, gu.name as guest_agent_name
@@ -1797,7 +1790,7 @@ const handleCreateInvite = (req: any, res: any) => {
       LEFT JOIN users hu ON i.host_agent_id = hu.id
       LEFT JOIN users gu ON i.guest_agent_id = gu.id
       WHERE i.id = ?
-    `).get(info.lastInsertRowid);
+    `, [info.lastInsertRowid]);
 
     res.json(formatInviteRecord(createdInvite));
   } catch (err: any) {
@@ -1811,9 +1804,9 @@ app.post('/api/girovisite/invite', authMiddleware, handleCreateInvite);
 app.post('/api/girovisite/invites', authMiddleware, handleCreateInvite);
 
 // 6. Get received invitations ("Inviti in Arrivo")
-app.get('/api/girovisite/invites/received', authMiddleware, (req: any, res) => {
+app.get('/api/girovisite/invites/received', authMiddleware, async (req: any, res) => {
   try {
-    const rawInvites = db.prepare(`
+    const rawInvites = await queryAll(`
       SELECT i.*, 
              c.name as client_name, c.city as client_city, c.address as client_address, c.notes as client_notes,
              hu.name as host_agent_name, gu.name as guest_agent_name
@@ -1823,7 +1816,7 @@ app.get('/api/girovisite/invites/received', authMiddleware, (req: any, res) => {
       LEFT JOIN users gu ON i.guest_agent_id = gu.id
       WHERE i.guest_agent_id = ?
       ORDER BY i.created_at DESC
-    `).all(req.user.id);
+    `, [req.user.id]);
 
     const invites = (rawInvites || []).map(formatInviteRecord);
     res.json(invites);
@@ -1834,9 +1827,9 @@ app.get('/api/girovisite/invites/received', authMiddleware, (req: any, res) => {
 });
 
 // 7. Get sent invitations ("Inviti Inviati")
-app.get('/api/girovisite/invites/sent', authMiddleware, (req: any, res) => {
+app.get('/api/girovisite/invites/sent', authMiddleware, async (req: any, res) => {
   try {
-    const rawInvites = db.prepare(`
+    const rawInvites = await queryAll(`
       SELECT i.*, 
              c.name as client_name, c.city as client_city, c.address as client_address, c.notes as client_notes,
              hu.name as host_agent_name, gu.name as guest_agent_name
@@ -1846,7 +1839,7 @@ app.get('/api/girovisite/invites/sent', authMiddleware, (req: any, res) => {
       LEFT JOIN users gu ON i.guest_agent_id = gu.id
       WHERE i.host_agent_id = ?
       ORDER BY i.created_at DESC
-    `).all(req.user.id);
+    `, [req.user.id]);
 
     const invites = (rawInvites || []).map(formatInviteRecord);
     res.json(invites);
@@ -1857,7 +1850,7 @@ app.get('/api/girovisite/invites/sent', authMiddleware, (req: any, res) => {
 });
 
 // 8. Respond to an invitation (Strict Binary Response: ACCEPT / DECLINE)
-app.post('/api/girovisite/invites/:id/respond', authMiddleware, (req: any, res) => {
+app.post('/api/girovisite/invites/:id/respond', authMiddleware, async (req: any, res) => {
   try {
     const inviteId = req.params.id;
     const { action } = req.body; // 'accept' or 'decline' or 'ACCEPTED' or 'DECLINED'
@@ -1866,13 +1859,13 @@ app.post('/api/girovisite/invites/:id/respond', authMiddleware, (req: any, res) 
       return res.status(400).json({ error: 'Azione non valida. Usare "accept" o "decline".' });
     }
 
-    const invite = db.prepare(`
+    const invite = await queryGet(`
       SELECT i.*, c.name as client_name, hu.name as host_agent_name 
       FROM co_visit_invites i
       LEFT JOIN clients c ON i.client_id = c.id
       LEFT JOIN users hu ON i.host_agent_id = hu.id
       WHERE i.id = ?
-    `).get(inviteId) as any;
+    `, [inviteId]) as any;
 
     if (!invite) {
       return res.status(404).json({ error: 'Invito non trovato' });
@@ -1885,14 +1878,14 @@ app.post('/api/girovisite/invites/:id/respond', authMiddleware, (req: any, res) 
     const isAccept = action === 'accept' || action === 'ACCEPTED';
     const newStatus = isAccept ? 'ACCEPTED' : 'DECLINED';
 
-    db.prepare(`
+    await queryRun(`
       UPDATE co_visit_invites 
       SET status = ?, updated_at = CURRENT_TIMESTAMP 
       WHERE id = ?
-    `).run(newStatus, inviteId);
+    `, [newStatus, inviteId]);
 
     if (isAccept) {
-      db.prepare('UPDATE agent_visits SET is_joint = 1 WHERE id = ?').run(invite.visit_id);
+      await queryRun('UPDATE agent_visits SET is_joint = true WHERE id = ?', [invite.visit_id]);
 
       createNotification(
         invite.host_agent_id,
@@ -1903,12 +1896,12 @@ app.post('/api/girovisite/invites/:id/respond', authMiddleware, (req: any, res) 
       );
     } else {
       // Check if any other guest has accepted this visit
-      const remainingAccepted = db.prepare(`
+      const remainingAccepted = await queryGet(`
         SELECT COUNT(*) as count FROM co_visit_invites WHERE visit_id = ? AND status = 'ACCEPTED'
-      `).get(invite.visit_id) as any;
+      `, [invite.visit_id]) as any;
 
       if (!remainingAccepted || remainingAccepted.count === 0) {
-        db.prepare('UPDATE agent_visits SET is_joint = 0 WHERE id = ?').run(invite.visit_id);
+        await queryRun('UPDATE agent_visits SET is_joint = false WHERE id = ?', [invite.visit_id]);
       }
 
       createNotification(
@@ -1920,7 +1913,7 @@ app.post('/api/girovisite/invites/:id/respond', authMiddleware, (req: any, res) 
       );
     }
 
-    const updatedInvite = db.prepare(`
+    const updatedInvite = await queryGet(`
       SELECT i.*, 
              c.name as client_name, c.city as client_city, c.address as client_address, c.notes as client_notes,
              hu.name as host_agent_name, gu.name as guest_agent_name
@@ -1929,7 +1922,7 @@ app.post('/api/girovisite/invites/:id/respond', authMiddleware, (req: any, res) 
       LEFT JOIN users hu ON i.host_agent_id = hu.id
       LEFT JOIN users gu ON i.guest_agent_id = gu.id
       WHERE i.id = ?
-    `).get(inviteId);
+    `, [inviteId]);
 
     const formattedInvite = formatInviteRecord(updatedInvite);
     res.json({ success: true, status: newStatus, invite: formattedInvite, ...formattedInvite });
@@ -1939,11 +1932,11 @@ app.post('/api/girovisite/invites/:id/respond', authMiddleware, (req: any, res) 
   }
 });
 
-app.get('/api/suppliers/:id', authMiddleware, (req, res) => {
-  const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(req.params.id) as any;
+app.get('/api/suppliers/:id', authMiddleware, async (req, res) => {
+  const supplier = await queryGet('SELECT * FROM suppliers WHERE id = ?', [req.params.id]) as any;
   if (!supplier) return res.status(404).json({ error: 'Supplier not found' });
   
-  const activities = db.prepare(`
+  const activities = await queryAll(`
     SELECT * FROM (
       SELECT 
         t.id, t.title, t.description, t.status, t.priority, t.deadline, t.created_at, 
@@ -1963,7 +1956,7 @@ app.get('/api/suppliers/:id', authMiddleware, (req, res) => {
       WHERE c.supplier_id = ? OR (c.caller_name = ? AND c.caller_type = 'fornitore')
     )
     ORDER BY created_at DESC
-  `).all(req.params.id, req.params.id, supplier.name);
+  `, [req.params.id, req.params.id, supplier.name]);
   
   res.json({ ...supplier, activities });
 });
@@ -2028,7 +2021,7 @@ app.post('/api/clients', authMiddleware, async (req: any, res) => {
 
   // 2. Also keep SQLite in sync with the exact same ID
   if (newId) {
-    db.prepare(`
+    await queryRun(`
       INSERT OR REPLACE INTO clients (
         id, code, web_login, name, contact, phone, cell_phone, fax, email, pec,
         address, postcode, city, province, country,
@@ -2042,16 +2035,14 @@ app.post('/api/clients', authMiddleware, async (req: any, res) => {
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
-    `).run(
-      newId,
+    `, [newId,
       code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
       address || null, postcode || null, city || null, province || null, country || 'Italia',
       fiscal_code || null, vat_code || null, sdi_pec || null,
       delivery_name || null, delivery_address || null, delivery_postcode || null, delivery_city || null, delivery_province || null, delivery_country || null,
-      price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente
-    );
+      price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente]);
   } else {
-    const result = db.prepare(`
+    const result = await queryRun(`
       INSERT INTO clients (
         code, web_login, name, contact, phone, cell_phone, fax, email, pec,
         address, postcode, city, province, country,
@@ -2065,22 +2056,20 @@ app.post('/api/clients', authMiddleware, async (req: any, res) => {
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
-    `).run(
-      code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
+    `, [code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
       address || null, postcode || null, city || null, province || null, country || 'Italia',
       fiscal_code || null, vat_code || null, sdi_pec || null,
       delivery_name || null, delivery_address || null, delivery_postcode || null, delivery_city || null, delivery_province || null, delivery_country || null,
-      price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente
-    );
+      price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente]);
     newId = Number(result.lastInsertRowid);
   }
 
-  const created = db.prepare('SELECT * FROM clients WHERE id = ?').get(newId);
+  const created = await queryGet('SELECT * FROM clients WHERE id = ?', [newId]);
   res.json(created || { id: newId });
 });
 
 app.patch('/api/clients/:id', authMiddleware, async (req: any, res) => {
-  await ensureClientInSqlite(req.params.id, db);
+  await ensureClientInPostgres(req.params.id);
   const {
     code, web_login, name, contact, phone, cell_phone, fax, email, pec,
     address, postcode, city, province, country,
@@ -2096,7 +2085,7 @@ app.patch('/api/clients/:id', authMiddleware, async (req: any, res) => {
 
   // 1. Direct update to PostgreSQL on Neon.tech
   try {
-    const existing = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id) as any;
+    const existing = await queryGet('SELECT * FROM clients WHERE id = ?', [req.params.id]) as any;
     if (existing) {
       await upsertClientInPostgres({
         code: code !== undefined ? (code || null) : existing.code,
@@ -2138,7 +2127,7 @@ app.patch('/api/clients/:id', authMiddleware, async (req: any, res) => {
   }
 
   // 2. Also update SQLite
-  db.prepare(`
+  await queryRun(`
     UPDATE clients SET
       code = ?, web_login = ?, name = ?, contact = ?, phone = ?, cell_phone = ?, fax = ?, email = ?, pec = ?,
       address = ?, postcode = ?, city = ?, province = ?, country = ?,
@@ -2146,22 +2135,20 @@ app.patch('/api/clients/:id', authMiddleware, async (req: any, res) => {
       delivery_name = ?, delivery_address = ?, delivery_postcode = ?, delivery_city = ?, delivery_province = ?, delivery_country = ?,
       price_list = ?, payment_name = ?, payment_bank = ?, custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?, notes = ?, agente = COALESCE(?, agente)
     WHERE id = ?
-  `).run(
-    code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
+  `, [code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
     address || null, postcode || null, city || null, province || null, country || 'Italia',
     fiscal_code || null, vat_code || null, sdi_pec || null,
     delivery_name || null, delivery_address || null, delivery_postcode || null, delivery_city || null, delivery_province || null, delivery_country || null,
     price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente || null,
-    req.params.id
-  );
+    req.params.id]);
 
-  const updated = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id);
+  const updated = await queryGet('SELECT * FROM clients WHERE id = ?', [req.params.id]);
   res.json(updated || { success: true });
 });
 
 app.delete('/api/clients/:id', authMiddleware, async (req, res) => {
   try {
-    const existing = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id) as any;
+    const existing = await queryGet('SELECT * FROM clients WHERE id = ?', [req.params.id]) as any;
     if (existing) {
       if (existing.code) {
         await queryWithRetry('DELETE FROM clients WHERE code = $1', [existing.code]).catch(() => {});
@@ -2176,45 +2163,44 @@ app.delete('/api/clients/:id', authMiddleware, async (req, res) => {
   } catch (err: any) {
     console.warn('[Neon DB] Postgres delete client notice (synced to local):', err?.message || err);
   }
-  db.prepare('DELETE FROM clients WHERE id = ?').run(req.params.id);
+  await queryRun('DELETE FROM clients WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
-app.get('/api/suppliers', authMiddleware, (req, res) => {
-  const suppliers = db.prepare('SELECT * FROM suppliers ORDER BY name ASC').all();
+app.get('/api/suppliers', authMiddleware, async (req, res) => {
+  const suppliers = await queryAll('SELECT * FROM suppliers ORDER BY name ASC');
   res.json(suppliers);
 });
 
-app.post('/api/suppliers', authMiddleware, (req, res) => {
+app.post('/api/suppliers', authMiddleware, async (req, res) => {
   const { name, contact, phone, email, category, notes } = req.body;
-  const result = db.prepare('INSERT INTO suppliers (name, contact, phone, email, category, notes) VALUES (?, ?, ?, ?, ?, ?)').run(name, contact, phone, email, category, notes);
+  const result = await queryRun('INSERT INTO suppliers (name, contact, phone, email, category, notes) VALUES (?, ?, ?, ?, ?, ?)', [name, contact, phone, email, category, notes]);
   res.json({ id: result.lastInsertRowid });
 });
 
-app.patch('/api/suppliers/:id', authMiddleware, (req, res) => {
+app.patch('/api/suppliers/:id', authMiddleware, async (req, res) => {
   const { name, contact, phone, email, category, notes } = req.body;
-  db.prepare('UPDATE suppliers SET name = ?, contact = ?, phone = ?, email = ?, category = ?, notes = ? WHERE id = ?')
-    .run(name, contact, phone, email, category, notes, req.params.id);
+  await queryRun('UPDATE suppliers SET name = ?, contact = ?, phone = ?, email = ?, category = ?, notes = ? WHERE id = ?', [name, contact, phone, email, category, notes, req.params.id]);
   res.json({ success: true });
 });
 
-app.delete('/api/suppliers/:id', authMiddleware, (req, res) => {
-  db.prepare('DELETE FROM suppliers WHERE id = ?').run(req.params.id);
+app.delete('/api/suppliers/:id', authMiddleware, async (req, res) => {
+  await queryRun('DELETE FROM suppliers WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
-app.get('/api/tags', authMiddleware, (req, res) => {
-  const tags = db.prepare('SELECT * FROM tags').all();
+app.get('/api/tags', authMiddleware, async (req, res) => {
+  const tags = await queryAll('SELECT * FROM tags');
   res.json(tags);
 });
 
-app.post('/api/tags', authMiddleware, (req, res) => {
+app.post('/api/tags', authMiddleware, async (req, res) => {
   const { name, color } = req.body;
-  const result = db.prepare('INSERT INTO tags (name, color) VALUES (?, ?)').run(name, color);
+  const result = await queryRun('INSERT INTO tags (name, color) VALUES (?, ?)', [name, color]);
   res.json({ id: result.lastInsertRowid });
 });
 
-app.get('/api/stats', authMiddleware, (req: any, res) => {
+app.get('/api/stats', authMiddleware, async (req: any, res) => {
   const filterUserId = req.query.userId;
   const macroCategoryId = req.query.macroCategoryId;
   const startDate = req.query.startDate;
@@ -2246,11 +2232,11 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
   const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
   const whereAndStr = whereClauses.length > 0 ? `AND ${whereClauses.join(' AND ')}` : '';
 
-  const totalTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks ${whereStr}`).get(...params) as any;
-  const completedTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks WHERE status = 'Completato' ${whereAndStr}`).get(...params) as any;
-  const pendingTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks WHERE status NOT IN ('Completato', 'Annullato') ${whereAndStr}`).get(...params) as any;
+  const totalTasks = await queryGet(`SELECT COUNT(*) as count FROM tasks ${whereStr}`, [...params]) as any;
+  const completedTasks = await queryGet(`SELECT COUNT(*) as count FROM tasks WHERE status = 'Completato' ${whereAndStr}`, [...params]) as any;
+  const pendingTasks = await queryGet(`SELECT COUNT(*) as count FROM tasks WHERE status NOT IN ('Completato', 'Annullato') ${whereAndStr}`, [...params]) as any;
   
-  const overdueTasks = db.prepare(`
+  const overdueTasks = await queryGet(`
     SELECT COUNT(*) as count 
     FROM tasks 
     WHERE deadline IS NOT NULL AND deadline != '' 
@@ -2258,35 +2244,35 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
     AND deadline::date <= (CURRENT_DATE + INTERVAL '1 day')
     AND status NOT IN ('Completato', 'Annullato')
     ${whereAndStr}
-  `).get(...params) as any;
+  `, [...params]) as any;
 
-  const expiredTasks = db.prepare(`
+  const expiredTasks = await queryGet(`
     SELECT COUNT(*) as count 
     FROM tasks 
     WHERE deadline IS NOT NULL AND deadline != '' 
     AND deadline::date < CURRENT_DATE 
     AND status NOT IN ('Completato', 'Annullato')
     ${whereAndStr}
-  `).get(...params) as any;
+  `, [...params]) as any;
   
-  const todayTasks = db.prepare(`
+  const todayTasks = await queryGet(`
     SELECT COUNT(*) as count 
     FROM tasks 
     WHERE ((status IN ('In Corso', 'In Attesa'))
     OR (deadline IS NOT NULL AND deadline != '' AND deadline::date = CURRENT_DATE AND status NOT IN ('Completato', 'Annullato')))
     ${whereAndStr}
-  `).get(...params) as any;
+  `, [...params]) as any;
 
-  const todayCalls = db.prepare(`
+  const todayCalls = await queryGet(`
     SELECT COUNT(*) as count 
     FROM calls 
     WHERE created_at::date = CURRENT_DATE
     ${filterUserId ? 'AND user_id = ?' : ''}
-  `).get(...(filterUserId ? [filterUserId] : [])) as any;
+  `, [...(filterUserId ? [filterUserId] : [])]) as any;
 
   const todayActivitiesCount = (todayTasks.count || 0) + (todayCalls.count || 0);
 
-  const latestCalls = db.prepare(`
+  const latestCalls = await queryAll(`
     SELECT c.*, t.title as task_title, u.name as user_name
     FROM calls c
     LEFT JOIN tasks t ON c.task_id = t.id
@@ -2297,21 +2283,21 @@ app.get('/api/stats', authMiddleware, (req: any, res) => {
     ${endDate ? 'AND c.created_at::date <= ?::date' : ''}
     ORDER BY c.created_at DESC
     LIMIT 5
-  `).all(...[
+  `, [...[
     ...(filterUserId ? [filterUserId] : []),
     ...(startDate ? [startDate] : []),
     ...(endDate ? [endDate] : [])
-  ]);
+  ]]);
 
-  const tasksByStatus = db.prepare(`SELECT status, COUNT(*) as count FROM tasks ${whereStr} GROUP BY status`).all(...params);
-  const tasksByPriority = db.prepare(`SELECT priority, COUNT(*) as count FROM tasks ${whereStr} GROUP BY priority`).all(...params);
-  const tasksByDepartment = db.prepare(`
+  const tasksByStatus = await queryAll(`SELECT status, COUNT(*) as count FROM tasks ${whereStr} GROUP BY status`, [...params]);
+  const tasksByPriority = await queryAll(`SELECT priority, COUNT(*) as count FROM tasks ${whereStr} GROUP BY priority`, [...params]);
+  const tasksByDepartment = await queryAll(`
     SELECT u.department, COUNT(*) as count 
     FROM tasks t 
     JOIN users u ON t.assignee_id = u.id 
     ${whereStr}
     GROUP BY u.department
-  `).all(...params);
+  `, [...params]);
 
   res.json({
     totalTasks: totalTasks.count,
@@ -2380,52 +2366,49 @@ app.post('/api/clients/import', authMiddleware, async (req: any, res) => {
   }
 });
 
-app.post('/api/suppliers/import', authMiddleware, (req: any, res) => {
+app.post('/api/suppliers/import', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   const suppliers = req.body; // Array of supplier objects
-  const insert = db.prepare('INSERT INTO suppliers (name, contact, phone, email, category, notes) VALUES (?, ?, ?, ?, ?, ?)');
-  const transaction = db.transaction((data) => {
-    for (const supplier of data) {
-      insert.run(supplier.name, supplier.contact, supplier.phone, supplier.email, supplier.category, supplier.notes);
+  for (const supplier of suppliers) {
+      await queryRun('INSERT INTO suppliers (name, contact, phone, email, category, notes) VALUES (?, ?, ?, ?, ?, ?)',
+        [supplier.name, supplier.contact || null, supplier.phone || null, supplier.email || null, supplier.category || null, supplier.notes || null]);
     }
-  });
-  transaction(suppliers);
   res.json({ success: true });
 });
 
 // Admin & Backup Routes
-app.get('/api/admin/backups', authMiddleware, (req: any, res) => {
+app.get('/api/admin/backups', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const backups = db.prepare(`
+  const backups = await queryAll(`
     SELECT b.*, u.name as user_name 
     FROM backups b 
     LEFT JOIN users u ON b.user_id = u.id 
     ORDER BY b.created_at DESC
-  `).all();
+  `);
   res.json(backups);
 });
 
-app.post('/api/admin/backups', authMiddleware, (req: any, res) => {
+app.post('/api/admin/backups', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   const { file_name, file_path } = req.body;
-  db.prepare('INSERT INTO backups (file_name, file_path, user_id) VALUES (?, ?, ?)').run(file_name, file_path, req.user.id);
+  await queryRun('INSERT INTO backups (file_name, file_path, user_id) VALUES (?, ?, ?)', [file_name, file_path, req.user.id]);
   res.json({ success: true });
 });
 
-app.get('/api/admin/export/tasks', authMiddleware, (req: any, res) => {
+app.get('/api/admin/export/tasks', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const tasks = db.prepare(`
+  const tasks = await queryAll(`
     SELECT t.*, u.name as assignee, c.name as client, s.name as supplier, cat.name as category
     FROM tasks t
     LEFT JOIN users u ON t.assignee_id = u.id
     LEFT JOIN clients c ON t.client_id = c.id
     LEFT JOIN suppliers s ON t.supplier_id = s.id
     LEFT JOIN categories cat ON t.category_id = cat.id
-  `).all();
+  `);
   res.json(tasks);
 });
 
-app.get('/api/admin/export-excel', authMiddleware, (req: any, res) => {
+app.get('/api/admin/export-excel', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   
   const { startDate, endDate } = req.query;
@@ -2524,13 +2507,13 @@ app.get('/api/admin/export-excel', authMiddleware, (req: any, res) => {
     let tasks, calls, notes;
     
     if (startDate && endDate) {
-      tasks = db.prepare(tasksQuery + ` WHERE date(t.created_at) >= date(?) AND date(t.created_at) <= date(?)`).all(startDate, endDate);
-      calls = db.prepare(callsQuery + ` WHERE date(c.created_at) >= date(?) AND date(c.created_at) <= date(?)`).all(startDate, endDate);
-      notes = db.prepare(notesQuery + ` WHERE date(t.created_at) >= date(?) AND date(t.created_at) <= date(?)`).all(startDate, endDate);
+      tasks = await queryAll(tasksQuery + ` WHERE t.created_at::date >= ?::date AND t.created_at::date <= ?::date`, [startDate, endDate]);
+      calls = await queryAll(callsQuery + ` WHERE c.created_at::date >= ?::date AND c.created_at::date <= ?::date`, [startDate, endDate]);
+      notes = await queryAll(notesQuery + ` WHERE t.created_at::date >= ?::date AND t.created_at::date <= ?::date`, [startDate, endDate]);
     } else {
-      tasks = db.prepare(tasksQuery).all();
-      calls = db.prepare(callsQuery).all();
-      notes = db.prepare(notesQuery).all();
+      tasks = await queryAll(tasksQuery);
+      calls = await queryAll(callsQuery);
+      notes = await queryAll(notesQuery);
     }
 
     const wb = XLSX.utils.book_new();
@@ -2549,7 +2532,7 @@ app.get('/api/admin/export-excel', authMiddleware, (req: any, res) => {
   }
 });
 
-app.post('/api/admin/archive', authMiddleware, (req: any, res) => {
+app.post('/api/admin/archive', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Forbidden' });
   }
@@ -2560,17 +2543,15 @@ app.post('/api/admin/archive', authMiddleware, (req: any, res) => {
   }
   
   try {
-    const dbTransaction = db.transaction(() => {
-      const tasksResult = db.prepare("DELETE FROM tasks WHERE date(created_at) <= date(?)").run(beforeDate);
-      const callsResult = db.prepare("DELETE FROM calls WHERE date(created_at) <= date(?)").run(beforeDate);
+    const result = await withTransaction(async (pgClient) => {
+      const tasksResult = await pgClient.query("DELETE FROM tasks WHERE created_at::date <= $1::date", [beforeDate]);
+      const callsResult = await pgClient.query("DELETE FROM calls WHERE created_at::date <= $1::date", [beforeDate]);
 
       return {
-        archivedTasks: tasksResult.changes,
-        archivedCalls: callsResult.changes
+        archivedTasks: tasksResult.rowCount || 0,
+        archivedCalls: callsResult.rowCount || 0
       };
-    });
-
-    const result = dbTransaction();
+    }, 'ArchiveData');
     
     res.json({ 
       success: true, 
@@ -2589,15 +2570,15 @@ app.get('/api/admin/export-full-zip', authMiddleware, async (req: any, res) => {
   if (!startDate || !endDate) return res.status(400).json({ error: 'Missing dates' });
 
   try {
-    const tasks = db.prepare(`SELECT * FROM tasks WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)`).all(startDate, endDate) as any[];
+    const tasks = await queryAll(`SELECT * FROM tasks WHERE created_at::date >= ?::date AND created_at::date <= ?::date`, [startDate, endDate]) as any[];
     const taskIds = tasks.map(t => t.id);
     const taskIdsPlaceholder = taskIds.length > 0 ? taskIds.map(() => '?').join(',') : 'NULL';
 
-    const calls = db.prepare(`SELECT * FROM calls WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)`).all(startDate, endDate) as any[];
-    const notes = taskIds.length > 0 ? db.prepare(`SELECT * FROM task_notes WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [];
-    const attachments = taskIds.length > 0 ? db.prepare(`SELECT * FROM attachments WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [] as any[];
-    const history = taskIds.length > 0 ? db.prepare(`SELECT * FROM task_history WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [];
-    const taskTags = taskIds.length > 0 ? db.prepare(`SELECT * FROM task_tags WHERE task_id IN (${taskIdsPlaceholder})`).all(taskIds) : [];
+    const calls = await queryAll(`SELECT * FROM calls WHERE created_at::date >= ?::date AND created_at::date <= ?::date`, [startDate, endDate]) as any[];
+    const notes = taskIds.length > 0 ? await queryAll(`SELECT * FROM task_notes WHERE task_id IN (${taskIdsPlaceholder})`, [taskIds]) : [];
+    const attachments = taskIds.length > 0 ? await queryAll(`SELECT * FROM attachments WHERE task_id IN (${taskIdsPlaceholder})`, [taskIds]) : [] as any[];
+    const history = taskIds.length > 0 ? await queryAll(`SELECT * FROM task_history WHERE task_id IN (${taskIdsPlaceholder})`, [taskIds]) : [];
+    const taskTags = taskIds.length > 0 ? await queryAll(`SELECT * FROM task_tags WHERE task_id IN (${taskIdsPlaceholder})`, [taskIds]) : [];
 
     // Create Excel
     const wb = XLSX.utils.book_new();
@@ -2655,134 +2636,133 @@ app.post('/api/admin/import-full-zip', authMiddleware, zipUpload.single('file'),
     const uploadsDir = path.join(__dirname, 'uploads');
     if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
-    const dbTransaction = db.transaction(() => {
+    const result = await withTransaction(async (pgClient) => {
       // 1. Clear existing data (Transactional tables only)
-      db.prepare("DELETE FROM task_tags").run();
-      db.prepare("DELETE FROM task_notes").run();
-      db.prepare("DELETE FROM attachments").run();
-      db.prepare("DELETE FROM task_history").run();
-      db.prepare("DELETE FROM calls").run();
-      db.prepare("DELETE FROM tasks").run();
+      await queryRun("DELETE FROM task_tags");
+      await queryRun("DELETE FROM task_notes");
+      await queryRun("DELETE FROM attachments");
+      await queryRun("DELETE FROM task_history");
+      await queryRun("DELETE FROM calls");
+      await queryRun("DELETE FROM tasks");
 
       // 2. Restore Tasks
-      const insertTask = db.prepare(`
-        INSERT INTO tasks (id, title, description, internal_notes, status, type, priority, creator_id, assignee_id, client_id, supplier_id, category_id, deadline, created_at, updated_at)
-        VALUES (@id, @title, @description, @internal_notes, @status, @type, @priority, @creator_id, @assignee_id, @client_id, @supplier_id, @category_id, @deadline, @created_at, @updated_at)
-      `);
       for (const t of tasks) {
-        insertTask.run({
-          id: t.id !== undefined ? t.id : null,
-          title: t.title !== undefined ? t.title : '',
-          description: t.description !== undefined ? t.description : null,
-          internal_notes: t.internal_notes !== undefined ? t.internal_notes : null,
-          status: t.status !== undefined ? t.status : 'to_do',
-          type: t.type !== undefined ? t.type : 'ordinary',
-          priority: t.priority !== undefined ? t.priority : 'medium',
-          creator_id: t.creator_id !== undefined ? t.creator_id : null,
-          assignee_id: t.assignee_id !== undefined ? t.assignee_id : null,
-          client_id: t.client_id !== undefined ? t.client_id : null,
-          supplier_id: t.supplier_id !== undefined ? t.supplier_id : null,
-          category_id: t.category_id !== undefined ? t.category_id : null,
-          deadline: t.deadline !== undefined ? t.deadline : null,
-          created_at: t.created_at !== undefined ? t.created_at : null,
-          updated_at: t.updated_at !== undefined ? t.updated_at : null,
-        });
+        await queryRun(`
+          INSERT INTO tasks (id, title, description, internal_notes, status, type, priority, creator_id, assignee_id, client_id, supplier_id, category_id, deadline, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO UPDATE SET
+            title = EXCLUDED.title,
+            description = EXCLUDED.description,
+            status = EXCLUDED.status,
+            priority = EXCLUDED.priority,
+            updated_at = NOW()
+        `, [
+          t.id !== undefined ? t.id : null,
+          t.title !== undefined ? t.title : '',
+          t.description !== undefined ? t.description : '',
+          t.internal_notes !== undefined ? t.internal_notes : null,
+          t.status !== undefined ? t.status : 'todo',
+          t.type !== undefined ? t.type : 'Task',
+          t.priority !== undefined ? t.priority : 'Media',
+          t.creator_id !== undefined ? t.creator_id : null,
+          t.assignee_id !== undefined ? t.assignee_id : null,
+          t.client_id !== undefined ? t.client_id : null,
+          t.supplier_id !== undefined ? t.supplier_id : null,
+          t.category_id !== undefined ? t.category_id : null,
+          t.deadline !== undefined ? t.deadline : null,
+          t.created_at !== undefined ? t.created_at : null,
+          t.updated_at !== undefined ? t.updated_at : null
+        ]);
       }
 
       // 3. Restore Calls
-      const insertCall = db.prepare(`
-        INSERT INTO calls (id, caller_name, caller_type, reason, duration, task_id, client_id, supplier_id, category_id, user_id, created_at)
-        VALUES (@id, @caller_name, @caller_type, @reason, @duration, @task_id, @client_id, @supplier_id, @category_id, @user_id, @created_at)
-      `);
       for (const c of calls) {
-        insertCall.run({
-          id: c.id !== undefined ? c.id : null,
-          caller_name: c.caller_name !== undefined ? c.caller_name : null,
-          caller_type: c.caller_type !== undefined ? c.caller_type : null,
-          reason: c.reason !== undefined ? c.reason : null,
-          duration: c.duration !== undefined ? c.duration : null,
-          task_id: c.task_id !== undefined ? c.task_id : null,
-          client_id: c.client_id !== undefined ? c.client_id : null,
-          supplier_id: c.supplier_id !== undefined ? c.supplier_id : null,
-          category_id: c.category_id !== undefined ? c.category_id : null,
-          user_id: c.user_id !== undefined ? c.user_id : null,
-          created_at: c.created_at !== undefined ? c.created_at : null,
-        });
+        await queryRun(`
+          INSERT INTO calls (id, caller_name, caller_type, reason, duration, task_id, client_id, supplier_id, category_id, user_id, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO NOTHING
+        `, [
+          c.id !== undefined ? c.id : null,
+          c.caller_name !== undefined ? c.caller_name : '',
+          c.caller_type !== undefined ? c.caller_type : 'Cliente',
+          c.reason !== undefined ? c.reason : '',
+          c.duration !== undefined ? c.duration : 0,
+          c.task_id !== undefined ? c.task_id : null,
+          c.client_id !== undefined ? c.client_id : null,
+          c.supplier_id !== undefined ? c.supplier_id : null,
+          c.category_id !== undefined ? c.category_id : null,
+          c.user_id !== undefined ? c.user_id : null,
+          c.created_at !== undefined ? c.created_at : null
+        ]);
       }
 
       // 4. Restore Notes
-      const insertNote = db.prepare(`
-        INSERT INTO task_notes (id, task_id, user_id, content, created_at, updated_at)
-        VALUES (@id, @task_id, @user_id, @content, @created_at, @updated_at)
-      `);
       for (const n of notes) {
-        insertNote.run({
-          id: n.id !== undefined ? n.id : null,
-          task_id: n.task_id !== undefined ? n.task_id : null,
-          user_id: n.user_id !== undefined ? n.user_id : null,
-          content: n.content !== undefined ? n.content : null,
-          created_at: n.created_at !== undefined ? n.created_at : null,
-          updated_at: n.updated_at !== undefined ? n.updated_at : null,
-        });
+        await queryRun(`
+          INSERT INTO task_notes (id, task_id, user_id, content, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO NOTHING
+        `, [
+          n.id !== undefined ? n.id : null,
+          n.task_id !== undefined ? n.task_id : null,
+          n.user_id !== undefined ? n.user_id : null,
+          n.content !== undefined ? n.content : '',
+          n.created_at !== undefined ? n.created_at : null,
+          n.updated_at !== undefined ? n.updated_at : null
+        ]);
       }
 
       // 5. Restore Attachments
-      const insertAttachment = db.prepare(`
-        INSERT INTO attachments (id, task_id, file_name, file_path, file_type, created_at)
-        VALUES (@id, @task_id, @file_name, @file_path, @file_type, @created_at)
-      `);
       for (const a of attachments) {
         const filePathClean = a.file_path ? path.basename(a.file_path) : '';
-        insertAttachment.run({
-          id: a.id !== undefined ? a.id : null,
-          task_id: a.task_id !== undefined ? a.task_id : null,
-          file_name: a.file_name !== undefined ? a.file_name : null,
-          file_path: a.file_path !== undefined ? a.file_path : null,
-          file_type: a.file_type !== undefined ? a.file_type : null,
-          created_at: a.created_at !== undefined ? a.created_at : null,
-        });
-        
-        // Extract file from zip if it exists
-        if (filePathClean) {
-          const fileEntry = zipEntries.find(e => e.entryName === `attachments/${filePathClean}`);
-          if (fileEntry) {
-            fs.writeFileSync(path.join(uploadDir, filePathClean), fileEntry.getData());
-          }
+        await queryRun(`
+          INSERT INTO attachments (id, task_id, file_name, file_path, file_type, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO NOTHING
+        `, [
+          a.id !== undefined ? a.id : null,
+          a.task_id !== undefined ? a.task_id : null,
+          a.file_name !== undefined ? a.file_name : '',
+          filePathClean,
+          a.file_type !== undefined ? a.file_type : '',
+          a.created_at !== undefined ? a.created_at : null
+        ]);
+        const entry = zip.getEntry('attachments/' + filePathClean);
+        if (entry) {
+          fs.writeFileSync(path.join(uploadsDir, filePathClean), entry.getData());
         }
       }
 
       // 6. Restore History
-      const insertHistory = db.prepare(`
-        INSERT INTO task_history (id, task_id, user_id, action, details, timestamp)
-        VALUES (@id, @task_id, @user_id, @action, @details, @timestamp)
-      `);
       for (const h of history) {
-        insertHistory.run({
-          id: h.id !== undefined ? h.id : null,
-          task_id: h.task_id !== undefined ? h.task_id : null,
-          user_id: h.user_id !== undefined ? h.user_id : null,
-          action: h.action !== undefined ? h.action : null,
-          details: h.details !== undefined ? h.details : null,
-          timestamp: h.timestamp !== undefined ? h.timestamp : null,
-        });
+        await queryRun(`
+          INSERT INTO task_history (id, task_id, user_id, action, details, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO NOTHING
+        `, [
+          h.id !== undefined ? h.id : null,
+          h.task_id !== undefined ? h.task_id : null,
+          h.user_id !== undefined ? h.user_id : null,
+          h.action !== undefined ? h.action : '',
+          h.details !== undefined ? h.details : '',
+          h.timestamp !== undefined ? h.timestamp : null
+        ]);
       }
 
       // 7. Restore Task Tags
-      const insertTaskTag = db.prepare(`
-        INSERT INTO task_tags (task_id, tag_id)
-        VALUES (@task_id, @tag_id)
-      `);
       for (const tt of taskTags) {
-        insertTaskTag.run({
-          task_id: tt.task_id !== undefined ? tt.task_id : null,
-          tag_id: tt.tag_id !== undefined ? tt.tag_id : null,
-        });
+        await queryRun(`
+          INSERT INTO task_tags (task_id, tag_id)
+          VALUES (?, ?)
+          ON CONFLICT DO NOTHING
+        `, [
+          tt.task_id !== undefined ? tt.task_id : null,
+          tt.tag_id !== undefined ? tt.tag_id : null
+        ]);
       }
 
       return { success: true, tasksCount: tasks.length, callsCount: calls.length };
-    });
-
-    const result = dbTransaction();
+    }, 'ImportFullZip');
     
     // Cleanup uploaded zip
     fs.unlinkSync(req.file.path);
@@ -2796,11 +2776,11 @@ app.post('/api/admin/import-full-zip', authMiddleware, zipUpload.single('file'),
 });
 
 // Notifications Routes
-app.get('/api/notifications', authMiddleware, (req: any, res) => {
+app.get('/api/notifications', authMiddleware, async (req: any, res) => {
   const userId = req.user.id;
   
   // Check for upcoming deadlines (within 24 hours) and create notifications
-  const upcomingTasks = db.prepare(`
+  const upcomingTasks = await queryAll(`
     SELECT * FROM tasks 
     WHERE assignee_id = ? 
     AND status != 'Completato' 
@@ -2808,20 +2788,18 @@ app.get('/api/notifications', authMiddleware, (req: any, res) => {
     AND deadline != ''
     AND deadline::date <= (CURRENT_DATE + INTERVAL '1 day')
     AND deadline::date >= CURRENT_DATE
-  `).all(userId) as any[];
+  `, [userId]) as any[];
 
   for (const task of upcomingTasks) {
-    const existing = db.prepare('SELECT id FROM user_notifications WHERE user_id = ? AND type = ? AND related_id = ?')
-      .get(userId, 'deadline', task.id);
+    const existing = await queryGet('SELECT id FROM user_notifications WHERE user_id = ? AND type = ? AND related_id = ?', [userId, 'deadline', task.id]);
     
     if (!existing) {
-      db.prepare('INSERT INTO user_notifications (user_id, type, title, message, related_id) VALUES (?, ?, ?, ?, ?)')
-        .run(userId, 'deadline', 'Scadenza imminente', `Il task "${task.title}" scade a breve.`, task.id);
+      await queryRun('INSERT INTO user_notifications (user_id, type, title, message, related_id) VALUES (?, ?, ?, ?, ?)', [userId, 'deadline', 'Scadenza imminente', `Il task "${task.title}" scade a breve.`, task.id]);
     }
   }
 
   try {
-    const notifications = db.prepare('SELECT * FROM user_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50').all(userId);
+    const notifications = await queryAll('SELECT * FROM user_notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50', [userId]);
     res.json(notifications);
   } catch (error) {
     console.error('Error fetching notifications:', error);
@@ -2829,16 +2807,16 @@ app.get('/api/notifications', authMiddleware, (req: any, res) => {
   }
 });
 
-app.patch('/api/notifications/:id/read', authMiddleware, (req: any, res) => {
-  db.prepare('UPDATE user_notifications SET is_read = 1 WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+app.patch('/api/notifications/:id/read', authMiddleware, async (req: any, res) => {
+  await queryRun('UPDATE user_notifications SET is_read = true WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
   res.json({ success: true });
 });
 
-app.delete('/api/notifications/clear-before', authMiddleware, (req: any, res) => {
+app.delete('/api/notifications/clear-before', authMiddleware, async (req: any, res) => {
   const { date } = req.body;
   if (!date) return res.status(400).json({ error: 'Data non specificata' });
   try {
-    const result = db.prepare('DELETE FROM user_notifications WHERE user_id = ? AND created_at::date <= ?::date').run(req.user.id, date);
+    const result = await queryRun('DELETE FROM user_notifications WHERE user_id = ? AND created_at::date <= ?::date', [req.user.id, date]);
     res.json({ success: true, deletedCount: result.changes });
   } catch (error) {
     console.error('Error clearing notifications:', error);
@@ -2846,45 +2824,43 @@ app.delete('/api/notifications/clear-before', authMiddleware, (req: any, res) =>
   }
 });
 
-app.get('/api/notifications/settings', authMiddleware, (req: any, res) => {
-  let settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(req.user.id) as any;
+app.get('/api/notifications/settings', authMiddleware, async (req: any, res) => {
+  let settings = await queryGet('SELECT * FROM user_notification_settings WHERE user_id = ?', [req.user.id]) as any;
   if (!settings) {
-    db.prepare('INSERT INTO user_notification_settings (user_id) VALUES (?)').run(req.user.id);
-    settings = db.prepare('SELECT * FROM user_notification_settings WHERE user_id = ?').get(req.user.id);
+    await queryRun('INSERT INTO user_notification_settings (user_id) VALUES (?)', [req.user.id]);
+    settings = await queryGet('SELECT * FROM user_notification_settings WHERE user_id = ?', [req.user.id]);
   }
   res.json(settings);
 });
 
-app.patch('/api/notifications/settings', authMiddleware, (req: any, res) => {
+app.patch('/api/notifications/settings', authMiddleware, async (req: any, res) => {
   const { task_deadline, new_task, comments, weekly_report } = req.body;
-  db.prepare(`
+  await queryRun(`
     UPDATE user_notification_settings 
     SET task_deadline = ?, new_task = ?, comments = ?, weekly_report = ? 
     WHERE user_id = ?
-  `).run(
-    task_deadline ? 1 : 0,
+  `, [task_deadline ? 1 : 0,
     new_task ? 1 : 0,
     comments ? 1 : 0,
     weekly_report ? 1 : 0,
-    req.user.id
-  );
+    req.user.id]);
   res.json({ success: true });
 });
 
-app.delete('/api/calls/:id', authMiddleware, (req: any, res) => {
-  const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id) as any;
+app.delete('/api/calls/:id', authMiddleware, async (req: any, res) => {
+  const call = await queryGet('SELECT * FROM calls WHERE id = ?', [req.params.id]) as any;
   if (!call) return res.status(404).json({ error: 'Call not found' });
 
   if (req.user.role !== 'admin' && call.user_id !== req.user.id) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  db.prepare('DELETE FROM calls WHERE id = ?').run(req.params.id);
+  await queryRun('DELETE FROM calls WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
-app.get('/api/categories', authMiddleware, (req, res) => {
-  const categories = db.prepare('SELECT * FROM categories').all();
+app.get('/api/categories', authMiddleware, async (req, res) => {
+  const categories = await queryAll('SELECT * FROM categories');
   res.json(categories);
 });
 
@@ -2894,11 +2870,10 @@ app.post('/api/calls', authMiddleware, async (req: any, res) => {
   
   let validClientId: number | null = null;
   if (client_id) {
-    validClientId = await ensureClientInSqlite(client_id, db);
+    validClientId = await ensureClientInPostgres(client_id);
   }
 
-  const result = db.prepare('INSERT INTO calls (caller_name, caller_type, reason, duration, task_id, category_id, client_id, supplier_id, user_id, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-    caller_name,
+  const result = await queryRun('INSERT INTO calls (caller_name, caller_type, reason, duration, task_id, category_id, client_id, supplier_id, user_id, duration_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [caller_name,
     caller_type || 'esterno',
     reason || null,
     duration || 0,
@@ -2907,43 +2882,40 @@ app.post('/api/calls', authMiddleware, async (req: any, res) => {
     validClientId,
     supplier_id || null,
     req.user.id,
-    duration_minutes || 0
-  );
+    duration_minutes || 0]);
 
   if (task_id) {
-    db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(
-      task_id,
+    await queryRun('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)', [task_id,
       req.user.id,
       'Chiamata ricevuta',
-      `Ricevuta chiamata da ${caller_name} (${caller_type}). Durata: ${duration}s. Motivo: ${reason || 'Nessun motivo specificato'}`
-    );
+      `Ricevuta chiamata da ${caller_name} (${caller_type}). Durata: ${duration}s. Motivo: ${reason || 'Nessun motivo specificato'}`]);
   }
   
   res.json({ id: result.lastInsertRowid, caller_name, reason, task_id });
 });
 
-app.post('/api/categories', authMiddleware, (req: any, res) => {
+app.post('/api/categories', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   const { name, parent_id } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   
-  const result = db.prepare('INSERT INTO categories (name, parent_id) VALUES (?, ?)').run(name, parent_id || null);
+  const result = await queryRun('INSERT INTO categories (name, parent_id) VALUES (?, ?)', [name, parent_id || null]);
   res.json({ id: result.lastInsertRowid, name, parent_id });
 });
 
-app.delete('/api/categories/:id', authMiddleware, (req: any, res) => {
+app.delete('/api/categories/:id', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   // Check if category is used in tasks
-  const tasks = db.prepare('SELECT COUNT(*) as count FROM tasks WHERE category_id = ?').get(req.params.id) as any;
+  const tasks = await queryGet('SELECT COUNT(*) as count FROM tasks WHERE category_id = ?', [req.params.id]) as any;
   if (tasks.count > 0) {
     return res.status(400).json({ error: 'Cannot delete category used in tasks' });
   }
   
-  db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
+  await queryRun('DELETE FROM categories WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
-app.get('/api/tasks', authMiddleware, (req: any, res) => {
+app.get('/api/tasks', authMiddleware, async (req: any, res) => {
   const { userId: filterUserId, macroCategoryId, startDate, endDate, status, search, clientId, supplierId } = req.query;
   
   let whereClauses = [];
@@ -3041,7 +3013,7 @@ app.get('/api/tasks', authMiddleware, (req: any, res) => {
   }
   const callWhereStr = callWhereClauses.length > 0 ? `WHERE ${callWhereClauses.join(' AND ')}` : '';
 
-  const tasks = db.prepare(`
+  const tasks = await queryAll(`
     SELECT * FROM (
       SELECT 
         t.id, 
@@ -3106,26 +3078,26 @@ app.get('/api/tasks', authMiddleware, (req: any, res) => {
       ${callWhereStr}
     )
     ORDER BY created_at DESC
-  `).all([...params, ...callParams]);
+  `, [...params, ...callParams]);
   
   // Fetch tags for each task
-  const tasksWithTags = tasks.map((task: any) => {
+  const tasksWithTags = await Promise.all(tasks.map(async (task: any) => {
     if (task.activity_source === 'call') {
       return { ...task, tags: [] };
     }
-    const tags = db.prepare(`
+    const tags = await queryAll(`
       SELECT tg.* FROM tags tg
       JOIN task_tags tt ON tg.id = tt.tag_id
       WHERE tt.task_id = ?
-    `).all(task.id);
+    `, [task.id]);
     return { ...task, tags };
-  });
+  }));
   
   res.json(tasksWithTags);
 });
 
-app.get('/api/tasks/:id', authMiddleware, (req: any, res) => {
-  const task = db.prepare(`
+app.get('/api/tasks/:id', authMiddleware, async (req: any, res) => {
+  const task = await queryGet(`
     SELECT t.*, u.name as assignee_name, c.name as client_name, s.name as supplier_name, cat.name as category_name
     FROM tasks t
     LEFT JOIN users u ON t.assignee_id = u.id
@@ -3133,17 +3105,17 @@ app.get('/api/tasks/:id', authMiddleware, (req: any, res) => {
     LEFT JOIN suppliers s ON t.supplier_id = s.id
     LEFT JOIN categories cat ON t.category_id = cat.id
     WHERE t.id = ?
-  `).get(req.params.id) as any;
+  `, [req.params.id]) as any;
   
   if (!task) return res.status(404).json({ error: 'Task not found' });
   
-  const history = db.prepare('SELECT th.*, u.name as user_name FROM task_history th LEFT JOIN users u ON th.user_id = u.id WHERE task_id = ? ORDER BY timestamp DESC').all(req.params.id);
-  const attachments = db.prepare('SELECT * FROM attachments WHERE task_id = ?').all(req.params.id);
-  const tags = db.prepare(`
+  const history = await queryAll('SELECT th.*, u.name as user_name FROM task_history th LEFT JOIN users u ON th.user_id = u.id WHERE task_id = ? ORDER BY timestamp DESC', [req.params.id]);
+  const attachments = await queryAll('SELECT * FROM attachments WHERE task_id = ?', [req.params.id]);
+  const tags = await queryAll(`
     SELECT tg.* FROM tags tg
     JOIN task_tags tt ON tg.id = tt.tag_id
     WHERE tt.task_id = ?
-  `).all(req.params.id);
+  `, [req.params.id]);
   
   res.json({ ...task, history, attachments, tags });
 });
@@ -3153,38 +3125,35 @@ app.post('/api/tasks', authMiddleware, async (req: any, res) => {
   
   let validClientId: number | null = null;
   if (client_id) {
-    validClientId = await ensureClientInSqlite(client_id, db);
+    validClientId = await ensureClientInPostgres(client_id);
   }
 
-  const insertTask = db.prepare(`
+  const result = await queryRun(`
     INSERT INTO tasks (title, description, category_id, assignee_id, type, client_id, supplier_id, deadline, priority, creator_id, duration_minutes)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  
-  const result = insertTask.run(title, description, category_id, assignee_id, type, validClientId, supplier_id, deadline, priority || 'Media', req.user.id, duration_minutes || 0);
+  `, [title, description, category_id, assignee_id, type, validClientId, supplier_id, deadline, priority || 'Media', req.user.id, duration_minutes || 0]);
   const taskId = result.lastInsertRowid;
   
   // Handle tags
   if (tags && Array.isArray(tags)) {
-    const insertTag = db.prepare('INSERT INTO task_tags (task_id, tag_id) VALUES (?, ?)');
     for (const tagId of tags) {
-      insertTag.run(taskId, tagId);
+      await queryRun('INSERT INTO task_tags (task_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING', [taskId, tagId]);
     }
   }
   
-  db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(taskId, req.user.id, 'creazione', 'Task creato');
+  await queryRun('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)', [taskId, req.user.id, 'creazione', 'Task creato']);
   
   // Create notification for assignee
   if (assignee_id && assignee_id !== req.user.id) {
-    createNotification(assignee_id, 'assignment', 'Nuova assegnazione', `Ti è stato assegnato il task: ${title}`, taskId);
+    createNotification(assignee_id, 'assignment', 'Nuova assegnazione', `Ti è stato assegnato il task: ${title}`, Number(taskId));
   }
 
   res.json({ id: taskId });
 });
 
-app.patch('/api/tasks/:id', authMiddleware, (req: any, res) => {
+app.patch('/api/tasks/:id', authMiddleware, async (req: any, res) => {
   const { status, assignee_id, pause_reason, internal_notes, deadline, duration_minutes } = req.body;
-  const currentTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as any;
+  const currentTask = await queryGet('SELECT * FROM tasks WHERE id = ?', [req.params.id]) as any;
   
   if (!currentTask) return res.status(404).json({ error: 'Task not found' });
 
@@ -3194,8 +3163,8 @@ app.patch('/api/tasks/:id', authMiddleware, (req: any, res) => {
   if (status && status !== currentTask.status) {
     const statusAction = status.toLowerCase();
     const statusDetails = (status === 'In Attesa' || status === 'In pausa') ? `Sospeso. Motivo: ${pause_reason || 'Nessun motivo specificato'}` : `Stato cambiato in ${status}`;
-    db.prepare('UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);
-    db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, statusAction, statusDetails);
+    await queryRun('UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [status, req.params.id]);
+    await queryRun('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)', [req.params.id, req.user.id, statusAction, statusDetails]);
     
     // Notify creator if someone else updates status
     if (currentTask.creator_id && currentTask.creator_id !== req.user.id) {
@@ -3204,10 +3173,10 @@ app.patch('/api/tasks/:id', authMiddleware, (req: any, res) => {
   }
 
   if (assignee_id && Number(assignee_id) !== currentTask.assignee_id) {
-    const newUser = db.prepare('SELECT name FROM users WHERE id = ?').get(assignee_id) as any;
+    const newUser = await queryGet('SELECT name FROM users WHERE id = ?', [assignee_id]) as any;
     const reassignmentDetails = `Assegnato a ${newUser?.name || 'Sconosciuto'}`;
-    db.prepare('UPDATE tasks SET assignee_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(assignee_id, req.params.id);
-    db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, 'riassegnazione', reassignmentDetails);
+    await queryRun('UPDATE tasks SET assignee_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [assignee_id, req.params.id]);
+    await queryRun('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)', [req.params.id, req.user.id, 'riassegnazione', reassignmentDetails]);
     
     // Create notification for new assignee
     if (Number(assignee_id) !== req.user.id) {
@@ -3216,54 +3185,52 @@ app.patch('/api/tasks/:id', authMiddleware, (req: any, res) => {
   }
 
   if (internal_notes !== undefined && internal_notes !== currentTask.internal_notes) {
-    db.prepare('UPDATE tasks SET internal_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(internal_notes, req.params.id);
+    await queryRun('UPDATE tasks SET internal_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [internal_notes, req.params.id]);
     // No history for internal notes update usually, or we can add one
   }
 
   if (deadline !== undefined && deadline !== currentTask.deadline) {
     const deadlineDetails = `Scadenza cambiata in ${deadline || 'Nessuna'}`;
-    db.prepare('UPDATE tasks SET deadline = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(deadline || null, req.params.id);
-    db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, 'scadenza', deadlineDetails);
+    await queryRun('UPDATE tasks SET deadline = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [deadline || null, req.params.id]);
+    await queryRun('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)', [req.params.id, req.user.id, 'scadenza', deadlineDetails]);
   }
 
   if (duration_minutes !== undefined && duration_minutes !== currentTask.duration_minutes) {
     const durationDetails = `Tempo impiegato impostato a ${duration_minutes} minuti`;
-    db.prepare('UPDATE tasks SET duration_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(duration_minutes, req.params.id);
-    db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(req.params.id, req.user.id, 'aggiornamento_tempo', durationDetails);
+    await queryRun('UPDATE tasks SET duration_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [duration_minutes, req.params.id]);
+    await queryRun('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)', [req.params.id, req.user.id, 'aggiornamento_tempo', durationDetails]);
   }
 
   res.json({ success: true });
 });
 
 // Task Notes Endpoints
-app.get('/api/tasks/:id/notes', authMiddleware, (req: any, res) => {
-  const notes = db.prepare(`
+app.get('/api/tasks/:id/notes', authMiddleware, async (req: any, res) => {
+  const notes = await queryAll(`
     SELECT tn.*, u.name as user_name, u.avatar as user_avatar
     FROM task_notes tn
     JOIN users u ON tn.user_id = u.id
     WHERE tn.task_id = ?
     ORDER BY tn.created_at ASC
-  `).all(req.params.id);
+  `, [req.params.id]);
   res.json(notes);
 });
 
-app.post('/api/tasks/:id/notes', authMiddleware, (req: any, res) => {
+app.post('/api/tasks/:id/notes', authMiddleware, async (req: any, res) => {
   const { content } = req.body;
   if (!content) return res.status(400).json({ error: 'Content is required' });
 
-  const result = db.prepare('INSERT INTO task_notes (task_id, user_id, content) VALUES (?, ?, ?)').run(req.params.id, req.user.id, content);
+  const result = await queryRun('INSERT INTO task_notes (task_id, user_id, content) VALUES (?, ?, ?)', [req.params.id, req.user.id, content]);
   const noteId = result.lastInsertRowid;
 
   // Add to history
-  db.prepare('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)').run(
-    req.params.id,
+  await queryRun('INSERT INTO task_history (task_id, user_id, action, details) VALUES (?, ?, ?, ?)', [req.params.id,
     req.user.id,
     'nota',
-    'Aggiunta nuova nota interna'
-  );
+    'Aggiunta nuova nota interna']);
 
   // Notify relevant users
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as any;
+  const task = await queryGet('SELECT * FROM tasks WHERE id = ?', [req.params.id]) as any;
   const usersToNotify = new Set<number>();
   if (task.assignee_id && task.assignee_id !== req.user.id) usersToNotify.add(task.assignee_id);
   if (task.creator_id && task.creator_id !== req.user.id) usersToNotify.add(task.creator_id);
@@ -3275,73 +3242,70 @@ app.post('/api/tasks/:id/notes', authMiddleware, (req: any, res) => {
   res.json({ id: noteId, success: true });
 });
 
-app.patch('/api/notes/:id', authMiddleware, (req: any, res) => {
+app.patch('/api/notes/:id', authMiddleware, async (req: any, res) => {
   const { content } = req.body;
-  const note = db.prepare('SELECT * FROM task_notes WHERE id = ?').get(req.params.id) as any;
+  const note = await queryGet('SELECT * FROM task_notes WHERE id = ?', [req.params.id]) as any;
   if (!note) return res.status(404).json({ error: 'Note not found' });
   if (note.user_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
 
-  db.prepare('UPDATE task_notes SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(content, req.params.id);
+  await queryRun('UPDATE task_notes SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [content, req.params.id]);
   res.json({ success: true });
 });
 
-app.delete('/api/notes/:id', authMiddleware, (req: any, res) => {
-  const note = db.prepare('SELECT * FROM task_notes WHERE id = ?').get(req.params.id) as any;
+app.delete('/api/notes/:id', authMiddleware, async (req: any, res) => {
+  const note = await queryGet('SELECT * FROM task_notes WHERE id = ?', [req.params.id]) as any;
   if (!note) return res.status(404).json({ error: 'Note not found' });
   if (note.user_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
 
-  db.prepare('DELETE FROM task_notes WHERE id = ?').run(req.params.id);
+  await queryRun('DELETE FROM task_notes WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
-app.delete('/api/tasks/:id', authMiddleware, (req: any, res) => {
-  const currentTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as any;
+app.delete('/api/tasks/:id', authMiddleware, async (req: any, res) => {
+  const currentTask = await queryGet('SELECT * FROM tasks WHERE id = ?', [req.params.id]) as any;
   if (!currentTask) return res.status(404).json({ error: 'Task not found' });
 
   if (req.user.role !== 'admin' && currentTask.creator_id !== req.user.id) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  db.prepare('DELETE FROM tasks WHERE id = ?').run(req.params.id);
+  await queryRun('DELETE FROM tasks WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
-app.post('/api/tasks/:id/attachments', authMiddleware, upload.single('file'), (req: any, res) => {
+app.post('/api/tasks/:id/attachments', authMiddleware, upload.single('file'), async (req: any, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   
-  const result = db.prepare(`
+  const result = await queryRun(`
     INSERT INTO attachments (task_id, file_name, file_path, file_type)
     VALUES (?, ?, ?, ?)
-  `).run(req.params.id, req.file.originalname, `/uploads/${req.file.filename}`, req.file.mimetype);
+  `, [req.params.id, req.file.originalname, `/uploads/${req.file.filename}`, req.file.mimetype]);
   
   res.json({ id: result.lastInsertRowid, path: `/uploads/${req.file.filename}` });
 });
 
-app.post('/api/cleanup', authMiddleware, (req: any, res) => {
+app.post('/api/cleanup', authMiddleware, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   
-  db.transaction(() => {
-    db.prepare('DELETE FROM attachments').run();
-    db.prepare('DELETE FROM task_history').run();
-    db.prepare('DELETE FROM task_tags').run();
-    db.prepare('DELETE FROM calls').run();
-    db.prepare('DELETE FROM tasks').run();
-    db.prepare('DELETE FROM clients').run();
-    db.prepare('DELETE FROM suppliers').run();
-    // Keep users but maybe delete non-admins? 
-    // The user said "elimina tutti i dati inseriti task chiamate fornitori clieni..."
-    // "elimina tutti i dati inseriti task chiamate fornitori clieni... deve essere tutto pronto."
-  })();
+  await withTransaction(async (pgClient) => {
+    await pgClient.query('DELETE FROM attachments');
+    await pgClient.query('DELETE FROM task_history');
+    await pgClient.query('DELETE FROM task_tags');
+    await pgClient.query('DELETE FROM calls');
+    await pgClient.query('DELETE FROM tasks');
+    await pgClient.query('DELETE FROM clients');
+    await pgClient.query('DELETE FROM suppliers');
+  }, 'CleanupData');
   
   res.json({ success: true });
 });
 
-app.delete('/api/tasks/:id/attachments/:attachmentId', authMiddleware, (req: any, res) => {
-  const attachment = db.prepare('SELECT * FROM attachments WHERE id = ? AND task_id = ?').get(req.params.attachmentId, req.params.id) as any;
+app.delete('/api/tasks/:id/attachments/:attachmentId', authMiddleware, async (req: any, res) => {
+  const attachment = await queryGet('SELECT * FROM attachments WHERE id = ? AND task_id = ?', [req.params.attachmentId, req.params.id]) as any;
   if (!attachment) return res.status(404).json({ error: 'Attachment not found' });
   
   // In a real app we'd delete the file from disk too
-  db.prepare('DELETE FROM attachments WHERE id = ?').run(req.params.attachmentId);
+  await queryRun('DELETE FROM attachments WHERE id = ?', [req.params.attachmentId]);
   res.json({ success: true });
 });
 
@@ -3353,11 +3317,29 @@ app.delete('/api/tasks/:id/attachments/:attachmentId', authMiddleware, (req: any
 function escapeXml(str: any): string {
   if (str === null || str === undefined) return '';
   return String(str)
+    .replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F\uD800-\uDFFF\uFFFE\uFFFF]/g, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+// Helper to format CAP to 5 digits (e.g. 00100, 06061)
+function formatCap(capStr: string | null | undefined): string {
+  if (!capStr) return '';
+  const digitsOnly = String(capStr).trim().replace(/[^0-9]/g, '');
+  if (digitsOnly.length > 0 && digitsOnly.length <= 5) {
+    return digitsOnly.padStart(5, '0');
+  }
+  return String(capStr).trim();
+}
+
+// Helper to format Italian Province code to 2 uppercase chars (e.g. MI, TO, RM)
+function formatProvince(provStr: string | null | undefined): string {
+  if (!provStr) return '';
+  const clean = String(provStr).trim().toUpperCase();
+  return clean.length > 2 ? clean.substring(0, 2) : clean;
 }
 
 // Helper to calculate installment due dates
@@ -3408,7 +3390,7 @@ function getInstallmentDate(
 }
 
 // 1. Get all products (with backward-compatible pagination, FTS5 search, and admin filter enforcement)
-app.get(['/api/products', '/api/easyfatt/products'], authMiddleware, (req: any, res) => {
+app.get(['/api/products', '/api/easyfatt/products'], authMiddleware, async (req: any, res) => {
   try {
     const user = req.user;
     const isAdmin = isUserAdmin(user);
@@ -3435,29 +3417,31 @@ app.get(['/api/products', '/api/easyfatt/products'], authMiddleware, (req: any, 
       params.push(String(req.query.category).trim());
     }
 
-    // High-speed FTS5 search with indexed prefix fallback
+    // Native PostgreSQL ILIKE search with indexed trigram / pattern matching
     if (searchTerm) {
-      const fts = formatFtsQuery(searchTerm);
       let ftsMatchedIds: number[] = [];
-      if (fts) {
-        try {
-          const rows = db.prepare('SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT 500').all(fts) as { rowid: number }[];
-          ftsMatchedIds = rows.map(r => r.rowid);
-        } catch (e) {}
-      }
+      try {
+        const rows = await queryAll<{ id: number }>(
+          `SELECT id FROM products 
+           WHERE code ILIKE $1 OR description ILIKE $1 OR barcode ILIKE $1 OR category ILIKE $1 OR subcategory ILIKE $1 
+           LIMIT 500`,
+          [`%${searchTerm}%`]
+        );
+        ftsMatchedIds = rows.map(r => r.id);
+      } catch (e) {}
 
       if (ftsMatchedIds.length > 0) {
         whereConditions.push(`id IN (${ftsMatchedIds.join(',')})`);
       } else {
-        whereConditions.push(`(code LIKE ? OR description LIKE ? OR category LIKE ?)`);
-        const prefix = `${searchTerm}%`;
-        params.push(prefix, prefix, prefix);
+        whereConditions.push(`(code ILIKE ? OR description ILIKE ? OR category ILIKE ?)`);
+        const searchPattern = `%${searchTerm}%`;
+        params.push(searchPattern, searchPattern, searchPattern);
       }
     }
 
     // If user is not admin (e.g. Agent, Capo Area) or explicitly asked for filtered view, apply admin settings strictly
     if (!isAdmin || !forceAll || req.query?.filtered === 'true') {
-      const settings = db.prepare('SELECT product_link_filter, product_commission_filter FROM easyfatt_settings WHERE id = 1').get() as any || {
+      const settings = await queryGet('SELECT product_link_filter, product_commission_filter FROM easyfatt_settings WHERE id = 1') as any || {
         product_link_filter: 'all',
         product_commission_filter: 'all'
       };
@@ -3479,16 +3463,16 @@ app.get(['/api/products', '/api/easyfatt/products'], authMiddleware, (req: any, 
     }
 
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-    const countRow = db.prepare(`SELECT COUNT(*) as total FROM products ${whereClause}`).get(...params) as any;
+    const countRow = await queryGet(`SELECT COUNT(*) as total FROM products ${whereClause}`, [...params]) as any;
     const totalItems = countRow ? Number(countRow.total) : 0;
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
 
     let query = `SELECT id, code, description, price, vat_code, um, stock, barcode, category, subcategory, link, image_file_name, online_customized, classe_provvigione, manage_warehouse, min_stock, created_at FROM products ${whereClause} ORDER BY created_at DESC`;
     let products: any[] = [];
     if (isPaginated) {
-      products = db.prepare(`${query} LIMIT ? OFFSET ?`).all(...params, limit, offset) as any[];
+      products = await queryAll(`${query} LIMIT ? OFFSET ?`, [...params, limit, offset]) as any[];
     } else {
-      products = db.prepare(query).all(...params) as any[];
+      products = await queryAll(query, [...params]) as any[];
     }
 
     res.setHeader('X-Total-Count', totalItems);
@@ -3520,10 +3504,10 @@ app.get(['/api/products', '/api/easyfatt/products'], authMiddleware, (req: any, 
 });
 
 // 1b. Get single product by ID or Code with full detailed fields (HTML description, supplier notes, dimensions, specs)
-app.get(['/api/products/:id', '/api/easyfatt/products/:id'], authMiddleware, (req: any, res) => {
+app.get(['/api/products/:id', '/api/easyfatt/products/:id'], authMiddleware, async (req: any, res) => {
   try {
     const { id } = req.params;
-    const product = db.prepare('SELECT * FROM products WHERE id = ? OR code = ?').get(id, id) as any;
+    const product = await queryGet('SELECT * FROM products WHERE id = ? OR code = ?', [id, id]) as any;
     if (!product) {
       return res.status(404).json({ error: 'Prodotto non trovato' });
     }
@@ -3535,7 +3519,7 @@ app.get(['/api/products/:id', '/api/easyfatt/products/:id'], authMiddleware, (re
 });
 
 // 2. Create product
-app.post('/api/easyfatt/products', authMiddleware, (req, res) => {
+app.post('/api/easyfatt/products', authMiddleware, async (req, res) => {
   const { 
     code, description, price, vat_code, um, stock,
     barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
@@ -3549,11 +3533,11 @@ app.post('/api/easyfatt/products', authMiddleware, (req, res) => {
     return res.status(400).json({ error: 'Codice e descrizione sono obbligatori' });
   }
   try {
-    const existing = db.prepare('SELECT id FROM products WHERE code = ?').get(code);
+    const existing = await queryGet('SELECT id FROM products WHERE code = ?', [code]);
     if (existing) {
       return res.status(400).json({ error: `Il codice prodotto ${code} è già in uso` });
     }
-    const result = db.prepare(`
+    const result = await queryRun(`
       INSERT INTO products (
         code, description, price, vat_code, um, stock,
         barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
@@ -3569,14 +3553,12 @@ app.post('/api/easyfatt/products', authMiddleware, (req, res) => {
         ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?
       )
-    `).run(
-      code, description, Number(price) || 0, vat_code || '22', um || 'pz', Number(stock) || 0,
+    `, [code, description, Number(price) || 0, vat_code || '22', um || 'pz', Number(stock) || 0,
       barcode || null, category || null, subcategory || null, description_html || null, producer_name || null, link || null, notes || null, image_file_name || null,
       supplier_code || null, supplier_name || null, supplier_product_code || null, Number(supplier_net_price) || 0, Number(supplier_gross_price) || 0, supplier_notes || null,
       manage_warehouse ? true : false, warehouse_location || null, Number(min_stock) || 0, Number(ordered_qty) || 0, weight_um || null, Number(net_weight) || 0, Number(gross_weight) || 0,
       size_um || null, Number(net_size_x) || 0, Number(net_size_y) || 0, Number(net_size_z) || 0, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null,
-      online_promo || null, online_warranty || null, online_category_image || null, online_notes || null, online_customized ? true : false
-    );
+      online_promo || null, online_warranty || null, online_category_image || null, online_notes || null, online_customized ? true : false]);
     
     res.json({ id: result.lastInsertRowid, success: true });
   } catch (err: any) {
@@ -3585,7 +3567,7 @@ app.post('/api/easyfatt/products', authMiddleware, (req, res) => {
 });
 
 // 3. Update product
-app.put('/api/easyfatt/products/:id', authMiddleware, (req, res) => {
+app.put('/api/easyfatt/products/:id', authMiddleware, async (req, res) => {
   const { 
     code, description, price, vat_code, um, stock,
     barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
@@ -3596,18 +3578,18 @@ app.put('/api/easyfatt/products/:id', authMiddleware, (req, res) => {
   } = req.body;
 
   try {
-    const product = db.prepare('SELECT id FROM products WHERE id = ?').get(req.params.id) as any;
+    const product = await queryGet('SELECT id FROM products WHERE id = ?', [req.params.id]) as any;
     if (!product) {
       return res.status(404).json({ error: 'Prodotto non trovato' });
     }
     
     // Check code uniqueness
-    const existing = db.prepare('SELECT id FROM products WHERE code = ? AND id != ?').get(code, req.params.id);
+    const existing = await queryGet('SELECT id FROM products WHERE code = ? AND id != ?', [code, req.params.id]);
     if (existing) {
       return res.status(400).json({ error: `Il codice prodotto ${code} è già in uso` });
     }
 
-    db.prepare(`
+    await queryRun(`
       UPDATE products SET 
         code = ?, description = ?, price = ?, vat_code = ?, um = ?, stock = ?,
         barcode = ?, category = ?, subcategory = ?, description_html = ?, producer_name = ?, link = ?, notes = ?, image_file_name = ?,
@@ -3616,15 +3598,13 @@ app.put('/api/easyfatt/products/:id', authMiddleware, (req, res) => {
         size_um = ?, net_size_x = ?, net_size_y = ?, net_size_z = ?, custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?,
         online_promo = ?, online_warranty = ?, online_category_image = ?, online_notes = ?, online_customized = ?
       WHERE id = ?
-    `).run(
-      code, description, Number(price) || 0, vat_code || '22', um || 'pz', Number(stock) || 0,
+    `, [code, description, Number(price) || 0, vat_code || '22', um || 'pz', Number(stock) || 0,
       barcode || null, category || null, subcategory || null, description_html || null, producer_name || null, link || null, notes || null, image_file_name || null,
       supplier_code || null, supplier_name || null, supplier_product_code || null, Number(supplier_net_price) || 0, Number(supplier_gross_price) || 0, supplier_notes || null,
       manage_warehouse ? true : false, warehouse_location || null, Number(min_stock) || 0, Number(ordered_qty) || 0, weight_um || null, Number(net_weight) || 0, Number(gross_weight) || 0,
       size_um || null, Number(net_size_x) || 0, Number(net_size_y) || 0, Number(net_size_z) || 0, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null,
       online_promo || null, online_warranty || null, online_category_image || null, online_notes || null, online_customized ? true : false,
-      req.params.id
-    );
+      req.params.id]);
 
     res.json({ success: true });
   } catch (err: any) {
@@ -3633,9 +3613,9 @@ app.put('/api/easyfatt/products/:id', authMiddleware, (req, res) => {
 });
 
 // 4. Delete product
-app.delete('/api/easyfatt/products/:id', authMiddleware, (req, res) => {
+app.delete('/api/easyfatt/products/:id', authMiddleware, async (req, res) => {
   try {
-    db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
+    await queryRun('DELETE FROM products WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -3643,7 +3623,7 @@ app.delete('/api/easyfatt/products/:id', authMiddleware, (req, res) => {
 });
 
 // Helper to check if a user can modify a specific order (restricted to their own clients for agents/capoarea)
-function canModifyOrder(orderId: number | string, user: any) {
+async function canModifyOrder(orderId: number | string, user: any) {
   if (!user) return false;
   if (isUserAdmin(user)) return true;
 
@@ -3651,13 +3631,13 @@ function canModifyOrder(orderId: number | string, user: any) {
   const isCapo = isUserCapoArea(user);
   if (!isAgent && !isCapo) return false;
 
-  const order = db.prepare(`
+  const order = await queryGet(`
     SELECT o.id, o.agent_id, o.client_id, c.name as client_name, c.agente, c.province, c.region, u.name as order_agent_name, u.department as agent_department
     FROM orders o
     LEFT JOIN clients c ON o.client_id = c.id
     LEFT JOIN users u ON o.agent_id = u.id
     WHERE o.id = ?
-  `).get(orderId) as any;
+  `, [orderId]) as any;
 
   if (!order) return false;
 
@@ -3694,7 +3674,7 @@ function canModifyOrder(orderId: number | string, user: any) {
 }
 
 // 5. Get all orders (with universal server-side pagination, batch item loading, dynamic column sorting, and filter preservation)
-app.get(['/api/orders', '/api/easyfatt/orders'], authMiddleware, (req: any, res) => {
+app.get(['/api/orders', '/api/easyfatt/orders'], authMiddleware, async (req: any, res) => {
   try {
     const {
       clientId,
@@ -3824,11 +3804,11 @@ app.get(['/api/orders', '/api/easyfatt/orders'], authMiddleware, (req: any, res)
     const whereClause = whereConditions.length > 0 ? ` WHERE ` + whereConditions.join(' AND ') : '';
 
     // Calculate total count and summary stats over the filtered dataset
-    const countRow = db.prepare(`SELECT COUNT(*) as total ${fromClause} ${whereClause}`).get(...params) as any;
+    const countRow = await queryGet(`SELECT COUNT(*) as total ${fromClause} ${whereClause}`, [...params]) as any;
     const totalItems = countRow ? Number(countRow.total) : 0;
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
 
-    const summaryRow = db.prepare(`
+    const summaryRow = await queryGet(`
       SELECT 
         COUNT(*) as ordersCount,
         COALESCE(SUM(o.total), 0) as totalSales,
@@ -3837,7 +3817,7 @@ app.get(['/api/orders', '/api/easyfatt/orders'], authMiddleware, (req: any, res)
         COALESCE(SUM(CASE WHEN o.status = 'Bozza' THEN 1 ELSE 0 END), 0) as draftOrdersCount,
         COALESCE(SUM(CASE WHEN o.status != 'Bozza' THEN 1 ELSE 0 END), 0) as completedOrdersCount
       ${fromClause} ${whereClause}
-    `).get(...params) as any;
+    `, [...params]) as any;
 
     const summary = {
       ordersCount: summaryRow?.ordersCount || 0,
@@ -3861,9 +3841,9 @@ app.get(['/api/orders', '/api/easyfatt/orders'], authMiddleware, (req: any, res)
     let orders: any[] = [];
     if (isPaginated) {
       const paginatedParams = [...params, limit, offset];
-      orders = db.prepare(`${query} LIMIT ? OFFSET ?`).all(...paginatedParams) as any[];
+      orders = await queryAll(`${query} LIMIT ? OFFSET ?`, [...paginatedParams]) as any[];
     } else {
-      orders = db.prepare(query).all(...params) as any[];
+      orders = await queryAll(query, [...params]) as any[];
     }
 
     // Fallback if specific agent has no orders during simulation/roleplay
@@ -3877,16 +3857,16 @@ app.get(['/api/orders', '/api/easyfatt/orders'], authMiddleware, (req: any, res)
         ORDER BY ${sortExpression} ${sortOrder}, o.id DESC
       `;
       if (isPaginated) {
-        orders = db.prepare(`${fallbackQuery} LIMIT ? OFFSET ?`).all(limit, offset) as any[];
+        orders = await queryAll(`${fallbackQuery} LIMIT ? OFFSET ?`, [limit, offset]) as any[];
       } else {
-        orders = db.prepare(fallbackQuery).all() as any[];
+        orders = await queryAll(fallbackQuery) as any[];
       }
     }
 
     // Batch fetch items in a single query for all returned orders (massive performance optimization!)
     if (orders.length > 0) {
       const orderIds = orders.map(o => o.id);
-      const items = db.prepare(`SELECT id, order_id, product_code, description, qty, price, vat_code, um FROM order_items WHERE order_id IN (${orderIds.join(',')})`).all() as any[];
+      const items = await queryAll(`SELECT id, order_id, product_code, description, qty, price, vat_code, um FROM order_items WHERE order_id IN (${orderIds.join(',')})`) as any[];
       const itemsMap: Record<number, any[]> = {};
       for (const item of items) {
         if (!itemsMap[item.order_id]) itemsMap[item.order_id] = [];
@@ -3931,10 +3911,10 @@ app.get(['/api/orders', '/api/easyfatt/orders'], authMiddleware, (req: any, res)
 });
 
 // 5b. Get single order details with items
-app.get(['/api/orders/:id', '/api/easyfatt/orders/:id'], authMiddleware, (req: any, res) => {
+app.get(['/api/orders/:id', '/api/easyfatt/orders/:id'], authMiddleware, async (req: any, res) => {
   try {
     const { id } = req.params;
-    const order = db.prepare(`
+    const order = await queryGet(`
       SELECT o.*, 
              c.name as client_name, 
              c.email as client_email, 
@@ -3953,13 +3933,13 @@ app.get(['/api/orders/:id', '/api/easyfatt/orders/:id'], authMiddleware, (req: a
       LEFT JOIN clients c ON o.client_id = c.id
       LEFT JOIN users u ON o.agent_id = u.id
       WHERE o.id = ?
-    `).get(id) as any;
+    `, [id]) as any;
 
     if (!order) {
       return res.status(404).json({ error: 'Ordine non trovato' });
     }
 
-    order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+    order.items = await queryAll('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
     res.json(order);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -3974,7 +3954,7 @@ app.post('/api/easyfatt/orders', authMiddleware, async (req: any, res) => {
   }
 
   // Ensure client exists in SQLite (syncing from Postgres if needed)
-  const validClientId = await ensureClientInSqlite(client_id, db);
+  const validClientId = await ensureClientInPostgres(client_id);
   if (!validClientId) {
     console.warn(`[POST /api/easyfatt/orders] Invalid client_id: ${client_id}`);
     return res.status(400).json({ error: `Cliente non valido o non trovato (ID: ${client_id}). Seleziona un cliente esistente.` });
@@ -3984,7 +3964,7 @@ app.post('/api/easyfatt/orders', authMiddleware, async (req: any, res) => {
   let validAgentId: number | null = null;
   const candidateAgentId = agent_id || req.user?.id;
   if (candidateAgentId) {
-    const userRow = db.prepare('SELECT id FROM users WHERE id = ?').get(candidateAgentId);
+    const userRow = await queryGet('SELECT id FROM users WHERE id = ?', [candidateAgentId]);
     if (userRow) {
       validAgentId = Number(candidateAgentId);
     }
@@ -4019,12 +3999,12 @@ app.put('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res) => {
     return res.status(400).json({ error: 'Cliente e articoli sono obbligatori' });
   }
 
-  if (!canModifyOrder(id, req.user)) {
+  if (!await canModifyOrder(id, req.user)) {
     return res.status(403).json({ error: 'Non hai i permessi per modificare questo ordine' });
   }
 
   // Ensure client exists in SQLite
-  const validClientId = await ensureClientInSqlite(client_id, db);
+  const validClientId = await ensureClientInPostgres(client_id);
   if (!validClientId) {
     return res.status(400).json({ error: `Cliente non valido o non trovato (ID: ${client_id}). Seleziona un cliente esistente.` });
   }
@@ -4057,74 +4037,52 @@ app.patch('/api/easyfatt/orders/:id/status', authMiddleware, async (req: any, re
     return res.status(400).json({ error: 'Stato obbligatorio' });
   }
 
-  if (!canModifyOrder(id, req.user)) {
+  if (!await canModifyOrder(id, req.user)) {
     return res.status(403).json({ error: 'Non hai i permessi per modificare lo stato di questo ordine' });
   }
 
   try {
-    db.transaction(() => {
-      const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(id) as any;
-      if (!order) {
+    await withTransaction(async (pgClient) => {
+      const orderRes = await pgClient.query('SELECT status FROM orders WHERE id = $1', [id]);
+      if (orderRes.rows.length === 0) {
         throw new Error('Ordine non trovato');
       }
 
-      const oldStatus = order.status;
+      const oldStatus = orderRes.rows[0].status;
 
       // If transition from Bozza -> non-Bozza (e.g. 'Nuovo' or 'Esportato'), deduct stock
       if (oldStatus === 'Bozza' && status !== 'Bozza') {
-        const items = db.prepare('SELECT product_code, qty FROM order_items WHERE order_id = ?').all(id) as any[];
-        for (const item of items) {
-          db.prepare('UPDATE products SET stock = MAX(0, stock - ?) WHERE code = ?').run(Number(item.qty) || 0, item.product_code);
+        const itemsRes = await pgClient.query('SELECT product_code, qty FROM order_items WHERE order_id = $1', [id]);
+        for (const item of itemsRes.rows) {
+          await pgClient.query('UPDATE products SET stock = GREATEST(0, stock - $1) WHERE code = $2', [Number(item.qty) || 0, item.product_code]);
         }
       }
 
       // If transition from non-Bozza -> Bozza, restore stock
       if (oldStatus !== 'Bozza' && status === 'Bozza') {
-        const items = db.prepare('SELECT product_code, qty FROM order_items WHERE order_id = ?').all(id) as any[];
-        for (const item of items) {
-          db.prepare('UPDATE products SET stock = stock + ? WHERE code = ?').run(Number(item.qty) || 0, item.product_code);
+        const itemsRes = await pgClient.query('SELECT product_code, qty FROM order_items WHERE order_id = $1', [id]);
+        for (const item of itemsRes.rows) {
+          await pgClient.query('UPDATE products SET stock = stock + $1 WHERE code = $2', [Number(item.qty) || 0, item.product_code]);
         }
       }
 
       if (status === 'Nuovo') {
-        db.prepare('UPDATE orders SET status = ?, is_synced = 0, synced_at = NULL WHERE id = ?').run(status, id);
+        await pgClient.query('UPDATE orders SET status = $1, is_synced = false, synced_at = NULL WHERE id = $2', [status, id]);
       } else if (status === 'Esportato') {
-        db.prepare(`
-          UPDATE orders 
-          SET status = ?, 
-              is_synced = 1, 
-              synced_at = CASE 
-                WHEN synced_at IS NOT NULL AND synced_at >= datetime('now', '-30 hours') THEN synced_at 
-                ELSE datetime('now') 
-              END 
-          WHERE id = ?
-        `).run(status, id);
-      } else {
-        db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(status, id);
-      }
-    })();
-
-    // Synchronize status update to PostgreSQL directly as well
-    try {
-      if (status === 'Nuovo') {
-        await pool.query('UPDATE orders SET status = $1, is_synced = 0, synced_at = NULL WHERE id = $2', [status, id]);
-      } else if (status === 'Esportato') {
-        await pool.query(`
+        await pgClient.query(`
           UPDATE orders 
           SET status = $1, 
-              is_synced = 1, 
+              is_synced = true, 
               synced_at = CASE 
-                WHEN synced_at IS NOT NULL AND synced_at >= NOW() - INTERVAL '30 hours' THEN synced_at 
+                WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '30 hours') THEN synced_at 
                 ELSE NOW() 
               END 
           WHERE id = $2
         `, [status, id]);
       } else {
-        await pool.query('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
+        await pgClient.query('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
       }
-    } catch (pgErr) {
-      console.warn('[PATCH /api/easyfatt/orders/:id/status] PostgreSQL sync warning:', pgErr);
-    }
+    }, 'UpdateOrderStatus');
 
     res.json({ success: true });
   } catch (err: any) {
@@ -4136,17 +4094,17 @@ app.patch('/api/easyfatt/orders/:id/status', authMiddleware, async (req: any, re
 app.delete('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res: any) => {
   const { id } = req.params;
   try {
-    if (!canModifyOrder(id, req.user)) {
+    if (!await canModifyOrder(id, req.user)) {
       return res.status(403).json({ error: 'Non hai i permessi per eliminare questo ordine' });
     }
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(id) as any;
+    const order = await queryGet('SELECT status FROM orders WHERE id = ?', [id]) as any;
     if (!order) {
       return res.status(404).json({ error: 'Ordine non trovato' });
     }
     if (order.status !== 'Bozza') {
       return res.status(400).json({ error: 'Solo le bozze possono essere eliminate' });
     }
-    await deleteOrderInPostgres(Number(id), db);
+    await deleteOrderInPostgres(Number(id));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -4156,7 +4114,7 @@ app.delete('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res: any
 // 7b. Database architecture and parity status check
 app.get('/api/database/status', authMiddleware, async (req, res) => {
   try {
-    const status = await getDatabaseStatus(db);
+    const status = await getDatabaseStatus();
     res.json(status);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -4164,9 +4122,9 @@ app.get('/api/database/status', authMiddleware, async (req, res) => {
 });
 
 // 8. Export Products to Easyfatt-XML
-app.get('/api/easyfatt/export-products', authMiddleware, (req, res) => {
+app.get('/api/easyfatt/export-products', authMiddleware, async (req, res) => {
   try {
-    const products = db.prepare('SELECT * FROM products').all() as any[];
+    const products = await queryAll('SELECT * FROM products') as any[];
     
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<EasyfattDocuments AppVersion="2" Creator="Connect" CreatorUrl="https://connect.com">\n`;
@@ -4330,17 +4288,17 @@ const clientExcelHeaders = [
   'Note'
 ];
 
-app.get('/api/easyfatt/export-clients', authMiddleware, (req: any, res: any) => {
+app.get('/api/easyfatt/export-clients', authMiddleware, async (req: any, res: any) => {
   try {
     const isRoleplay = req.isRoleplay || req.query?.all === 'true';
     let clients: any[] = [];
     if (isUserAgent(req.user) && !isUserAdmin(req.user) && !isRoleplay) {
-      clients = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(agente)) = LOWER(TRIM(?)) ORDER BY name ASC').all(req.user.name) as any[];
+      clients = await queryAll('SELECT * FROM clients WHERE LOWER(TRIM(agente)) = LOWER(TRIM(?)) ORDER BY name ASC', [req.user.name]) as any[];
       if (!clients || clients.length === 0) {
-        clients = db.prepare('SELECT * FROM clients ORDER BY name ASC').all() as any[];
+        clients = await queryAll('SELECT * FROM clients ORDER BY name ASC') as any[];
       }
     } else {
-      clients = db.prepare('SELECT * FROM clients ORDER BY name ASC').all() as any[];
+      clients = await queryAll('SELECT * FROM clients ORDER BY name ASC') as any[];
     }
     
     if (req.query.format === 'xlsx') {
@@ -4442,15 +4400,20 @@ app.get('/api/easyfatt/export-clients', authMiddleware, (req: any, res: any) => 
       const agent = c.agente || meta['Agente'] || '';
       const rawNotes = meta['Note'] || '';
 
+      const formattedPostcode = formatCap(cap);
+      const formattedProvince = formatProvince(province);
+      const formattedDelivPostcode = formatCap(c.delivery_postcode);
+      const formattedDelivProvince = formatProvince(c.delivery_province);
+
       xml += `    <Document>\n`;
       xml += `      <DocumentType>C</DocumentType>\n`;
       xml += `      <CustomerCode>${customerCode}</CustomerCode>\n`;
       xml += `      <CustomerName>${escapeXml(c.name)}</CustomerName>\n`;
       if (webLogin) xml += `      <CustomerWebLogin>${escapeXml(webLogin)}</CustomerWebLogin>\n`;
       if (address) xml += `      <CustomerAddress>${escapeXml(address)}</CustomerAddress>\n`;
-      if (cap) xml += `      <CustomerPostcode>${escapeXml(cap)}</CustomerPostcode>\n`;
+      if (formattedPostcode) xml += `      <CustomerPostcode>${escapeXml(formattedPostcode)}</CustomerPostcode>\n`;
       if (city) xml += `      <CustomerCity>${escapeXml(city)}</CustomerCity>\n`;
-      if (province) xml += `      <CustomerProvince>${escapeXml(province)}</CustomerProvince>\n`;
+      if (formattedProvince) xml += `      <CustomerProvince>${escapeXml(formattedProvince)}</CustomerProvince>\n`;
       if (country) xml += `      <CustomerCountry>${escapeXml(country)}</CustomerCountry>\n`;
       if (fiscalCode) xml += `      <CustomerFiscalCode>${escapeXml(fiscalCode)}</CustomerFiscalCode>\n`;
       if (vatCode) xml += `      <CustomerVatCode>${escapeXml(vatCode)}</CustomerVatCode>\n`;
@@ -4463,9 +4426,9 @@ app.get('/api/easyfatt/export-clients', authMiddleware, (req: any, res: any) => 
       if (ref) xml += `      <CustomerReference>${escapeXml(ref)}</CustomerReference>\n`;
       if (c.delivery_name) xml += `      <DeliveryName>${escapeXml(c.delivery_name)}</DeliveryName>\n`;
       if (c.delivery_address) xml += `      <DeliveryAddress>${escapeXml(c.delivery_address)}</DeliveryAddress>\n`;
-      if (c.delivery_postcode) xml += `      <DeliveryPostcode>${escapeXml(c.delivery_postcode)}</DeliveryPostcode>\n`;
+      if (formattedDelivPostcode) xml += `      <DeliveryPostcode>${escapeXml(formattedDelivPostcode)}</DeliveryPostcode>\n`;
       if (c.delivery_city) xml += `      <DeliveryCity>${escapeXml(c.delivery_city)}</DeliveryCity>\n`;
-      if (c.delivery_province) xml += `      <DeliveryProvince>${escapeXml(c.delivery_province)}</DeliveryProvince>\n`;
+      if (formattedDelivProvince) xml += `      <DeliveryProvince>${escapeXml(formattedDelivProvince)}</DeliveryProvince>\n`;
       if (c.delivery_country) xml += `      <DeliveryCountry>${escapeXml(c.delivery_country)}</DeliveryCountry>\n`;
       if (priceList) xml += `      <PriceList>${escapeXml(priceList)}</PriceList>\n`;
       if (paymentName) xml += `      <PaymentName>${escapeXml(paymentName)}</PaymentName>\n`;
@@ -4507,12 +4470,12 @@ function parseClientMetadata(notesStr: string | null | undefined) {
   return {};
 }
 
-function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsExported: boolean = true) {
-  const settings = db.prepare('SELECT * FROM easyfatt_settings WHERE id = 1').get() as any;
+async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsExported: boolean = true) {
+  const settings = await queryGet('SELECT * FROM easyfatt_settings WHERE id = 1') as any;
   const pricesIncludeVat = settings && settings.prices_include_vat === 1 ? 'true' : 'false';
 
   let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
-  xml += `<EasyfattDocuments AppVersion="${appver || '2'}" Creator="Connect" CreatorUrl="https://connect.com">\n`;
+  xml += `<EasyfattDocuments AppVersion="${appver || '2'}" Version="${appver || '2'}" Creator="Connect" CreatorUrl="https://connect.com">\n`;
   xml += `  <Company>\n`;
   xml += `    <Name>Connect Beauty Srl</Name>\n`;
   xml += `    <Country>Italia</Country>\n`;
@@ -4538,15 +4501,32 @@ function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsE
     const contact = o.client_contact || meta['Referente'] || '';
     const webLogin = o.client_web_login || meta['Login web'] || '';
 
+    const formattedPostcode = formatCap(postcode);
+    const formattedProvince = formatProvince(province);
+    const formattedDelivPostcode = formatCap(o.client_delivery_postcode);
+    const formattedDelivProvince = formatProvince(o.client_delivery_province);
+
+    // Formattazione DeliveryName: COGNOME NOME c/o NOME_AZIENDA
+    let deliveryName = (o.client_delivery_name || '').trim();
+    if (!deliveryName && (o.client_delivery_address || o.client_delivery_city)) {
+      if (contact && o.client_name && contact !== o.client_name) {
+        deliveryName = `${contact} c/o ${o.client_name}`;
+      } else if (o.client_name) {
+        deliveryName = o.client_name;
+      }
+    } else if (deliveryName && o.client_name && !deliveryName.toLowerCase().includes('c/o') && deliveryName !== o.client_name) {
+      deliveryName = `${deliveryName} c/o ${o.client_name}`;
+    }
+
     xml += `    <Document>\n`;
     xml += `      <DocumentType>C</DocumentType>\n`; 
     xml += `      <CustomerCode>${customerCode}</CustomerCode>\n`;
     xml += `      <CustomerName>${escapeXml(o.client_name)}</CustomerName>\n`;
     if (webLogin) xml += `      <CustomerWebLogin>${escapeXml(webLogin)}</CustomerWebLogin>\n`;
     if (address) xml += `      <CustomerAddress>${escapeXml(address)}</CustomerAddress>\n`;
-    if (postcode) xml += `      <CustomerPostcode>${escapeXml(postcode)}</CustomerPostcode>\n`;
+    if (formattedPostcode) xml += `      <CustomerPostcode>${escapeXml(formattedPostcode)}</CustomerPostcode>\n`;
     if (city) xml += `      <CustomerCity>${escapeXml(city)}</CustomerCity>\n`;
-    if (province) xml += `      <CustomerProvince>${escapeXml(province)}</CustomerProvince>\n`;
+    if (formattedProvince) xml += `      <CustomerProvince>${escapeXml(formattedProvince)}</CustomerProvince>\n`;
     if (country) xml += `      <CustomerCountry>${escapeXml(country)}</CustomerCountry>\n`;
     if (fiscalCode) xml += `      <CustomerFiscalCode>${escapeXml(fiscalCode)}</CustomerFiscalCode>\n`;
     if (vatCode) xml += `      <CustomerVatCode>${escapeXml(vatCode)}</CustomerVatCode>\n`;
@@ -4556,11 +4536,11 @@ function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsE
     if (email) xml += `      <CustomerEmail>${escapeXml(email)}</CustomerEmail>\n`;
     if (pec) xml += `      <CustomerPec>${escapeXml(pec)}</CustomerPec>\n`;
     if (contact) xml += `      <CustomerReference>${escapeXml(contact)}</CustomerReference>\n`;
-    if (o.client_delivery_name) xml += `      <DeliveryName>${escapeXml(o.client_delivery_name)}</DeliveryName>\n`;
+    if (deliveryName) xml += `      <DeliveryName>${escapeXml(deliveryName)}</DeliveryName>\n`;
     if (o.client_delivery_address) xml += `      <DeliveryAddress>${escapeXml(o.client_delivery_address)}</DeliveryAddress>\n`;
-    if (o.client_delivery_postcode) xml += `      <DeliveryPostcode>${escapeXml(o.client_delivery_postcode)}</DeliveryPostcode>\n`;
+    if (formattedDelivPostcode) xml += `      <DeliveryPostcode>${escapeXml(formattedDelivPostcode)}</DeliveryPostcode>\n`;
     if (o.client_delivery_city) xml += `      <DeliveryCity>${escapeXml(o.client_delivery_city)}</DeliveryCity>\n`;
-    if (o.client_delivery_province) xml += `      <DeliveryProvince>${escapeXml(o.client_delivery_province)}</DeliveryProvince>\n`;
+    if (formattedDelivProvince) xml += `      <DeliveryProvince>${escapeXml(formattedDelivProvince)}</DeliveryProvince>\n`;
     if (o.client_delivery_country) xml += `      <DeliveryCountry>${escapeXml(o.client_delivery_country)}</DeliveryCountry>\n`;
     xml += `      <Date>${o.date}</Date>\n`;
     const rawNumberStr = String(o.number || o.id || '').trim();
@@ -4577,6 +4557,17 @@ function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsE
     }
     xml += `      <Number>${numericDocNumber}</Number>\n`;
     xml += `      <Numbering>${escapeXml(numbering)}</Numbering>\n`;
+
+    // Spese di trasporto o aggiuntive
+    const shippingCost = Number(o.shipping_cost || o.cost_amount || 0);
+    if (shippingCost > 0) {
+      const costVatCode = o.cost_vat_code || (settings && settings.default_vat) || '22';
+      const costVatPerc = parseFloat(String(costVatCode).replace(/[^0-9.]/g, '')) || 22;
+      xml += `      <CostDescription>${escapeXml(o.cost_description || 'Spese di trasporto')}</CostDescription>\n`;
+      xml += `      <CostVatCode Perc="${costVatPerc}" Class="Imponibile">${escapeXml(costVatCode)}</CostVatCode>\n`;
+      xml += `      <CostAmount>${shippingCost.toFixed(2)}</CostAmount>\n`;
+    }
+
     xml += `      <Total>${Number(o.total || 0).toFixed(2)}</Total>\n`;
     xml += `      <PaymentName>${escapeXml(o.payment_name)}</PaymentName>\n`;
     xml += `      <PaymentBank>${escapeXml(o.payment_bank || '')}</PaymentBank>\n`;
@@ -4585,14 +4576,14 @@ function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsE
     xml += `      <PricesIncludeVat>${pricesIncludeVat}</PricesIncludeVat>\n`;
     
     xml += `      <Rows>\n`;
-    for (const item of o.items) {
+    for (const item of (o.items || [])) {
       const vatCode = item.vat_code || (settings && settings.default_vat) || '22';
-      const vatPerc = parseFloat(vatCode.replace(/[^0-9.]/g, '')) || 22;
+      const vatPerc = parseFloat(String(vatCode).replace(/[^0-9.]/g, '')) || 22;
       xml += `        <Row>\n`;
       xml += `          <Code>${escapeXml(item.product_code)}</Code>\n`;
       xml += `          <Description>${escapeXml(item.description)}</Description>\n`;
       xml += `          <Qty>${item.qty}</Qty>\n`;
-      xml += `          <Um>${escapeXml(item.um)}</Um>\n`;
+      xml += `          <Um>${escapeXml(item.um || 'pz')}</Um>\n`;
       xml += `          <Price>${Number(item.price || 0).toFixed(2)}</Price>\n`;
       xml += `          <VatCode Perc="${vatPerc}" Class="Imponibile">${escapeXml(vatCode)}</VatCode>\n`;
       xml += `          <Total>${(Number(item.qty || 0) * Number(item.price || 0)).toFixed(2)}</Total>\n`;
@@ -4600,77 +4591,81 @@ function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsE
     }
     xml += `      </Rows>\n`;
 
-    // Generate payments/installments dynamically based on the payment method
-    const pm = db.prepare('SELECT * FROM payment_methods WHERE name = ?').get(o.payment_name) as any;
-    let customOffsets: number[] | null = null;
-    if (pm && pm.custom_offsets) {
+    // Payments: Use saved order_payments if available, or generate via paymentScheduler
+    let existingPayments: any[] = [];
+    if (o.payments && Array.isArray(o.payments) && o.payments.length > 0) {
+      existingPayments = o.payments;
+    } else {
       try {
-        const parsed = typeof pm.custom_offsets === 'string' ? JSON.parse(pm.custom_offsets) : pm.custom_offsets;
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          customOffsets = parsed.map(Number).filter(n => !isNaN(n));
-        }
-      } catch (e) {
-        customOffsets = null;
+        existingPayments = await queryAll('SELECT * FROM order_payments WHERE order_id = ? ORDER BY due_date ASC, id ASC', [o.id]) as any[];
+      } catch (err) {
+        existingPayments = [];
       }
     }
 
-    const installmentsNum = pm ? (customOffsets && customOffsets.length > 0 ? customOffsets.length : pm.installments) : 1;
-    const offsetDays = pm ? pm.offset_days : 0;
-    const fineMese = pm ? pm.fine_mese === 1 : false;
-
     xml += `      <Payments>\n`;
-    if (installmentsNum > 1) {
-      const baseAmount = Math.floor((o.total / installmentsNum) * 100) / 100;
-      const difference = Math.round((o.total - (baseAmount * installmentsNum)) * 100) / 100;
-      
-      for (let i = 0; i < installmentsNum; i++) {
-        let amt = baseAmount;
-        if (i === installmentsNum - 1) {
-          amt = Math.round((baseAmount + difference) * 100) / 100;
-        }
-        const dueDate = getInstallmentDate(o.date, offsetDays, i, fineMese, customOffsets);
+    if (existingPayments && existingPayments.length > 0) {
+      for (const p of existingPayments) {
+        const isAdv = p.is_advance === 1 || p.is_advance === true || p.advance === 1 || p.advance === true;
+        const isPd = p.is_paid === 1 || p.is_paid === true || p.paid === 1 || p.paid === true;
+        const amt = Number(p.amount) || 0;
+        const pDate = String(p.due_date || o.date).split('T')[0];
         xml += `        <Payment>\n`;
-        xml += `          <Advance>false</Advance>\n`;
-        xml += `          <Date>${dueDate}</Date>\n`;
+        xml += `          <Advance>${isAdv ? 'true' : 'false'}</Advance>\n`;
+        xml += `          <Date>${escapeXml(pDate)}</Date>\n`;
         xml += `          <Amount>${amt.toFixed(2)}</Amount>\n`;
-        xml += `          <Paid>false</Paid>\n`;
+        xml += `          <Paid>${isPd ? 'true' : 'false'}</Paid>\n`;
         xml += `        </Payment>\n`;
       }
     } else {
-      const dueDate = getInstallmentDate(o.date, offsetDays, 0, fineMese, customOffsets);
-      xml += `        <Payment>\n`;
-      xml += `          <Advance>false</Advance>\n`;
-      xml += `          <Date>${dueDate}</Date>\n`;
-      xml += `          <Amount>${Number(o.total || 0).toFixed(2)}</Amount>\n`;
-      xml += `          <Paid>false</Paid>\n`;
-      xml += `        </Payment>\n`;
+      // Generate dynamically with paymentScheduler logic
+      const generated = calculateInstallments(o.total || 0, o.date || new Date().toISOString().split('T')[0], o.payment_name || 'Bonifico bancario', 'AUTO');
+      for (const p of generated) {
+        xml += `        <Payment>\n`;
+        xml += `          <Advance>${p.is_advance ? 'true' : 'false'}</Advance>\n`;
+        xml += `          <Date>${p.due_date}</Date>\n`;
+        xml += `          <Amount>${p.amount.toFixed(2)}</Amount>\n`;
+        xml += `          <Paid>${p.is_paid ? 'true' : 'false'}</Paid>\n`;
+        xml += `        </Payment>\n`;
+      }
     }
     xml += `      </Payments>\n`;
 
     xml += `    </Document>\n`;
 
     if (markAsExported) {
-      db.prepare(`
+      await queryRun(`
         UPDATE orders 
-        SET is_synced = 1, 
+        SET is_synced = true, 
             synced_at = CASE 
-              WHEN synced_at IS NOT NULL AND synced_at >= datetime('now', '-30 hours') THEN synced_at 
-              ELSE datetime('now') 
+              WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '30 hours') THEN synced_at 
+              ELSE NOW() 
             END,
             status = 'Esportato' 
         WHERE id = ?
-      `).run(o.id);
+      `, [o.id]);
+
+      pool.query(`
+        UPDATE orders 
+        SET is_synced = true, 
+            synced_at = CASE 
+              WHEN synced_at IS NOT NULL AND synced_at >= NOW() - INTERVAL '30 hours' THEN synced_at 
+              ELSE NOW() 
+            END,
+            status = 'Esportato' 
+        WHERE id = $1
+      `, [o.id]).catch(err => console.warn(`[buildEasyfattOrdersXml] Error updating order ${o.id} in Postgres:`, err?.message || err));
     }
   }
 
   xml += `  </Documents>\n`;
   xml += `</EasyfattDocuments>\n`;
 
-  return xml;
+  return xml.trim();
 }
 
 // 10. Export Selected Orders to Easyfatt-XML
-app.get('/api/easyfatt/export-orders', authMiddleware, (req: any, res: any) => {
+app.get('/api/easyfatt/export-orders', authMiddleware, async (req: any, res: any) => {
   try {
     const { ids } = req.query;
     let query = `
@@ -4705,14 +4700,14 @@ app.get('/api/easyfatt/export-orders', authMiddleware, (req: any, res: any) => {
     }
 
     query += ` ORDER BY o.created_at DESC`;
-    const ordersList = db.prepare(query).all(...params) as any[];
+    const ordersList = await queryAll(query, [...params]) as any[];
 
     // Load items for each
     for (const order of ordersList) {
-      order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+      order.items = await queryAll('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
     }
 
-    const xml = buildEasyfattOrdersXml(ordersList, '2', true);
+    const xml = await buildEasyfattOrdersXml(ordersList, '2', true);
 
     res.header('Content-Type', 'text/xml');
     res.header('Content-Disposition', `attachment; filename="ordini_clienti_easyfatt_${new Date().toISOString().split('T')[0]}.xml"`);
@@ -4723,46 +4718,36 @@ app.get('/api/easyfatt/export-orders', authMiddleware, (req: any, res: any) => {
 });
 
 // 10b. Direct E-Commerce download of orders from Easyfatt (GET/POST /api/easyfatt/download-orders)
-function handleEasyfattOrderDownload(req: any, res: any) {
+async function handleEasyfattOrderDownload(req: any, res: any) {
   if (req.method !== 'GET' && req.method !== 'POST') {
     return res.send("OK");
   }
 
-  // If the request is a POST request and contains XML or file uploads,
+  // If the request contains multipart file uploads or raw XML product catalog,
   // dynamically dispatch to the catalog import handler instead of orders download.
   const contentType = req.headers['content-type'] || '';
-  if (req.method === 'POST') {
-    // Determine if this is an order download request.
-    // Order download requests will have parameter fields like appver, firstdate, lastdate, firstnum, lastnum
-    const isOrderDownload = !!(
-      req.query.appver || req.body?.appver ||
-      req.query.firstdate || req.body?.firstdate ||
-      req.query.firstnum || req.body?.firstnum ||
-      req.query.lastnum || req.body?.lastnum
-    );
-
-    if (!isOrderDownload) {
-      if (contentType.includes('multipart/form-data')) {
-        upload.any()(req, res, (err: any) => {
-          if (err) {
-            console.error("Multer error during download-orders catalog POST:", err);
-            return res.status(400).send("ERROR: " + err.message);
-          }
-          return handleEasyfattImport(req, res);
-        });
-        return;
-      } else {
+  if (req.method === 'POST' && contentType.includes('multipart/form-data')) {
+    const isExplicitDownload = req.path.includes('download') || req.path.includes('ordini');
+    if (!isExplicitDownload) {
+      upload.any()(req, res, (err: any) => {
+        if (err) {
+          console.error("Multer error during catalog POST:", err);
+          return res.status(400).send("ERROR: " + err.message);
+        }
         return handleEasyfattImport(req, res);
-      }
+      });
+      return;
     }
   }
 
-  if (!checkEasyfattAuth(req)) {
-    return res.status(401).send("ERROR: Non autorizzato. Verificare login e password nelle impostazioni Easyfatt.");
+  if (!await checkEasyfattAuth(req)) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(401).send("ERROR: Utente o password non validi");
   }
 
+  const appver = req.query.appver || req.body?.appver || '2';
+
   try {
-    const appver = req.query.appver || req.body?.appver || '2';
     const firstdate = req.query.firstdate || req.body?.firstdate;
     const lastdate = req.query.lastdate || req.body?.lastdate;
     const firstnum = req.query.firstnum || req.body?.firstnum;
@@ -4808,43 +4793,88 @@ function handleEasyfattOrderDownload(req: any, res: any) {
     query += " AND (o.status != 'Bozza' OR o.status IS NULL)";
 
     // Finestra di grazia 30 ore per Danea Easyfatt:
-    // Restituisce tutti gli ordini non ancora sincronizzati (is_synced = FALSE / 0 / NULL)
+    // Restituisce tutti gli ordini non ancora sincronizzati (is_synced = FALSE / NULL)
     // OPPURE sincronizzati nelle ultime 30 ore (synced_at >= NOW() - 30 HOURS).
     if (!req.query.all && !req.body?.all) {
-      query += " AND (o.is_synced = 0 OR o.is_synced IS NULL OR o.synced_at >= datetime('now', '-30 hours'))";
+      query += " AND (o.is_synced = false OR o.is_synced IS NULL OR o.synced_at >= (NOW() - INTERVAL '30 hours'))";
     }
 
     query += " ORDER BY o.id ASC";
-    const ordersList = db.prepare(query).all(params) as any[];
+    const ordersList = await queryAll(query, [...params]) as any[];
 
-    // Load items for each order
-    for (const order of ordersList) {
-      order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+    // Fast batch load items and payments for sub-second response
+    if (ordersList && ordersList.length > 0) {
+      const orderIds = ordersList.map(o => o.id);
+      const placeholders = orderIds.map(() => '?').join(',');
+      const allItems = await queryAll(`SELECT * FROM order_items WHERE order_id IN (${placeholders})`, [...orderIds]) as any[];
+      let allPayments: any[] = [];
+      try {
+        allPayments = await queryAll(`SELECT * FROM order_payments WHERE order_id IN (${placeholders}) ORDER BY due_date ASC, id ASC`, [...orderIds]) as any[];
+      } catch (err) {
+        allPayments = [];
+      }
+
+      const itemsByOrderId = new Map<number, any[]>();
+      for (const item of allItems) {
+        if (!itemsByOrderId.has(item.order_id)) itemsByOrderId.set(item.order_id, []);
+        itemsByOrderId.get(item.order_id)!.push(item);
+      }
+
+      const paymentsByOrderId = new Map<number, any[]>();
+      for (const pay of allPayments) {
+        if (!paymentsByOrderId.has(pay.order_id)) paymentsByOrderId.set(pay.order_id, []);
+        paymentsByOrderId.get(pay.order_id)!.push(pay);
+      }
+
+      for (const order of ordersList) {
+        order.items = itemsByOrderId.get(order.id) || [];
+        order.payments = paymentsByOrderId.get(order.id) || [];
+      }
     }
 
-    const xml = buildEasyfattOrdersXml(ordersList, String(appver), true);
+    const xml = await buildEasyfattOrdersXml(ordersList || [], String(appver), true);
 
-    res.header('Content-Type', 'text/xml');
-    res.send(xml);
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.status(200).send(xml);
   } catch (err: any) {
-    res.status(500).send("ERROR: " + err.message);
+    console.error('[Easyfatt Download Orders Error]', err);
+    // Safe XML fallback to prevent Delphi XML parser EParserException
+    const safeEmptyXml = `<?xml version="1.0" encoding="UTF-8"?>\n<EasyfattDocuments AppVersion="${appver || '2'}" Creator="Connect" CreatorUrl="https://connect.com">\n  <Company>\n    <Name>Connect Beauty Srl</Name>\n    <Country>Italia</Country>\n  </Company>\n  <Documents>\n  </Documents>\n</EasyfattDocuments>\n`;
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.status(200).send(safeEmptyXml);
   }
 }
 
 const easyfattOrderDownloadPaths = [
   '/api/easyfatt/download-orders',
   '/api/easyfatt/download-orders.php',
+  '/api/easyfatt/downloadordini',
+  '/api/easyfatt/downloadordini.php',
+  '/api/easyfatt/ordini.xml',
+  '/api/easyfatt/orders.xml',
   '/easyfatt/download-orders',
   '/easyfatt/download-orders.php',
+  '/easyfatt/downloadordini',
+  '/easyfatt/downloadordini.php',
+  '/easyfatt/ordini.xml',
+  '/easyfatt/orders.xml',
   '/downloadordini.php',
-  '/ordini.xml'
+  '/downloadordini',
+  '/download-orders',
+  '/download-orders.php',
+  '/ordini.xml',
+  '/orders.xml'
 ];
 app.all(easyfattOrderDownloadPaths, handleEasyfattOrderDownload);
 
 // GET Easyfatt Integration settings
-app.get('/api/easyfatt/settings', authMiddleware, (req: any, res) => {
+app.get('/api/easyfatt/settings', authMiddleware, async (req: any, res) => {
   const user = req.user;
-  const settings = db.prepare('SELECT * FROM easyfatt_settings WHERE id = 1').get() as any || {
+  const settings = await queryGet('SELECT * FROM easyfatt_settings WHERE id = 1') as any || {
     username: 'admin@connect.com',
     password: 'password123',
     default_payment: 'Bonifico bancario',
@@ -4866,19 +4896,18 @@ app.get('/api/easyfatt/settings', authMiddleware, (req: any, res) => {
 });
 
 // POST Easyfatt Integration settings
-app.post('/api/easyfatt/settings', authMiddleware, (req: any, res) => {
+app.post('/api/easyfatt/settings', authMiddleware, async (req: any, res) => {
   const user = req.user;
   if (user && (user.role === 'admin' || user.role === 'amministratore')) {
     const { username, password, default_payment, min_order_total, default_notes, default_vat, prices_include_vat, product_link_filter, product_commission_filter } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: 'Username e Password sono obbligatori' });
     }
-    db.prepare(`
+    await queryRun(`
       UPDATE easyfatt_settings 
       SET username = ?, password = ?, default_payment = ?, min_order_total = ?, default_notes = ?, default_vat = ?, prices_include_vat = ?, product_link_filter = ?, product_commission_filter = ?
       WHERE id = 1
-    `).run(
-      username, 
+    `, [username, 
       password, 
       default_payment !== undefined ? default_payment : 'Bonifico bancario', 
       min_order_total !== undefined ? Number(min_order_total) : 0.0, 
@@ -4886,17 +4915,16 @@ app.post('/api/easyfatt/settings', authMiddleware, (req: any, res) => {
       default_vat !== undefined ? default_vat : '22',
       prices_include_vat !== undefined ? Number(prices_include_vat) : 0,
       product_link_filter !== undefined ? String(product_link_filter) : 'all',
-      product_commission_filter !== undefined ? String(product_commission_filter) : 'all'
-    );
+      product_commission_filter !== undefined ? String(product_commission_filter) : 'all']);
     return res.json({ success: true, message: 'Impostazioni salvate con successo' });
   }
   return res.status(401).json({ error: 'Non autorizzato' });
 });
 
 // GET Company Header settings
-app.get('/api/easyfatt/company-header', authMiddleware, (req: any, res) => {
+app.get('/api/easyfatt/company-header', authMiddleware, async (req: any, res) => {
   try {
-    const header = db.prepare('SELECT * FROM company_header WHERE id = 1').get() || {
+    const header = await queryGet('SELECT * FROM company_header WHERE id = 1') || {
       company_name: 'Connect Beauty S.r.l.',
       company_address: 'Via Armando Diaz 162',
       company_postcode: '35010',
@@ -4919,7 +4947,7 @@ app.get('/api/easyfatt/company-header', authMiddleware, (req: any, res) => {
 });
 
 // POST Company Header settings (Admin only)
-app.post('/api/easyfatt/company-header', authMiddleware, (req: any, res) => {
+app.post('/api/easyfatt/company-header', authMiddleware, async (req: any, res) => {
   const user = req.user;
   const isAdmin = user && (user.role === 'admin' || user.role === 'amministratore');
   if (!isAdmin) {
@@ -4933,7 +4961,7 @@ app.post('/api/easyfatt/company-header', authMiddleware, (req: any, res) => {
       company_tel, company_fax, company_email, company_pec, company_website, company_logo
     } = req.body;
 
-    db.prepare(`
+    await queryRun(`
       INSERT INTO company_header (
         id, company_name, company_address, company_postcode, company_city,
         company_province, company_country, company_vat_code, company_fiscal_code,
@@ -4954,8 +4982,7 @@ app.post('/api/easyfatt/company-header', authMiddleware, (req: any, res) => {
         company_pec = excluded.company_pec,
         company_website = excluded.company_website,
         company_logo = excluded.company_logo
-    `).run(
-      company_name || 'Connect Beauty S.r.l.',
+    `, [company_name || 'Connect Beauty S.r.l.',
       company_address || '',
       company_postcode || '',
       company_city || '',
@@ -4968,8 +4995,7 @@ app.post('/api/easyfatt/company-header', authMiddleware, (req: any, res) => {
       company_email || '',
       company_pec || '',
       company_website || '',
-      company_logo || ''
-    );
+      company_logo || '']);
 
     return res.json({ success: true, message: 'Intestazione aziendale salvata con successo' });
   } catch (err: any) {
@@ -4978,7 +5004,7 @@ app.post('/api/easyfatt/company-header', authMiddleware, (req: any, res) => {
 });
 
 // GET Easyfatt Diagnostic Logs
-app.get('/api/easyfatt/logs', authMiddleware, (req: any, res) => {
+app.get('/api/easyfatt/logs', authMiddleware, async (req: any, res) => {
   const user = req.user;
   if (user && (user.role === 'admin' || user.role === 'amministratore')) {
     const logPath = path.join(process.cwd(), 'easyfatt_requests.log');
@@ -4999,7 +5025,7 @@ app.get('/api/easyfatt/logs', authMiddleware, (req: any, res) => {
 });
 
 // POST Clear Easyfatt Diagnostic Logs
-app.post('/api/easyfatt/logs/clear', authMiddleware, (req: any, res) => {
+app.post('/api/easyfatt/logs/clear', authMiddleware, async (req: any, res) => {
   const user = req.user;
   if (user && (user.role === 'admin' || user.role === 'amministratore')) {
     const logPath = path.join(process.cwd(), 'easyfatt_requests.log');
@@ -5014,13 +5040,13 @@ app.post('/api/easyfatt/logs/clear', authMiddleware, (req: any, res) => {
 });
 
 // GET payment methods - any authenticated user can view, enriched with usage counts
-app.get('/api/payment-methods', authMiddleware, (req: any, res) => {
-  const paymentMethods = db.prepare(`
+app.get('/api/payment-methods', authMiddleware, async (req: any, res) => {
+  const paymentMethods = await queryAll(`
     SELECT pm.*, 
       (SELECT COUNT(*) FROM orders o WHERE LOWER(TRIM(o.payment_name)) = LOWER(TRIM(pm.name))) as orders_count,
       (SELECT COUNT(*) FROM clients c WHERE LOWER(TRIM(c.payment_name)) = LOWER(TRIM(pm.name))) as clients_count
     FROM payment_methods pm ORDER BY pm.id ASC
-  `).all();
+  `);
   return res.json(paymentMethods);
 });
 
@@ -5051,7 +5077,7 @@ function normalizeCustomOffsetsInput(raw: any): { offsetsStr: string | null; off
 }
 
 // POST payment method - Admin only
-app.post('/api/admin/payment-methods', authMiddleware, (req: any, res) => {
+app.post('/api/admin/payment-methods', authMiddleware, async (req: any, res) => {
   const user = req.user;
   if (user && (user.role === 'admin' || user.role === 'amministratore')) {
     const { name, offset_days, installments, fine_mese, custom_offsets } = req.body;
@@ -5072,14 +5098,8 @@ app.post('/api/admin/payment-methods', authMiddleware, (req: any, res) => {
         }
       }
 
-      const stmt = db.prepare('INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets) VALUES (?, ?, ?, ?, ?)');
-      const result = stmt.run(
-        name.trim(), 
-        calcOffsetDays, 
-        calcInstallments,
-        fine_mese ? 1 : 0,
-        finalCustomOffsets
-      );
+      const result = await queryRun('INSERT INTO payment_methods (name, offset_days, installments, fine_mese, custom_offsets) VALUES (?, ?, ?, ?, ?)',
+      [name.trim(), calcOffsetDays, calcInstallments, Boolean(fine_mese), finalCustomOffsets]);
       return res.json({ success: true, id: result.lastInsertRowid, message: 'Metodo di pagamento creato con successo' });
     } catch (err: any) {
       if (err.message && err.message.includes('UNIQUE')) {
@@ -5092,7 +5112,7 @@ app.post('/api/admin/payment-methods', authMiddleware, (req: any, res) => {
 });
 
 // PUT payment method - Admin only (maintains nominal link across orders, clients, and settings)
-app.put('/api/admin/payment-methods/:id', authMiddleware, (req: any, res) => {
+app.put('/api/admin/payment-methods/:id', authMiddleware, async (req: any, res) => {
   const user = req.user;
   if (user && (user.role === 'admin' || user.role === 'amministratore')) {
     const { id } = req.params;
@@ -5101,7 +5121,7 @@ app.put('/api/admin/payment-methods/:id', authMiddleware, (req: any, res) => {
       return res.status(400).json({ error: 'Il nome del pagamento è obbligatorio' });
     }
     try {
-      const existing = db.prepare('SELECT name FROM payment_methods WHERE id = ?').get(id) as any;
+      const existing = await queryGet('SELECT name FROM payment_methods WHERE id = ?', [id]) as any;
       if (!existing) {
         return res.status(404).json({ error: 'Metodo di pagamento non trovato' });
       }
@@ -5122,15 +5142,8 @@ app.put('/api/admin/payment-methods/:id', authMiddleware, (req: any, res) => {
         }
       }
 
-      const stmt = db.prepare('UPDATE payment_methods SET name = ?, offset_days = ?, installments = ?, fine_mese = ?, custom_offsets = ? WHERE id = ?');
-      const result = stmt.run(
-        newName, 
-        calcOffsetDays, 
-        calcInstallments, 
-        fine_mese ? 1 : 0,
-        finalCustomOffsets,
-        id
-      );
+      const result = await queryRun('UPDATE payment_methods SET name = ?, offset_days = ?, installments = ?, fine_mese = ?, custom_offsets = ? WHERE id = ?',
+      [newName, calcOffsetDays, calcInstallments, Boolean(fine_mese), finalCustomOffsets, id]);
 
       if (result.changes === 0) {
         return res.status(404).json({ error: 'Metodo di pagamento non trovato' });
@@ -5140,13 +5153,13 @@ app.put('/api/admin/payment-methods/:id', authMiddleware, (req: any, res) => {
       let updatedOrders = 0;
       let updatedClients = 0;
       if (oldName !== newName) {
-        const resOrders = db.prepare('UPDATE orders SET payment_name = ? WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').run(newName, oldName);
+        const resOrders = await queryRun('UPDATE orders SET payment_name = ? WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))', [newName, oldName]);
         updatedOrders = resOrders.changes;
 
-        const resClients = db.prepare('UPDATE clients SET payment_name = ? WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').run(newName, oldName);
+        const resClients = await queryRun('UPDATE clients SET payment_name = ? WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))', [newName, oldName]);
         updatedClients = resClients.changes;
 
-        db.prepare('UPDATE easyfatt_settings SET default_payment = ? WHERE LOWER(TRIM(default_payment)) = LOWER(TRIM(?))').run(newName, oldName);
+        await queryRun('UPDATE easyfatt_settings SET default_payment = ? WHERE LOWER(TRIM(default_payment)) = LOWER(TRIM(?))', [newName, oldName]);
       }
 
       const extraMsg = oldName !== newName && (updatedOrders > 0 || updatedClients > 0)
@@ -5170,20 +5183,20 @@ app.put('/api/admin/payment-methods/:id', authMiddleware, (req: any, res) => {
 });
 
 // DELETE payment method - Admin only
-app.delete('/api/admin/payment-methods/:id', authMiddleware, (req: any, res) => {
+app.delete('/api/admin/payment-methods/:id', authMiddleware, async (req: any, res) => {
   const user = req.user;
   if (user && (user.role === 'admin' || user.role === 'amministratore')) {
     const { id } = req.params;
     try {
-      const existing = db.prepare('SELECT name FROM payment_methods WHERE id = ?').get(id) as any;
+      const existing = await queryGet('SELECT name FROM payment_methods WHERE id = ?', [id]) as any;
       if (!existing) {
         return res.status(404).json({ error: 'Metodo di pagamento non trovato' });
       }
 
-      const orderUsage = db.prepare('SELECT COUNT(*) as count FROM orders WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').get(existing.name) as any;
-      const clientUsage = db.prepare('SELECT COUNT(*) as count FROM clients WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))').get(existing.name) as any;
+      const orderUsage = await queryGet('SELECT COUNT(*) as count FROM orders WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))', [existing.name]) as any;
+      const clientUsage = await queryGet('SELECT COUNT(*) as count FROM clients WHERE LOWER(TRIM(payment_name)) = LOWER(TRIM(?))', [existing.name]) as any;
 
-      const result = db.prepare('DELETE FROM payment_methods WHERE id = ?').run(id);
+      const result = await queryRun('DELETE FROM payment_methods WHERE id = ?', [id]);
       
       let warning = '';
       if ((orderUsage?.count || 0) > 0 || (clientUsage?.count || 0) > 0) {
@@ -5198,11 +5211,376 @@ app.delete('/api/admin/payment-methods/:id', authMiddleware, (req: any, res) => 
   return res.status(401).json({ error: 'Non autorizzato' });
 });
 
+// Helper for decoding XML buffers with automatic Windows-1252, ISO-8859-1, and UTF-8 handling
+function decodeXmlBuffer(buf: Buffer | string): string {
+  if (!buf) return '';
+  if (typeof buf === 'string') return buf;
+  let b = buf;
+  // Strip UTF-8 BOM if present
+  if (b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) {
+    b = b.subarray(3);
+  }
+  const sample = b.subarray(0, 300).toString('binary');
+  const match = sample.match(/<\?xml[^>]*encoding=["']([^"']+)["']/i);
+  const enc = match ? match[1].toLowerCase() : '';
+
+  if (enc.includes('windows-1252') || enc.includes('cp1252') || enc.includes('iso-8859-1') || enc.includes('latin1')) {
+    try {
+      return iconv.decode(b, 'windows-1252');
+    } catch {
+      return b.toString('latin1');
+    }
+  }
+
+  try {
+    return b.toString('utf8');
+  } catch {
+    try {
+      return iconv.decode(b, 'windows-1252');
+    } catch {
+      return b.toString('latin1');
+    }
+  }
+}
+
+// ==========================================
+// PAYMENT MANAGEMENT API (Scadenziario & Incassi)
+// ==========================================
+
+// GET /api/payments and GET /api/payments/schedule - List payments with RBAC, filters, search, and totals summary
+app.get(['/api/payments', '/api/payments/schedule'], authMiddleware, async (req: any, res: any) => {
+  try {
+    const user = req.user;
+    const isAgent = isUserAgent(user) && !isUserAdmin(user) && !req.isRoleplay;
+    const { order_id, client_id, status, is_paid, due_date, start_date, end_date, search } = req.query;
+
+    let queryStr = `
+      SELECT p.*, 
+             o.number as order_number, o.date as order_date, o.total as order_total, o.status as order_status,
+             c.id as client_id, c.name as client_name, c.code as client_code, c.city as client_city, c.phone as client_phone,
+             u.id as agent_id, u.name as agent_name
+      FROM order_payments p
+      JOIN orders o ON p.order_id = o.id
+      JOIN clients c ON o.client_id = c.id
+      LEFT JOIN users u ON o.agent_id = u.id
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+
+    // SEZIONE 4: Agente (agent) può consultare soltanto le scadenze dei clienti a lui assegnati
+    if (isAgent) {
+      queryStr += ` AND (c.agent_id = ? OR o.agent_id = ? OR LOWER(TRIM(c.agente)) = LOWER(TRIM(?)))`;
+      params.push(user.id, user.id, user.name);
+    }
+
+    if (order_id) {
+      queryStr += ` AND p.order_id = ?`;
+      params.push(Number(order_id));
+    }
+
+    if (client_id) {
+      queryStr += ` AND (o.client_id = ? OR c.id = ?)`;
+      params.push(Number(client_id), Number(client_id));
+    }
+
+    // Filter by is_paid or status
+    if (is_paid !== undefined && is_paid !== null && is_paid !== '') {
+      const isPaidBool = String(is_paid).toLowerCase() === 'true' || is_paid === '1' || is_paid === 1;
+      if (isPaidBool) {
+        queryStr += ` AND (p.paid IS TRUE OR p.is_paid IS TRUE)`;
+      } else {
+        queryStr += ` AND (p.paid IS FALSE OR p.paid IS NULL OR p.is_paid IS FALSE OR p.is_paid IS NULL)`;
+      }
+    } else if (status === 'paid') {
+      queryStr += ` AND (p.paid IS TRUE OR p.is_paid IS TRUE)`;
+    } else if (status === 'unpaid') {
+      queryStr += ` AND (p.paid IS FALSE OR p.paid IS NULL OR p.is_paid IS FALSE OR p.is_paid IS NULL)`;
+    } else if (status === 'overdue') {
+      queryStr += ` AND (p.paid IS FALSE OR p.paid IS NULL OR p.is_paid IS FALSE OR p.is_paid IS NULL) AND p.due_date < CURRENT_DATE`;
+    }
+
+    if (due_date) {
+      queryStr += ` AND p.due_date = ?`;
+      params.push(due_date);
+    }
+
+    if (start_date) {
+      queryStr += ` AND p.due_date >= ?`;
+      params.push(start_date);
+    }
+
+    if (end_date) {
+      queryStr += ` AND p.due_date <= ?`;
+      params.push(end_date);
+    }
+
+    if (search) {
+      queryStr += ` AND (c.name LIKE ? OR c.code LIKE ? OR o.number LIKE ? OR p.payment_method LIKE ? OR p.notes LIKE ?)`;
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    queryStr += ` ORDER BY p.due_date ASC, p.id ASC`;
+
+    const payments = await queryAll(queryStr, [...params]) as any[];
+
+    // Calculate totals summary
+    let totalAmount = 0;
+    let totalPaid = 0;
+    let totalUnpaid = 0;
+    let totalOverdue = 0;
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    for (const item of payments) {
+      const amt = Number(item.amount) || 0;
+      totalAmount += amt;
+      const isItemPaid = item.paid === 1 || item.paid === true || item.paid === '1' || item.is_paid === 1 || item.is_paid === true;
+      if (isItemPaid) {
+        totalPaid += amt;
+      } else {
+        totalUnpaid += amt;
+        if (item.due_date && item.due_date < todayStr) {
+          totalOverdue += amt;
+        }
+      }
+    }
+
+    res.json({
+      payments,
+      summary: {
+        total_count: payments.length,
+        total_amount: Number(totalAmount.toFixed(2)),
+        total_paid: Number(totalPaid.toFixed(2)),
+        total_unpaid: Number(totalUnpaid.toFixed(2)),
+        total_overdue: Number(totalOverdue.toFixed(2))
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/payments/:id/pay - Register payment collection with audit (Section 4)
+app.patch('/api/payments/:id/pay', authMiddleware, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+    const isAgent = isUserAgent(user) && !isUserAdmin(user) && !req.isRoleplay;
+
+    // Retrieve existing payment with client & order info to verify RBAC
+    const payment = await queryGet(`
+      SELECT p.*, o.agent_id as order_agent_id, c.agent_id as client_agent_id, c.agente as client_agente, c.name as client_name, o.number as order_number
+      FROM order_payments p
+      JOIN orders o ON p.order_id = o.id
+      JOIN clients c ON o.client_id = c.id
+      WHERE p.id = ?
+    `, [id]) as any;
+
+    if (!payment) {
+      return res.status(404).json({ error: 'Scadenza di pagamento non trovata' });
+    }
+
+    if (isAgent) {
+      const isOwner = payment.order_agent_id === user.id ||
+                      payment.client_agent_id === user.id ||
+                      (payment.client_agente && payment.client_agente.trim().toLowerCase() === (user.name || '').trim().toLowerCase());
+      if (!isOwner) {
+        return res.status(403).json({ error: 'Accesso negato: non puoi registrare incassi per clienti non assegnati' });
+      }
+    }
+
+    const paidDate = req.body.paid_date || new Date().toISOString().split('T')[0];
+    const nowIso = new Date().toISOString();
+    const auditStamp = `\n[INCASSO REGISTRATO] da ${user.name || 'Utente'} (ID: ${user.id}, Ruolo: ${user.role || 'user'}) in data ${nowIso}`;
+    const updatedNotes = ((payment.notes || '') + auditStamp).trim();
+
+    await queryRun(`
+      UPDATE order_payments 
+      SET paid = true, is_paid = true, paid_date = ?, notes = ?
+      WHERE id = ?
+    `, [paidDate, updatedNotes, id]);
+
+    try {
+      await pool.query(`
+        UPDATE order_payments 
+        SET paid = true, is_paid = true, paid_date = $1, notes = $2
+        WHERE id = $3
+      `, [paidDate, updatedNotes, id]);
+    } catch (pgErr) {
+      console.warn('[PATCH /api/payments/:id/pay] PostgreSQL sync warning:', pgErr);
+    }
+
+    res.json({
+      success: true,
+      message: 'Incasso registrato con successo',
+      payment: {
+        id: Number(id),
+        order_id: payment.order_id,
+        paid: true,
+        is_paid: true,
+        paid_date: paidDate,
+        notes: updatedNotes
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/payments - Add a new payment installment
+app.post('/api/payments', authMiddleware, async (req: any, res: any) => {
+  try {
+    const { order_id, advance, due_date, amount, paid, paid_date, payment_method, notes } = req.body;
+    if (!order_id) {
+      return res.status(400).json({ error: 'order_id è obbligatorio' });
+    }
+
+    const order = await queryGet('SELECT id, total FROM orders WHERE id = ?', [order_id]) as any;
+    if (!order) {
+      return res.status(404).json({ error: 'Ordine non trovato' });
+    }
+
+    const numAmount = Number(amount) || 0;
+    const isPaid = paid ? 1 : 0;
+    const finalPaidDate = isPaid ? (paid_date || new Date().toISOString().split('T')[0]) : null;
+
+    const result = await queryRun(`
+      INSERT INTO order_payments (order_id, advance, due_date, amount, paid, paid_date, payment_method, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [order_id,
+      advance ? 1 : 0,
+      due_date || new Date().toISOString().split('T')[0],
+      numAmount,
+      isPaid,
+      finalPaidDate,
+      payment_method || 'Bonifico bancario',
+      notes || '']);
+
+    // Sync to PostgreSQL
+    try {
+      await pool.query(`
+        INSERT INTO order_payments (order_id, advance, due_date, amount, paid, paid_date, payment_method, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        order_id,
+        advance ? true : false,
+        due_date || new Date().toISOString().split('T')[0],
+        numAmount,
+        isPaid ? true : false,
+        finalPaidDate,
+        payment_method || 'Bonifico bancario',
+        notes || ''
+      ]);
+    } catch (pgErr) {
+      console.warn('[POST /api/payments] PostgreSQL sync warning:', pgErr);
+    }
+
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/payments/:id/toggle-pay - Toggle or set paid state
+app.patch('/api/payments/:id/toggle-pay', authMiddleware, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const payment = await queryGet('SELECT * FROM order_payments WHERE id = ?', [id]) as any;
+    if (!payment) {
+      return res.status(404).json({ error: 'Scadenza di pagamento non trovata' });
+    }
+
+    const currentPaid = payment.paid === 1 || payment.paid === true || payment.paid === '1';
+    const newPaid = req.body.paid !== undefined ? (req.body.paid ? 1 : 0) : (currentPaid ? 0 : 1);
+    const newPaidDate = newPaid ? (req.body.paid_date || new Date().toISOString().split('T')[0]) : null;
+
+    await queryRun('UPDATE order_payments SET paid = ?, paid_date = ? WHERE id = ?', [newPaid, newPaidDate, id]);
+
+    try {
+      await pool.query('UPDATE order_payments SET paid = $1, paid_date = $2 WHERE id = $3', [newPaid === 1, newPaidDate, id]);
+    } catch (pgErr) {
+      console.warn('[PATCH /api/payments/:id/toggle-pay] PostgreSQL sync warning:', pgErr);
+    }
+
+    res.json({ success: true, paid: newPaid === 1, paid_date: newPaidDate });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/payments/:id - Update installment details
+app.put('/api/payments/:id', authMiddleware, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { advance, due_date, amount, paid, paid_date, payment_method, notes } = req.body;
+
+    const existing = await queryGet('SELECT id FROM order_payments WHERE id = ?', [id]) as any;
+    if (!existing) {
+      return res.status(404).json({ error: 'Scadenza di pagamento non trovata' });
+    }
+
+    const numAmount = Number(amount) || 0;
+    const isPaid = paid ? 1 : 0;
+    const finalPaidDate = isPaid ? (paid_date || new Date().toISOString().split('T')[0]) : null;
+
+    await queryRun(`
+      UPDATE order_payments 
+      SET advance = ?, due_date = ?, amount = ?, paid = ?, paid_date = ?, payment_method = ?, notes = ?
+      WHERE id = ?
+    `, [advance ? 1 : 0,
+      due_date,
+      numAmount,
+      isPaid,
+      finalPaidDate,
+      payment_method || 'Bonifico bancario',
+      notes || '',
+      id]);
+
+    try {
+      await pool.query(`
+        UPDATE order_payments 
+        SET advance = $1, due_date = $2, amount = $3, paid = $4, paid_date = $5, payment_method = $6, notes = $7
+        WHERE id = $8
+      `, [
+        advance ? true : false,
+        due_date,
+        numAmount,
+        isPaid ? true : false,
+        finalPaidDate,
+        payment_method || 'Bonifico bancario',
+        notes || '',
+        id
+      ]);
+    } catch (pgErr) {
+      console.warn('[PUT /api/payments/:id] PostgreSQL sync warning:', pgErr);
+    }
+
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/payments/:id - Delete payment installment
+app.delete('/api/payments/:id', authMiddleware, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    await queryRun('DELETE FROM order_payments WHERE id = ?', [id]);
+    try {
+      await pool.query('DELETE FROM order_payments WHERE id = $1', [id]);
+    } catch (pgErr) {
+      console.warn('[DELETE /api/payments/:id] PostgreSQL sync warning:', pgErr);
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Helper to check authorization for Easyfatt direct desktop integrations
-function checkEasyfattAuth(req: any): boolean {
+async function checkEasyfattAuth(req: any): Promise<boolean> {
   // Support cookie session
   if (req.cookies && req.cookies.userId) {
-    const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.cookies.userId);
+    const user = await queryGet('SELECT id FROM users WHERE id = ?', [req.cookies.userId]);
     if (user) return true;
   }
 
@@ -5277,20 +5655,21 @@ function checkEasyfattAuth(req: any): boolean {
   if (hasCredentials) {
     email = email.trim();
     // Try custom Easyfatt settings credentials first (case-insensitive for username)
-    const settings = db.prepare('SELECT username, password FROM easyfatt_settings WHERE id = 1').get() as any;
+    const settings = await queryGet('SELECT username, password FROM easyfatt_settings WHERE id = 1') as any;
     if (settings && settings.username && email.toLowerCase() === settings.username.toLowerCase() && password === settings.password) {
       console.log(`[Easyfatt Auth] Success matching easyfatt_settings for user: ${email}`);
       return true;
     }
     
-    // Support the custom/mock credentials used in previous test scripts/PHP integrations
-    if (email === 'login_di_pippo' && password === 'password_di_pippo') {
-      console.log(`[Easyfatt Auth] Success matching PHP test credentials: ${email}`);
+    // Support the custom/mock credentials used in previous test scripts/PHP integrations and official Danea manual
+    if ((email === 'login_di_pippo' && (password === 'password_di_pippo' || password === 'microcomputer' || (settings && password === settings.password))) ||
+        (email === 'pippo' && (password === 'microcomputer' || password === 'password_di_pippo' || (settings && password === settings.password)))) {
+      console.log(`[Easyfatt Auth] Success matching Danea manual sample credentials: ${email}`);
       return true;
     }
 
     // Fallback to DB admin users (case-insensitive for email)
-    const user = db.prepare('SELECT id, role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?').get(email, password) as any;
+    const user = await queryGet('SELECT id, role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?', [email, password]) as any;
     if (user && user.role === 'admin') {
       console.log(`[Easyfatt Auth] Success matching admin user for: ${email}`);
       return true;
@@ -5306,7 +5685,8 @@ function checkEasyfattAuth(req: any): boolean {
 
 // 11. Bulk Import Products from Easyfatt-XML (Optimized for EasyfattProducts schema)
 const handleEasyfattImport = async (req: any, res: any) => {
-  if (!checkEasyfattAuth(req)) {
+  if (!await checkEasyfattAuth(req)) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.status(401).send("ERROR: Non autorizzato. Verificare login e password nelle impostazioni Easyfatt.");
   }
 
@@ -5420,7 +5800,7 @@ const handleEasyfattImport = async (req: any, res: any) => {
         // In full mode, delete products that are completely absent in the XML file,
         // but preserve any custom items created online (online_customized = true).
         const incomingCodes = new Set(productsToUpsert.map(p => String(getVal(p, ['Code', 'code', 'CODE'], '')).trim()).filter(Boolean));
-        const currentDbCodes = db.prepare('SELECT code FROM products WHERE online_customized = false OR online_customized IS NULL').all().map((r: any) => r.code);
+        const currentDbCodes = (await queryAll('SELECT code FROM products WHERE online_customized = false OR online_customized IS NULL') as any[]).map((r: any) => r.code);
         codesToDelete = currentDbCodes.filter(c => !incomingCodes.has(c));
       }
     } 
@@ -5439,21 +5819,29 @@ const handleEasyfattImport = async (req: any, res: any) => {
       let importedCount = 0;
       let updatedCount = 0;
 
-      // Process in batches / chunks without a monolithic transaction to prevent pooler timeouts
-      const CHUNK_SIZE = 30;
-      for (let i = 0; i < customersToUpsert.length; i += CHUNK_SIZE) {
-        const chunk = customersToUpsert.slice(i, i + CHUNK_SIZE);
-        for (const raw of chunk) {
-          try {
-            const c = mapCustomerNode(raw);
-            if (!c.name) continue;
-            const res = await upsertClientInDb(c);
-            if (res && res.status === 'inserted') importedCount++;
-            if (res && res.status === 'updated') updatedCount++;
-          } catch (err: any) {
-            console.error('[Neon Import Warning]', err?.message || err);
-          }
+      // 1. Map all customers to standard typed payload
+      const mappedClients: any[] = [];
+      for (const raw of customersToUpsert) {
+        const c = mapCustomerNode(raw);
+        if (c && c.name) {
+          mappedClients.push(c);
         }
+      }
+
+      // 2. Process in batches (chunks of 100) using PostgreSQL batch upsert
+      const CLIENT_CHUNK_SIZE = 100;
+      for (let i = 0; i < mappedClients.length; i += CLIENT_CHUNK_SIZE) {
+        const chunk = mappedClients.slice(i, i + CLIENT_CHUNK_SIZE);
+        try {
+          const batchRes = await upsertClientsBatchInPostgres(chunk);
+          importedCount += batchRes.inserted;
+          updatedCount += batchRes.updated;
+        } catch (err: any) {
+          console.error(`[Easyfatt Neon Client Batch Error chunk ${i}-${i + chunk.length}]`, err?.message || err);
+        }
+
+        // Sync local mirror in a transaction per chunk for sub-millisecond execution
+        // Clients processed in PostgreSQL Neon batch upsert
       }
 
       // Cleanup uploaded file
@@ -5464,8 +5852,8 @@ const handleEasyfattImport = async (req: any, res: any) => {
       if (isBrowserRequest) {
         return res.json({ success: true, mode, imported: importedCount, updated: updatedCount, deleted: 0 });
       } else {
-        res.header('Content-Type', 'text/plain');
-        return res.send("OK");
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.status(200).send("OK");
       }
     }
     // Fallback: Check if it is the documents schema <EasyfattDocuments>
@@ -5496,14 +5884,7 @@ const handleEasyfattImport = async (req: any, res: any) => {
         console.error('[Easyfatt Neon Delete Error]', err?.message || err);
       }
 
-      try {
-        const deleteProductStmt = db.prepare('DELETE FROM products WHERE code = ?');
-        for (const code of codesToDelete) {
-          deleteProductStmt.run(code);
-        }
-      } catch (err: any) {
-        console.warn('[Easyfatt Local Delete Warning]', err?.message || err);
-      }
+      // Products deleted via deleteProductsByCodesInPostgres
     }
 
     // 2. Map all products to standard typed payload
@@ -5515,8 +5896,8 @@ const handleEasyfattImport = async (req: any, res: any) => {
       }
     }
 
-    // 3. Process in batches (chunks of 50) for PostgreSQL (Neon) and local database without monolithic transactions
-    const PRODUCT_CHUNK_SIZE = 50;
+    // 3. Process in batches (chunks of 100) for PostgreSQL (Neon) and local database without monolithic transactions
+    const PRODUCT_CHUNK_SIZE = 100;
     for (let i = 0; i < mappedProducts.length; i += PRODUCT_CHUNK_SIZE) {
       const chunk = mappedProducts.slice(i, i + PRODUCT_CHUNK_SIZE);
       try {
@@ -5527,89 +5908,7 @@ const handleEasyfattImport = async (req: any, res: any) => {
         console.error(`[Easyfatt Neon Product Batch Error chunk ${i}-${i + chunk.length}]`, err?.message || err);
       }
 
-      // Sync local SQLite mirror per item with isolated try/catch
-      for (const p of chunk) {
-        try {
-          const matching = db.prepare('SELECT id FROM products WHERE LOWER(TRIM(code)) = LOWER(TRIM(?))').all(p.code) as any[];
-          if (matching && matching.length > 0) {
-            const primaryId = matching[0].id;
-            db.prepare(`
-              UPDATE products SET 
-                code = ?, description = ?, price = ?, vat_code = ?, um = ?, stock = ?,
-                barcode = ?, category = ?, subcategory = ?, description_html = ?, producer_name = ?, link = ?, notes = ?, image_file_name = ?,
-                supplier_code = ?, supplier_name = ?, supplier_product_code = ?, supplier_net_price = ?, supplier_gross_price = ?, supplier_notes = ?,
-                manage_warehouse = ?, warehouse_location = ?, min_stock = ?, ordered_qty = ?, weight_um = ?, net_weight = ?, gross_weight = ?,
-                size_um = ?, net_size_x = ?, net_size_y = ?, net_size_z = ?, custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?
-              WHERE id = ?
-            `).run(
-              p.code, p.description, p.price, p.vat_code, p.um, p.stock,
-              p.barcode, p.category, p.subcategory, p.description_html, p.producer_name, p.link, p.notes, p.image_file_name,
-              p.supplier_code, p.supplier_name, p.supplier_product_code, p.supplier_net_price, p.supplier_gross_price, p.supplier_notes,
-              p.manage_warehouse ? 1 : 0, p.warehouse_location, p.min_stock, p.ordered_qty, p.weight_um, p.net_weight, p.gross_weight,
-              p.size_um, p.net_size_x, p.net_size_y, p.net_size_z, p.custom_field1, p.custom_field2, p.custom_field3, p.custom_field4,
-              primaryId
-            );
-
-            // Re-sync variants
-            db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(primaryId);
-            if (p.variants && p.variants.length > 0) {
-              const insertVariantStmt = db.prepare('INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES (?, ?, ?, ?, ?)');
-              for (const v of p.variants) {
-                insertVariantStmt.run(primaryId, v.size || null, v.color || null, v.barcode || null, v.available_qty);
-              }
-            }
-
-            // Re-sync extra barcodes
-            db.prepare('DELETE FROM product_extra_barcodes WHERE product_id = ?').run(primaryId);
-            if (p.extra_barcodes && p.extra_barcodes.length > 0) {
-              const insertExtraBarcodeStmt = db.prepare('INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES (?, ?, ?)');
-              for (const eb of p.extra_barcodes) {
-                insertExtraBarcodeStmt.run(primaryId, eb.barcode, eb.package_qty);
-              }
-            }
-          } else {
-            const insertResult = db.prepare(`
-              INSERT INTO products (
-                code, description, price, vat_code, um, stock,
-                barcode, category, subcategory, description_html, producer_name, link, notes, image_file_name,
-                supplier_code, supplier_name, supplier_product_code, supplier_net_price, supplier_gross_price, supplier_notes,
-                manage_warehouse, warehouse_location, min_stock, ordered_qty, weight_um, net_weight, gross_weight,
-                size_um, net_size_x, net_size_y, net_size_z, custom_field1, custom_field2, custom_field3, custom_field4,
-                online_customized
-              ) VALUES (
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?,
-                false
-              )
-            `).run(
-              p.code, p.description, p.price, p.vat_code, p.um, p.stock,
-              p.barcode, p.category, p.subcategory, p.description_html, p.producer_name, p.link, p.notes, p.image_file_name,
-              p.supplier_code, p.supplier_name, p.supplier_product_code, p.supplier_net_price, p.supplier_gross_price, p.supplier_notes,
-              p.manage_warehouse ? 1 : 0, p.warehouse_location, p.min_stock, p.ordered_qty, p.weight_um, p.net_weight, p.gross_weight,
-              p.size_um, p.net_size_x, p.net_size_y, p.net_size_z, p.custom_field1, p.custom_field2, p.custom_field3, p.custom_field4
-            );
-
-            const primaryId = insertResult.lastInsertRowid;
-            if (p.variants && p.variants.length > 0) {
-              const insertVariantStmt = db.prepare('INSERT INTO product_variants (product_id, size, color, barcode, available_qty) VALUES (?, ?, ?, ?, ?)');
-              for (const v of p.variants) {
-                insertVariantStmt.run(primaryId, v.size || null, v.color || null, v.barcode || null, v.available_qty);
-              }
-            }
-            if (p.extra_barcodes && p.extra_barcodes.length > 0) {
-              const insertExtraBarcodeStmt = db.prepare('INSERT INTO product_extra_barcodes (product_id, barcode, package_qty) VALUES (?, ?, ?)');
-              for (const eb of p.extra_barcodes) {
-                insertExtraBarcodeStmt.run(primaryId, eb.barcode, eb.package_qty);
-              }
-            }
-          }
-        } catch (localErr: any) {
-          console.warn('[Easyfatt Local Product Sync Warning]', localErr?.message || localErr);
-        }
-      }
+      // Products processed in PostgreSQL Neon batch upsert
     }
 
     // Cleanup uploaded file
@@ -5620,14 +5919,39 @@ const handleEasyfattImport = async (req: any, res: any) => {
     if (isBrowserRequest) {
       res.json({ success: true, mode, imported: importedCount, updated: updatedCount, deleted: deletedCount });
     } else {
-      // Direct integration response for Easyfatt. Includes parameters for transmitting pictures.
+      // Determine protocol version (AppVersion 1 vs 2+)
+      let appVerNum = 2;
+      const appverParam = req.query.appver || req.body?.appver;
+      if (appverParam) {
+        const parsed = parseInt(String(appverParam).replace(/[^0-9]/g, ''), 10);
+        if (!isNaN(parsed)) appVerNum = parsed;
+      }
+
+      if (jsonObj.EasyfattProducts) {
+        const root = jsonObj.EasyfattProducts;
+        const rawAppVer = root.AppVersion || root.appversion || root.appVersion;
+        if (rawAppVer !== undefined && rawAppVer !== null) {
+          if (String(rawAppVer).includes('2006') || String(rawAppVer) === '1') {
+            appVerNum = 1;
+          } else {
+            const parsed = parseInt(String(rawAppVer).replace(/[^0-9]/g, ''), 10);
+            if (!isNaN(parsed)) appVerNum = parsed;
+          }
+        }
+      }
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+
+      // Protocol 1: Danea treats anything other than simple "OK" as an error
+      if (appVerNum < 2) {
+        return res.status(200).send("OK");
+      }
+
+      // Protocol 2+: Include ImageSendURL and ImageSendFinishURL separated by \n
       const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
       const host = req.headers['x-forwarded-host'] || req.get('host');
-      let responseText = "OK\n";
-      responseText += `ImageSendURL=${proto}://${host}/api/easyfatt/upload-image\n`;
-      responseText += `ImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-image-finished\n`;
-      res.header('Content-Type', 'text/plain');
-      res.send(responseText);
+      const responseText = `OK\nImageSendURL=${proto}://${host}/api/easyfatt/upload-image\nImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-image-finished\n`;
+      return res.status(200).send(responseText);
     }
   } catch (err: any) {
     console.error('Easyfatt catalog import error:', err);
@@ -5684,7 +6008,15 @@ app.all(easyfattImportProductsPaths, (req: any, res: any) => {
 });
 
 // Endpoint for importing Historical Orders via XML (Danea Easyfatt standard documents XML)
-app.post('/api/easyfatt/import-orders-xml', authMiddleware, upload.single('file'), (req: any, res: any) => {
+app.post('/api/easyfatt/import-orders-xml', authMiddleware, upload.single('file'), async (req: any, res: any) => {
+  return handleXmlOrdersImportLogic(req, res);
+});
+
+app.post('/api/orders/import-xml-history', authMiddleware, upload.single('file'), async (req: any, res: any) => {
+  return handleXmlOrdersImportLogic(req, res);
+});
+
+async function handleXmlOrdersImportLogic(req: any, res: any) {
   const user = req.user;
   if (!user || (user.role !== 'admin' && user.role !== 'amministratore')) {
     return res.status(403).json({ error: 'Operazione riservata agli amministratori.' });
@@ -5695,13 +6027,14 @@ app.post('/api/easyfatt/import-orders-xml', authMiddleware, upload.single('file'
 
   if (uploadedFile && uploadedFile.path) {
     try {
-      xmlContent = fs.readFileSync(uploadedFile.path, 'utf8');
+      const rawBuf = fs.readFileSync(uploadedFile.path);
+      xmlContent = decodeXmlBuffer(rawBuf);
       try { fs.unlinkSync(uploadedFile.path); } catch (e) {}
     } catch (e: any) {
       return res.status(500).json({ error: 'Errore durante la lettura del file caricato.' });
     }
   } else if (req.body && typeof req.body === 'object' && req.body.xml) {
-    xmlContent = req.body.xml;
+    xmlContent = typeof req.body.xml === 'string' ? req.body.xml : decodeXmlBuffer(req.body.xml);
   } else if (req.body && typeof req.body === 'string') {
     xmlContent = req.body;
   }
@@ -5736,177 +6069,313 @@ app.post('/api/easyfatt/import-orders-xml', authMiddleware, upload.single('file'
 
     const docList = Array.isArray(rawDocs) ? rawDocs : [rawDocs];
 
-    db.transaction(() => {
-      for (let i = 0; i < docList.length; i++) {
-        const doc = docList[i];
-        if (!doc) continue;
-        const rawNum = String(doc.Number || doc.number || `INC-${i + 1}`).trim();
-        const rawNumRing = String(doc.Numbering || doc.numbering || '').trim();
-        const docNumber = rawNumRing ? (rawNumRing.startsWith('/') ? `${rawNum}${rawNumRing}` : `${rawNum}/${rawNumRing}`) : rawNum;
+    for (let i = 0; i < docList.length; i++) {
+      const doc = docList[i];
+      if (!doc) continue;
+      const rawNum = String(doc.Number || doc.number || `INC-${i + 1}`).trim();
+      const rawNumRing = String(doc.Numbering || doc.numbering || '').trim();
+      const docNumber = rawNumRing ? (rawNumRing.startsWith('/') ? `${rawNum}${rawNumRing}` : `${rawNum}/${rawNumRing}`) : rawNum;
 
-        // Extract Customer Identification Fields
-        const cCode = normalizeCode(doc.CustomerCode || doc.customercode) || '';
-        const cVat = normalizeVatCode(doc.CustomerVatCode || doc.customervatcode) || '';
-        const cFiscal = normalizeFiscalCode(doc.CustomerFiscalCode || doc.customerfiscalcode) || '';
-        const cEmail = String(doc.CustomerEmail || doc.customeremail || '').trim();
-        const cName = String(doc.CustomerName || doc.customername || 'Cliente Sconosciuto').trim();
+      // Extract Customer Identification Fields
+      const cCode = normalizeCode(doc.CustomerCode || doc.customercode) || '';
+      const cVat = normalizeVatCode(doc.CustomerVatCode || doc.customervatcode) || '';
+      const cFiscal = normalizeFiscalCode(doc.CustomerFiscalCode || doc.customerfiscalcode) || '';
+      const cEmail = String(doc.CustomerEmail || doc.customeremail || '').trim();
+      const cName = String(doc.CustomerName || doc.customername || 'Cliente Sconosciuto').trim();
 
-        // Matching logic priority: Code -> VAT -> Fiscal Code -> Email -> Name
-        let clientMatch: any = null;
+      // Matching logic priority: Code -> VAT -> Fiscal Code -> Email -> Name
+      let clientMatch: any = null;
 
-        if (cCode) {
-          const rawCodeClean = cCode.replace(/^0+/, '');
-          clientMatch = db.prepare('SELECT * FROM clients WHERE code = ? OR code = ?').get(cCode, rawCodeClean);
-        }
+      if (cCode) {
+        const rawCodeClean = cCode.replace(/^0+/, '');
+        clientMatch = await queryGet('SELECT * FROM clients WHERE code = ? OR code = ?', [cCode, rawCodeClean]);
+      }
 
-        if (!clientMatch && cVat) {
-          clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(vat_code)) = LOWER(TRIM(?)) OR notes LIKE ?').get(cVat, `%${cVat}%`);
-        }
+      if (!clientMatch && cVat) {
+        clientMatch = await queryGet('SELECT * FROM clients WHERE LOWER(TRIM(vat_code)) = LOWER(TRIM(?)) OR notes LIKE ?', [cVat, `%${cVat}%`]);
+      }
 
-        if (!clientMatch && cFiscal) {
-          clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(fiscal_code)) = LOWER(TRIM(?)) OR notes LIKE ?').get(cFiscal, `%${cFiscal}%`);
-        }
+      if (!clientMatch && cFiscal) {
+        clientMatch = await queryGet('SELECT * FROM clients WHERE LOWER(TRIM(fiscal_code)) = LOWER(TRIM(?)) OR notes LIKE ?', [cFiscal, `%${cFiscal}%`]);
+      }
 
-        if (!clientMatch && cEmail) {
-          clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))').get(cEmail);
-        }
+      if (!clientMatch && cEmail) {
+        clientMatch = await queryGet('SELECT * FROM clients WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))', [cEmail]);
+      }
 
-        if (!clientMatch && cName) {
-          clientMatch = db.prepare('SELECT * FROM clients WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))').get(cName);
-        }
+      if (!clientMatch && cName) {
+        clientMatch = await queryGet('SELECT * FROM clients WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))', [cName]);
+      }
 
-        // Strict Requirement: Discard entire order if client match fails
-        if (!clientMatch) {
-          skippedOrdersCount++;
-          logs.push({
-            level: 'warning',
-            message: `[ORDINE SCARTATO] Ordine #${docNumber}: Impossibile associare il cliente "${cName}" (Cod: "${cCode || '-'}", P.IVA: "${cVat || '-'}", CF: "${cFiscal || '-'}", Email: "${cEmail || '-'}").`
-          });
-          continue;
-        }
-
-        // Payment Method Handling with Intelligent Defaults
-        const pName = String(doc.PaymentName || doc.paymentname || '').trim();
-        if (pName) {
-          const pmResult = ensurePaymentMethodExists(pName);
-          if (pmResult && pmResult.is_new) {
-            autoCreatedPaymentMethods++;
-            logs.push({
-              level: 'info',
-              message: `[METODO PAGAMENTO REGISTRATO] Creato nuovo metodo di pagamento "${pName}" (GG: ${pmResult.offset_days}, Rate: ${pmResult.installments}, Fine Mese: ${pmResult.fine_mese === 1 ? 'Sì' : 'No'}). Integrato e gestibile in Admin -> Metodi di pagamento.`
-            });
-          }
-        }
-
-        // Product Rows Handling
-        const rawRows = doc.Rows?.Row || doc.rows?.row || doc.Row || doc.row || [];
-        const rowsList = Array.isArray(rawRows) ? rawRows : [rawRows];
-        const validItems: any[] = [];
-
-        for (const row of rowsList) {
-          if (!row) continue;
-          const getVal = (v: any) => (typeof v === 'object' && v ? (v['#text'] !== undefined ? String(v['#text']) : '') : String(v || ''));
-          const pCode = getVal(row.Code || row.code || row.SupplierCode || row.suppliercode).trim();
-          const pDesc = getVal(row.Description || row.description).trim();
-
-          let productMatch: any = null;
-          if (pCode) {
-            productMatch = db.prepare('SELECT * FROM products WHERE code = ? OR barcode = ? OR supplier_code = ?').get(pCode, pCode, pCode);
-          }
-
-          if (!productMatch && pDesc) {
-            productMatch = db.prepare('SELECT * FROM products WHERE LOWER(TRIM(description)) = LOWER(TRIM(?))').get(pDesc);
-          }
-
-          // Strict Requirement: Discard ONLY the row if product is not found
-          if (!productMatch) {
-            skippedRowsCount++;
-            logs.push({
-              level: 'warning',
-              message: `[RIGA SCARTATA] Prodotto "${pCode || pDesc}" non presente a catalogo nell'ordine #${docNumber}. Riga ignorata.`
-            });
-            continue;
-          }
-
-          const qty = parseFloat(getVal(row.Qty || row.qty || '1')) || 1;
-          const price = parseFloat(getVal(row.Price || row.price || productMatch.price || '0')) || 0;
-          let vatCode = getVal(row.VatCode || row.vatcode) || productMatch.vat_code || '22';
-
-          validItems.push({
-            product_code: productMatch.code,
-            description: pDesc || productMatch.description,
-            qty,
-            price,
-            vat_code: String(vatCode),
-            um: getVal(row.Um || row.um) || productMatch.um || 'pz'
-          });
-        }
-
-        if (validItems.length === 0) {
-          skippedOrdersCount++;
-          logs.push({
-            level: 'warning',
-            message: `[ORDINE SCARTATO] Ordine #${docNumber} per "${clientMatch.name}": Nessuna riga prodotto valida trovata a catalogo.`
-          });
-          continue;
-        }
-
-        // Calculate Total
-        let calcTotal = 0;
-        for (const item of validItems) {
-          calcTotal += item.qty * item.price;
-        }
-        if (doc.Total || doc.total) {
-          const xmlTot = parseFloat(String(doc.Total || doc.total));
-          if (!isNaN(xmlTot) && xmlTot > 0) calcTotal = xmlTot;
-        }
-
-        const docDate = String(doc.Date || doc.date || new Date().toISOString().split('T')[0]).trim();
-        const paymentBank = String(doc.PaymentBank || doc.paymentbank || '').trim();
-        const internalComment = String(doc.InternalComment || doc.internalcomment || doc.Notes || doc.notes || '').trim();
-
-        // Insert Historical Order (is_imported = 1)
-        const insertOrderResult = db.prepare(`
-          INSERT INTO orders (client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Esportato', 1)
-        `).run(
-          clientMatch.id,
-          user.id,
-          docDate,
-          docNumber,
-          pName || 'Bonifico bancario',
-          paymentBank,
-          internalComment || 'Ordine Storico Importato da XML Easyfatt',
-          calcTotal
-        );
-
-        const newOrderId = insertOrderResult.lastInsertRowid;
-
-        // Insert Order Items
-        const insertItemStmt = db.prepare(`
-          INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `);
-
-        for (const item of validItems) {
-          insertItemStmt.run(
-            newOrderId,
-            item.product_code,
-            item.description,
-            item.qty,
-            item.price,
-            item.vat_code,
-            item.um
-          );
-        }
-
-        importedCount++;
+      // Strict Requirement: Discard entire order if client match fails
+      if (!clientMatch) {
+        skippedOrdersCount++;
         logs.push({
-          level: 'success',
-          message: `[IMPORTATO] Ordine #${docNumber} importato con successo per "${clientMatch.name}" (€${calcTotal.toFixed(2)}, ${validItems.length} righe).`
+          level: 'warning',
+          message: `[ORDINE SCARTATO] Ordine #${docNumber}: Impossibile associare il cliente "${cName}" (Cod: "${cCode || '-'}", P.IVA: "${cVat || '-'}", CF: "${cFiscal || '-'}", Email: "${cEmail || '-'}").`
+        });
+        continue;
+      }
+
+      // Payment Method Handling with Intelligent Defaults
+      const pName = String(doc.PaymentName || doc.paymentname || '').trim();
+      if (pName) {
+        const pmResult = await ensurePaymentMethodExists(pName);
+        if (pmResult && pmResult.is_new) {
+          autoCreatedPaymentMethods++;
+          logs.push({
+            level: 'info',
+            message: `[METODO PAGAMENTO REGISTRATO] Creato nuovo metodo di pagamento "${pName}" (GG: ${pmResult.offset_days}, Rate: ${pmResult.installments}, Fine Mese: ${pmResult.fine_mese === 1 ? 'Sì' : 'No'}).`
+          });
+        }
+      }
+
+      // Product Rows Handling
+      const rawRows = doc.Rows?.Row || doc.rows?.row || doc.Row || doc.row || [];
+      const rowsList = Array.isArray(rawRows) ? rawRows : [rawRows];
+      const validItems: any[] = [];
+
+      for (const row of rowsList) {
+        if (!row) continue;
+        const getVal = (v: any) => (typeof v === 'object' && v ? (v['#text'] !== undefined ? String(v['#text']) : '') : String(v || ''));
+        const pCode = getVal(row.Code || row.code || row.SupplierCode || row.suppliercode).trim();
+        const pDesc = getVal(row.Description || row.description).trim();
+
+        let productMatch: any = null;
+        if (pCode) {
+          productMatch = await queryGet('SELECT * FROM products WHERE code = ? OR barcode = ? OR supplier_code = ?', [pCode, pCode, pCode]);
+        }
+
+        if (!productMatch && pDesc) {
+          productMatch = await queryGet('SELECT * FROM products WHERE LOWER(TRIM(description)) = LOWER(TRIM(?))', [pDesc]);
+        }
+
+        // Strict Requirement: Discard ONLY the row if product is not found
+        if (!productMatch) {
+          skippedRowsCount++;
+          logs.push({
+            level: 'warning',
+            message: `[RIGA SCARTATA] Prodotto "${pCode || pDesc}" non presente a catalogo nell'ordine #${docNumber}. Riga ignorata.`
+          });
+          continue;
+        }
+
+        const qty = parseFloat(getVal(row.Qty || row.qty || '1')) || 1;
+        const price = parseFloat(getVal(row.Price || row.price || productMatch.price || '0')) || 0;
+        let vatCode = getVal(row.VatCode || row.vatcode) || productMatch.vat_code || '22';
+
+        validItems.push({
+          product_code: productMatch.code,
+          description: pDesc || productMatch.description,
+          qty,
+          price,
+          vat_code: String(vatCode),
+          um: getVal(row.Um || row.um) || productMatch.um || 'pz'
         });
       }
-    })();
+
+      if (validItems.length === 0) {
+        skippedOrdersCount++;
+        logs.push({
+          level: 'warning',
+          message: `[ORDINE SCARTATO] Ordine #${docNumber} per "${clientMatch.name}": Nessuna riga prodotto valida trovata a catalogo.`
+        });
+        continue;
+      }
+
+      // Calculate Total
+      let calcTotal = 0;
+      for (const item of validItems) {
+        calcTotal += item.qty * item.price;
+      }
+      if (doc.Total || doc.total) {
+        const xmlTot = parseFloat(String(doc.Total || doc.total));
+        if (!isNaN(xmlTot) && xmlTot > 0) calcTotal = xmlTot;
+      }
+
+      const docDate = String(doc.Date || doc.date || new Date().toISOString().split('T')[0]).trim();
+      const paymentBank = String(doc.PaymentBank || doc.paymentbank || '').trim();
+      const internalComment = String(doc.InternalComment || doc.internalcomment || doc.Notes || doc.notes || '').trim();
+
+      // Insert Historical Order (is_imported = true) in SQLite
+      const insertOrderResult = await queryRun(`
+        INSERT INTO orders (client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Esportato', true)
+      `, [clientMatch.id,
+        user.id,
+        docDate,
+        docNumber,
+        pName || 'Bonifico bancario',
+        paymentBank,
+        internalComment || 'Ordine Storico Importato da XML Easyfatt',
+        calcTotal]);
+
+      const newOrderId = Number(insertOrderResult.lastInsertRowid);
+
+      // Insert Order Items in PostgreSQL
+      for (const item of validItems) {
+        await queryRun(`
+          INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [
+          newOrderId,
+          item.product_code,
+          item.description,
+          Number(item.qty) || 0,
+          Number(item.price) || 0,
+          item.vat_code || '22',
+          item.um || 'pz'
+        ]);
+      }
+
+      // Extract & Insert Payments into order_payments (Section 3 A)
+      const rawPayments = doc.Payments?.Payment || doc.payments?.payment || doc.Payment || doc.payment || [];
+      const paymentsList = Array.isArray(rawPayments) ? rawPayments : (rawPayments && typeof rawPayments === 'object' ? [rawPayments] : []);
+      const parsedPayments: any[] = [];
+      let paymentSourceType = 'DANEA';
+
+      if (paymentsList.length > 0) {
+        for (const p of paymentsList) {
+          if (!p) continue;
+          const isAdvance = String(p.Advance || p.advance || 'false').toLowerCase() === 'true' || p.Advance === 1;
+          const payDate = String(p.Date || p.date || docDate).trim();
+          const payAmount = parseFloat(String(p.Amount || p.amount || '0')) || 0;
+          const isPaid = String(p.Paid || p.paid || 'false').toLowerCase() === 'true' || p.Paid === 1;
+          const payNotes = String(p.Notes || p.notes || '').trim();
+
+          parsedPayments.push({
+            advance: isAdvance ? 1 : 0,
+            is_advance: isAdvance,
+            due_date: payDate,
+            amount: payAmount,
+            paid: isPaid ? 1 : 0,
+            is_paid: isPaid,
+            paid_date: isPaid ? payDate : null,
+            payment_method: pName || 'Bonifico bancario',
+            notes: payNotes,
+            source_type: 'DANEA'
+          });
+        }
+      } else {
+        // Automatically schedule installments if none provided in XML
+        paymentSourceType = 'AUTO';
+        const autoInstallments = calculateInstallments(calcTotal, docDate, pName || 'Bonifico bancario', 'AUTO');
+        for (const inst of autoInstallments) {
+          parsedPayments.push({
+            advance: inst.is_advance ? 1 : 0,
+            is_advance: inst.is_advance,
+            due_date: inst.due_date,
+            amount: inst.amount,
+            paid: inst.is_paid ? 1 : 0,
+            is_paid: inst.is_paid,
+            paid_date: inst.paid_date,
+            payment_method: inst.payment_method || pName || 'Bonifico bancario',
+            notes: inst.notes || '',
+            source_type: 'AUTO'
+          });
+        }
+      }
+
+      for (const pay of parsedPayments) {
+        await queryRun(`
+          INSERT INTO order_payments (order_id, client_id, advance, is_advance, due_date, amount, paid, is_paid, paid_date, payment_method, notes, source_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          newOrderId,
+          clientMatch.id,
+          pay.advance,
+          pay.is_advance,
+          pay.due_date,
+          pay.amount,
+          pay.paid,
+          pay.is_paid,
+          pay.paid_date,
+          pay.payment_method,
+          pay.notes,
+          pay.source_type
+        ]);
+      }
+
+      // Mirror to PostgreSQL
+      try {
+        const pgClient = await pool.connect();
+        try {
+          await pgClient.query('BEGIN');
+          const pgOrderRes = await pgClient.query(`
+            INSERT INTO orders (id, client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Esportato', true)
+            ON CONFLICT (id) DO UPDATE SET
+              client_id = EXCLUDED.client_id,
+              date = EXCLUDED.date,
+              number = EXCLUDED.number,
+              payment_name = EXCLUDED.payment_name,
+              total = EXCLUDED.total,
+              status = 'Esportato',
+              is_imported = true
+            RETURNING id
+          `, [
+            newOrderId,
+            clientMatch.id,
+            user.id,
+            docDate,
+            docNumber,
+            pName || 'Bonifico bancario',
+            paymentBank,
+            internalComment || 'Ordine Storico Importato da XML Easyfatt',
+            calcTotal
+          ]);
+
+          const pgOrderId = pgOrderRes.rows[0].id;
+          await pgClient.query('DELETE FROM order_items WHERE order_id = $1', [pgOrderId]);
+          for (const item of validItems) {
+            await pgClient.query(`
+              INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `, [pgOrderId, item.product_code, item.description, item.qty, item.price, item.vat_code, item.um]);
+          }
+
+          await pgClient.query('DELETE FROM order_payments WHERE order_id = $1', [pgOrderId]);
+          for (const pay of parsedPayments) {
+            await pgClient.query(`
+              INSERT INTO order_payments (
+                order_id, client_id, due_date, amount,
+                is_advance, advance,
+                is_paid, paid,
+                paid_date, payment_method, notes, source_type
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            `, [
+              pgOrderId,
+              clientMatch.id,
+              pay.due_date,
+              pay.amount,
+              Boolean(pay.is_advance),
+              Boolean(pay.is_advance),
+              Boolean(pay.is_paid),
+              Boolean(pay.is_paid),
+              pay.paid_date,
+              pay.payment_method,
+              pay.notes,
+              pay.source_type || paymentSourceType
+            ]);
+          }
+          await pgClient.query('COMMIT');
+        } catch (pgTxErr) {
+          await pgClient.query('ROLLBACK');
+          console.warn('[handleXmlOrdersImportLogic] PostgreSQL error syncing order:', pgTxErr);
+        } finally {
+          pgClient.release();
+        }
+      } catch (pgConnErr) {
+        console.warn('[handleXmlOrdersImportLogic] PostgreSQL connection warning:', pgConnErr);
+      }
+
+      importedCount++;
+      logs.push({
+        level: 'success',
+        message: `[IMPORTATO] Ordine #${docNumber} importato con successo per "${clientMatch.name}" (€${calcTotal.toFixed(2)}, ${validItems.length} righe, ${parsedPayments.length} scadenze).`
+      });
+    }
 
     res.json({
       success: true,
@@ -5920,7 +6389,7 @@ app.post('/api/easyfatt/import-orders-xml', authMiddleware, upload.single('file'
     console.error('Error during XML orders import:', err);
     res.status(500).json({ error: 'Errore durante l\'importazione degli ordini XML: ' + err.message });
   }
-});
+}
 
 
 
@@ -6265,25 +6734,23 @@ async function upsertClientInDb(c: ReturnType<typeof mapCustomerNode>, pgClient?
   // 2. Also keep local SQLite in sync
   let existingId: number | null = pgResult.id || null;
   try {
-    const selectClientByCode = db.prepare('SELECT id FROM clients WHERE LOWER(code) = LOWER(?)');
-    const selectClientByEmail = db.prepare('SELECT id FROM clients WHERE LOWER(email) = LOWER(?)');
-    const selectClientByName = db.prepare('SELECT id FROM clients WHERE LOWER(name) = LOWER(?)');
+    // Lookup via async queryGet
 
     if (!existingId && c.code) {
-      const match = selectClientByCode.get(c.code) as any;
+      const match = await queryGet<{ id: number }>('SELECT id FROM clients WHERE LOWER(code) = LOWER(?)', [c.code]);
       if (match) existingId = match.id;
     }
     if (!existingId && c.email) {
-      const match = selectClientByEmail.get(c.email) as any;
+      const match = await queryGet<{ id: number }>('SELECT id FROM clients WHERE LOWER(email) = LOWER(?)', [c.email]);
       if (match) existingId = match.id;
     }
     if (!existingId && c.name) {
-      const match = selectClientByName.get(c.name) as any;
+      const match = await queryGet<{ id: number }>('SELECT id FROM clients WHERE LOWER(name) = LOWER(?)', [c.name]);
       if (match) existingId = match.id;
     }
 
     if (existingId) {
-      db.prepare(`
+      await queryRun(`
         UPDATE clients SET 
           code = ?, name = ?, web_login = ?, address = ?, postcode = ?, city = ?, province = ?, country = ?,
           fiscal_code = ?, vat_code = ?, sdi_pec = ?, phone = ?, cell_phone = ?, fax = ?, email = ?, pec = ?,
@@ -6291,16 +6758,14 @@ async function upsertClientInDb(c: ReturnType<typeof mapCustomerNode>, pgClient?
           delivery_city = ?, delivery_province = ?, delivery_country = ?, price_list = ?, payment_name = ?, payment_bank = ?,
           custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?, notes = ?
         WHERE id = ?
-      `).run(
-        c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
+      `, [c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
         c.fiscal_code, c.vat_code, c.sdi_pec, c.phone, c.cell_phone, c.fax, c.email, c.pec,
         c.contact, c.agente, c.delivery_name, c.delivery_address, c.delivery_postcode,
         c.delivery_city, c.delivery_province, c.delivery_country, c.price_list, c.payment_name, c.payment_bank,
         c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes,
-        existingId
-      );
+        existingId]);
     } else {
-      const result = db.prepare(`
+      const result = await queryRun(`
         INSERT INTO clients (
           code, name, web_login, address, postcode, city, province, country,
           fiscal_code, vat_code, sdi_pec, phone, cell_phone, fax, email, pec,
@@ -6314,13 +6779,11 @@ async function upsertClientInDb(c: ReturnType<typeof mapCustomerNode>, pgClient?
           ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?
         )
-      `).run(
-        c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
+      `, [c.code, c.name, c.web_login, c.address, c.postcode, c.city, c.province, c.country,
         c.fiscal_code, c.vat_code, c.sdi_pec, c.phone, c.cell_phone, c.fax, c.email, c.pec,
         c.contact, c.agente, c.delivery_name, c.delivery_address, c.delivery_postcode,
         c.delivery_city, c.delivery_province, c.delivery_country, c.price_list, c.payment_name, c.payment_bank,
-        c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes
-      );
+        c.custom_field1, c.custom_field2, c.custom_field3, c.custom_field4, c.notes]);
       if (!existingId) existingId = Number(result.lastInsertRowid);
     }
   } catch (syncErr: any) {
@@ -6435,7 +6898,7 @@ app.all(easyfattBasePaths, (req: any, res: any) => {
 });
 
 // 11e. Fallback handler for root POST requests (prevents 405 Method Not Allowed)
-app.post(['/', '/index.html'], (req: any, res: any, next: any) => {
+app.post(['/', '/index.html'], async (req: any, res: any, next: any) => {
   const isEasyfatt = !!(
     req.headers['x-authorization'] ||
     req.headers['http_x_authorization'] ||
@@ -6548,10 +7011,18 @@ app.post('/api/easyfatt/import-clients', authMiddleware, upload.single('file'), 
   }
 });
 
-// 13. Bulk Import / Enrich Products Catalog from Excel (.xlsx)
-app.post('/api/easyfatt/import-products-xlsx', authMiddleware, upload.single('file'), (req: any, res: any) => {
+// 13. Bulk Import / Enrich Products Catalog from Excel (.xlsx / .xls)
+app.post('/api/easyfatt/import-products-xlsx', authMiddleware, upload.single('file'), async (req: any, res: any) => {
+  return handleExcelProductsImportLogic(req, res);
+});
+
+app.post('/api/products/import-excel', authMiddleware, upload.single('file'), async (req: any, res: any) => {
+  return handleExcelProductsImportLogic(req, res);
+});
+
+async function handleExcelProductsImportLogic(req: any, res: any) {
   if (!req.file) {
-    return res.status(400).json({ error: 'Nessun file Excel (.xlsx) caricato' });
+    return res.status(400).json({ error: 'Nessun file Excel (.xlsx / .xls) caricato' });
   }
 
   try {
@@ -6570,8 +7041,12 @@ app.post('/api/easyfatt/import-products-xlsx', authMiddleware, upload.single('fi
       return res.status(400).json({ error: 'Nessuna riga di dati trovata nel file Excel' });
     }
 
-    // Inspect existing columns in `products` table
-    const tableInfo = db.prepare("PRAGMA table_info(products)").all() as any[];
+    // Introspezione Schema (PostgreSQL Nativo)
+    const tableInfo = await queryAll<{ name: string; type: string }>(
+      `SELECT column_name AS name, data_type AS type 
+       FROM information_schema.columns 
+       WHERE table_name = 'products'`
+    );
     const existingColumns = new Set<string>(tableInfo.map(col => col.name.toLowerCase()));
 
     // Map known standard header variants to products table columns
@@ -6728,102 +7203,130 @@ app.post('/api/easyfatt/import-products-xlsx', authMiddleware, upload.single('fi
         // If this column doesn't exist in `products`, add it dynamically!
         if (!existingColumns.has(sanitizedCol)) {
           try {
-            db.exec(`ALTER TABLE products ADD COLUMN IF NOT EXISTS "${sanitizedCol}" TEXT DEFAULT ''`);
+            await queryExec(`ALTER TABLE products ADD COLUMN IF NOT EXISTS "${sanitizedCol}" TEXT DEFAULT ''`);
             existingColumns.add(sanitizedCol);
             newColumnsCreated.push(cleanHeader);
-            console.log(`[DYNAMIC SCHEMA] Created or ensured column '${sanitizedCol}' (from header '${cleanHeader}') in products table.`);
+            console.log(`[DYNAMIC SCHEMA] Created column '${sanitizedCol}' in SQLite products table.`);
           } catch (alterErr: any) {
-            console.error(`Failed to alter table products for column '${sanitizedCol}':`, alterErr?.message || alterErr);
+            console.error(`Failed to alter SQLite table products for column '${sanitizedCol}':`, alterErr?.message || alterErr);
           }
+
+          try {
+            pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS "${sanitizedCol}" TEXT DEFAULT ''`).catch(() => {});
+          } catch (pgAlterErr) {}
         }
       }
     }
 
+    let insertedCount = 0;
     let updatedCount = 0;
     let ignoredCount = 0;
 
-    const selectMatchingProduct = db.prepare('SELECT id FROM products WHERE LOWER(TRIM(code)) = LOWER(TRIM(?))');
+    // Product match via async queryGet
 
-    db.transaction(() => {
-      for (const row of rows) {
-        // Extract product code
-        let rawCode = '';
-        for (const [header, colName] of Object.entries(headerToColMap)) {
-          if (colName === 'code' && row[header] !== undefined && row[header] !== null) {
-            rawCode = String(row[header]).trim();
+    for (const row of rows) {
+      // Extract product code
+      let rawCode = '';
+      for (const [header, colName] of Object.entries(headerToColMap)) {
+        if (colName === 'code' && row[header] !== undefined && row[header] !== null) {
+          rawCode = String(row[header]).trim();
+          break;
+        }
+      }
+
+      if (!rawCode) {
+        for (const k of Object.keys(row)) {
+          if ((k.toLowerCase().includes('cod') || k.toLowerCase().includes('code')) && row[k]) {
+            rawCode = String(row[k]).trim();
             break;
           }
         }
+      }
 
-        if (!rawCode) {
-          for (const k of Object.keys(row)) {
-            if ((k.toLowerCase().includes('cod') || k.toLowerCase().includes('code')) && row[k]) {
-              rawCode = String(row[k]).trim();
-              break;
-            }
-          }
+      if (!rawCode) {
+        ignoredCount++;
+        continue;
+      }
+
+      const match = await queryGet('SELECT * FROM products WHERE code = ?', [rawCode]) as any;
+
+      let netPrice1Val: number | null = null;
+      let grossPrice1Val: number | null = null;
+      const dataObj: Record<string, any> = { code: rawCode };
+
+      for (const [header, colName] of Object.entries(headerToColMap)) {
+        const val = row[header];
+        if (val === undefined) continue;
+
+        const strVal = String(val).trim();
+
+        if (colName === 'net_price_1') {
+          const num = Number(strVal.replace(',', '.'));
+          if (!isNaN(num)) netPrice1Val = num;
+        } else if (colName === 'gross_price_1') {
+          const num = Number(strVal.replace(',', '.'));
+          if (!isNaN(num)) grossPrice1Val = num;
         }
 
-        if (!rawCode) {
-          ignoredCount++;
-          continue;
-        }
+        dataObj[colName] = strVal;
+      }
 
-        const match = selectMatchingProduct.get(rawCode) as any;
-        if (!match || !match.id) {
-          // No match found -> ignore row (do not create new products)
-          ignoredCount++;
-          continue;
-        }
+      if (netPrice1Val !== null || grossPrice1Val !== null) {
+        dataObj['price'] = netPrice1Val ?? grossPrice1Val ?? 0;
+      }
 
+      if (match && match.id) {
         const productId = match.id;
         const updateFields: string[] = [];
         const updateValues: any[] = [];
 
-        let netPrice1Val: number | null = null;
-        let grossPrice1Val: number | null = null;
-
-        for (const [header, colName] of Object.entries(headerToColMap)) {
-          if (colName === 'code') continue; // Do not update code
-
-          const val = row[header];
-          if (val === undefined) continue;
-
-          const strVal = String(val).trim();
-
-          if (colName === 'net_price_1') {
-            const num = Number(strVal.replace(',', '.'));
-            if (!isNaN(num)) netPrice1Val = num;
-          } else if (colName === 'gross_price_1') {
-            const num = Number(strVal.replace(',', '.'));
-            if (!isNaN(num)) grossPrice1Val = num;
-          }
-
+        for (const [colName, val] of Object.entries(dataObj)) {
+          if (colName === 'code') continue;
           updateFields.push(`"${colName}" = ?`);
-          updateValues.push(strVal);
-        }
-
-        // Keep `price` in sync if price fields provided
-        if (netPrice1Val !== null || grossPrice1Val !== null) {
-          const syncPrice = netPrice1Val ?? grossPrice1Val ?? 0;
-          updateFields.push(`"price" = ?`);
-          updateValues.push(syncPrice);
+          updateValues.push(val);
         }
 
         if (updateFields.length > 0) {
           updateValues.push(productId);
           const updateSql = `UPDATE products SET ${updateFields.join(', ')} WHERE id = ?`;
-          db.prepare(updateSql).run(...updateValues);
+          await queryRun(updateSql, updateValues);
           updatedCount++;
         }
+      } else {
+        // Insert new product
+        const cols = Object.keys(dataObj);
+        const placeholders = cols.map(() => '?').join(', ');
+        const vals = Object.values(dataObj);
+        const insertSql = `INSERT INTO products (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`;
+        try {
+          await queryRun(insertSql, vals);
+          insertedCount++;
+        } catch (insErr: any) {
+          console.warn('[Excel Import] Insert product warning:', insErr.message);
+        }
       }
-    })();
+
+      // Sync to PostgreSQL
+      try {
+        const pgCols = Object.keys(dataObj).filter(c => c !== 'id');
+        const pgSetClauses = pgCols.map((c, idx) => `"${c}" = $${idx + 1}`).join(', ');
+        const pgVals = pgCols.map(c => dataObj[c]);
+        
+        await pool.query(`
+          INSERT INTO products (${pgCols.map(c => `"${c}"`).join(', ')})
+          VALUES (${pgCols.map((_, i) => `$${i + 1}`).join(', ')})
+          ON CONFLICT (code) DO UPDATE SET
+            ${pgSetClauses}
+        `, pgVals).catch(() => {});
+      } catch (pgErr) {}
+    }
 
     // Cleanup uploaded file
     try { fs.unlinkSync(req.file.path); } catch (e) {}
 
     return res.json({
       success: true,
+      imported: insertedCount,
       updated: updatedCount,
       ignored: ignoredCount,
       total: rows.length,
@@ -6831,13 +7334,13 @@ app.post('/api/easyfatt/import-products-xlsx', authMiddleware, upload.single('fi
     });
 
   } catch (err: any) {
-    console.error('Error in /api/easyfatt/import-products-xlsx:', err);
+    console.error('Error in handleExcelProductsImportLogic:', err);
     if (req.file && req.file.path) {
       try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
     return res.status(500).json({ error: err.message || 'Errore durante l\'importazione del file Excel' });
   }
-});
+}
 
 app.use('/uploads', express.static(uploadDir, {
   maxAge: '7d',
@@ -6917,7 +7420,7 @@ async function startServer() {
       index: false,
     }));
     // 3. Fallback SPA per rotte React/Vite
-    app.get('*', (req, res) => {
+    app.get('*', async (req, res) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/easyfatt') || req.path.startsWith('/uploadarticoli') || req.path.startsWith('/downloadordini') || req.path.startsWith('/health')) {
         return res.status(404).json({ error: 'Endpoint non trovato' });
       }
@@ -6957,14 +7460,14 @@ async function startServer() {
 
       // Migrate old email domains to new branding if needed
       try {
-        const usersToMigrate = db.prepare("SELECT id, email FROM users WHERE email LIKE '%@masterbeautyitalia.com' OR email LIKE '%@masterbeauty.com'").all() as { id: number, email: string }[];
+        const usersToMigrate = await queryAll("SELECT id, email FROM users WHERE email LIKE '%@masterbeautyitalia.com' OR email LIKE '%@masterbeauty.com'") as { id: number, email: string }[];
         for (const u of usersToMigrate) {
           const newEmail = u.email.toLowerCase()
             .replace('@masterbeautyitalia.com', '@connectitalia.com')
             .replace('@masterbeauty.com', '@connect.com');
-          const exists = db.prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)").get(newEmail);
+          const exists = await queryGet("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [newEmail]);
           if (!exists) {
-            db.prepare("UPDATE users SET email = ? WHERE id = ?").run(newEmail, u.id);
+            await queryRun("UPDATE users SET email = ? WHERE id = ?", [newEmail, u.id]);
           }
         }
       } catch (migErr) {
