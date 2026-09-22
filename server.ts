@@ -7442,7 +7442,13 @@ async function startServer() {
     }));
     // 3. Fallback SPA per rotte React/Vite
     app.get('*', async (req, res) => {
-      if (req.path.startsWith('/api') || req.path.startsWith('/easyfatt') || req.path.startsWith('/uploadarticoli') || req.path.startsWith('/downloadordini') || req.path.startsWith('/health')) {
+      if (
+        req.path.startsWith('/api/') || 
+        req.path === '/api' || 
+        req.path.endsWith('.php') || 
+        req.path.endsWith('.xml') || 
+        req.path.startsWith('/health')
+      ) {
         return res.status(404).json({ error: 'Endpoint non trovato' });
       }
       const indexPath = path.join(distPath, 'index.html');
