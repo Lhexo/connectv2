@@ -418,52 +418,28 @@ export async function buildEasyfattOrdersXml(ordersList: any[], appver: string =
     xml += `      <PricesIncludeVat>${pricesIncludeVat}</PricesIncludeVat>\n`;
 
     xml += `      <Rows>\n`;
-    for (const item of (o.items || [])) {
-      const vatCode = item.vat_code || (settings && settings.default_vat) || '22';
-      const vatPerc = parseFloat(String(vatCode).replace(/[^0-9.]/g, '')) || 22;
-      const rawQty = Number(item.qty || 1);
-      const rawPrice = Number(item.price || 0);
-
-      // Estrazione e formattazione rigorosa dello sconto di riga
+    for (const r of o.items || []) {
+      // Parsing robusto dello sconto
       let discountStr = '';
-      if (item.discounts && String(item.discounts).trim()) {
-        discountStr = String(item.discounts).trim();
-      } else if (item.discount !== undefined && item.discount !== null && String(item.discount).trim() !== '' && Number(item.discount) !== 0) {
-        const numDisc = Number(item.discount);
-        if (!isNaN(numDisc) && numDisc !== 0) {
-          discountStr = `${numDisc}%`;
-        } else {
-          discountStr = String(item.discount).trim();
-        }
-      } else if (item.discount_perc !== undefined && item.discount_perc !== null && Number(item.discount_perc) > 0) {
-        discountStr = `${Number(item.discount_perc)}%`;
-      } else if (item.discount_percent !== undefined && item.discount_percent !== null && Number(item.discount_percent) > 0) {
-        discountStr = `${Number(item.discount_percent)}%`;
-      }
-
-      let rowTotal = Number(item.total);
-      if (isNaN(rowTotal) || rowTotal === 0) {
-        const matchSinglePerc = discountStr.match(/^(\d+(?:\.\d+)?)%?$/);
-        if (matchSinglePerc) {
-          const perc = parseFloat(matchSinglePerc[1]);
-          rowTotal = rawQty * rawPrice * (1 - perc / 100);
-        } else {
-          rowTotal = rawQty * rawPrice;
+      const discountVal = r.discount_perc || r.discount || r.discounts;
+      
+      if (discountVal) {
+        discountStr = String(discountVal).trim();
+        // Se è un numero semplice, aggiungi il % per conformità Danea
+        if (!discountStr.endsWith('%')) {
+          discountStr += '%';
         }
       }
 
-      xml += `        <Row>\n`;
-      xml += `          <Code>${escapeXml(item.product_code)}</Code>\n`;
-      xml += `          <Description>${escapeXml(item.description)}</Description>\n`;
-      xml += `          <Qty>${rawQty}</Qty>\n`;
-      xml += `          <Um>${escapeXml(item.um || 'pz')}</Um>\n`;
-      xml += `          <Price>${rawPrice.toFixed(2)}</Price>\n`;
-      if (discountStr) {
-        xml += `          <Discounts>${escapeXml(discountStr)}</Discounts>\n`;
-      }
-      xml += `          <VatCode Perc="${vatPerc}" Class="Imponibile">${escapeXml(vatCode)}</VatCode>\n`;
-      xml += `          <Total>${rowTotal.toFixed(2)}</Total>\n`;
-      xml += `        </Row>\n`;
+      xml += `        <Row>\n` +
+        `          <Code>${escapeXml(r.product_code || '')}</Code>\n` +
+        `          <Description>${escapeXml(r.description || '')}</Description>\n` +
+        `          <Qty>${Number(r.qty || 1)}</Qty>\n` +
+        `          <Price>${Number(r.price || 0).toFixed(2)}</Price>\n` +
+        (discountStr ? `          <Discounts>${escapeXml(discountStr)}</Discounts>\n` : `          <Discounts/>\n`) +
+        `          <VatCode Perc="${r.vat_perc || 22}">${escapeXml(r.vat_code || '22')}</VatCode>\n` +
+        `          <Stock>${r.stock ? 'true' : 'false'}</Stock>\n` +
+        `        </Row>\n`;
     }
     xml += `      </Rows>\n`;
 

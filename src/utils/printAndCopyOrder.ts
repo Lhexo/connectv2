@@ -456,19 +456,18 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData, companyHea
     const rowGross = it.total !== undefined ? it.total : (Number(it.qty || 0) * Number(it.price || 0));
     const vatRate = it.vatRate !== undefined ? it.vatRate : 22;
 
-    const discBadge = it.discounts 
-      ? `<div style="font-size: 10px; color: #b91c1c; font-weight: 600; margin-top: 2px;">Sconto applicato: ${it.discounts}</div>` 
-      : (it.discountPerc ? `<div style="font-size: 10px; color: #b91c1c; font-weight: 600; margin-top: 2px;">Sconto applicato: ${it.discountPerc}%</div>` : '');
+    const discountDisplay = it.discounts || (it.discountPerc ? `${it.discountPerc}%` : '-');
+    const hasDiscount = it.discounts || (it.discountPerc && Number(it.discountPerc) > 0);
 
     return `
       <tr style="border-bottom: 1px solid #e2e8f0; ${idx % 2 === 1 ? 'background-color: #f8fafc;' : ''}">
         <td style="padding: 9px 8px; font-family: monospace; font-size: 11px; color: #475569;">${it.code || '-'}</td>
         <td style="padding: 9px 8px; font-size: 12px; font-weight: 500; color: #0f172a;">
           ${it.description}
-          ${discBadge}
         </td>
         <td style="padding: 9px 8px; text-align: center; font-size: 12px; color: #334155;">${it.qty} ${it.um || 'pz'}</td>
         <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: #334155;">€ ${unitTaxable.toFixed(2)}</td>
+        <td style="padding: 9px 8px; text-align: center; font-size: 11px; ${hasDiscount ? 'font-weight: 700; color: #b91c1c;' : 'color: #64748b;'}">${discountDisplay}</td>
         <td style="padding: 9px 8px; text-align: center; font-size: 11px; color: #64748b;">${vatRate}%</td>
         <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: #334155;">€ ${rowTaxable.toFixed(2)}</td>
         <td style="padding: 9px 8px; text-align: right; font-weight: 700; font-size: 12px; font-family: monospace; color: #0f172a;">€ ${rowGross.toFixed(2)}</td>
@@ -657,17 +656,18 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData, companyHea
         <table>
           <thead>
             <tr>
-              <th style="width: 11%;">Codice</th>
+              <th style="width: 10%;">Codice</th>
               <th>Descrizione Articolo</th>
-              <th style="width: 9%; text-align: center;">Quantità</th>
-              <th style="width: 14%; text-align: right;">Prezzo Imp.</th>
-              <th style="width: 8%; text-align: center;">IVA %</th>
-              <th style="width: 14%; text-align: right;">Tot. Imponibile</th>
-              <th style="width: 15%; text-align: right;">Totale Ivato</th>
+              <th style="width: 8%; text-align: center;">Quantità</th>
+              <th style="width: 12%; text-align: right;">Prezzo Imp.</th>
+              <th style="width: 9%; text-align: center;">Sconto %</th>
+              <th style="width: 7%; text-align: center;">IVA %</th>
+              <th style="width: 13%; text-align: right;">Tot. Imponibile</th>
+              <th style="width: 13%; text-align: right;">Totale Ivato</th>
             </tr>
           </thead>
           <tbody>
-            ${rowsHtml || '<tr><td colspan="7" style="text-align: center; padding: 16px; color: #64748b;">Nessun articolo presente</td></tr>'}
+            ${rowsHtml || '<tr><td colspan="8" style="text-align: center; padding: 16px; color: #64748b;">Nessun articolo presente</td></tr>'}
           </tbody>
         </table>
 

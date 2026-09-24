@@ -7635,17 +7635,30 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                             <th className="py-2 px-3">Articolo</th>
                             <th className="py-2 px-3">Qta</th>
                             <th className="py-2 px-3">Prezzo</th>
+                            <th className="py-2 px-3 text-center">Sconto</th>
+                            <th className="py-2 px-3 text-right">Totale</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {selectedOrder.items?.map(i => (
-                            <tr key={i.id} className="border-t hover:bg-gray-50 text-xs">
-                              <td className="py-2.5 px-3 font-mono font-bold text-gray-700">{i.product_code}</td>
-                              <td className="py-2.5 px-3 font-semibold text-gray-800">{i.description}</td>
-                              <td className="py-2.5 px-3 font-mono font-bold text-gray-600">{i.qty}</td>
-                              <td className="py-2.5 px-3 font-mono font-bold text-emerald-600">€ {i.price.toFixed(2)}</td>
-                            </tr>
-                          ))}
+                          {selectedOrder.items?.map((i: any) => {
+                            const discPerc = i.discount_perc ?? i.discount ?? (i.discounts ? parseFloat(String(i.discounts).replace('%','')) : 0);
+                            const discDisplay = i.discounts || (discPerc ? `${discPerc}%` : '-');
+                            const hasDisc = Boolean(discPerc && Number(discPerc) > 0);
+                            const lineTotal = i.total !== undefined && i.total !== null ? Number(i.total) : (Number(i.qty || 1) * Number(i.price || 0) * (hasDisc ? (1 - Number(discPerc) / 100) : 1));
+
+                            return (
+                              <tr key={i.id} className="border-t hover:bg-gray-50 text-xs">
+                                <td className="py-2.5 px-3 font-mono font-bold text-gray-700">{i.product_code}</td>
+                                <td className="py-2.5 px-3 font-semibold text-gray-800">{i.description}</td>
+                                <td className="py-2.5 px-3 font-mono font-bold text-gray-600">{i.qty} {i.um || ''}</td>
+                                <td className="py-2.5 px-3 font-mono font-bold text-gray-700">€ {Number(i.price || 0).toFixed(2)}</td>
+                                <td className={`py-2.5 px-3 font-mono text-center font-bold ${hasDisc ? 'text-rose-600' : 'text-gray-400'}`}>
+                                  {discDisplay}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono font-bold text-emerald-600 text-right">€ {lineTotal.toFixed(2)}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
