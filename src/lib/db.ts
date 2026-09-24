@@ -1365,6 +1365,16 @@ export async function initDatabase(): Promise<void> {
   try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_synced BOOLEAN DEFAULT false, ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP`); } catch (e) {
     console.error('[PostgreSQL Engine ERROR] orders is_synced alter error:', e);
   }
+  try { 
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_cost NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS cost_amount NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS cost_description TEXT, ADD COLUMN IF NOT EXISTS cost_vat_code TEXT`); 
+  } catch (e) {
+    console.error('[PostgreSQL Engine ERROR] orders shipping columns alter error:', e);
+  }
+  try { 
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS discounts TEXT, ADD COLUMN IF NOT EXISTS discount NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS discount_perc NUMERIC(12,4) DEFAULT 0.0`); 
+  } catch (e) {
+    console.error('[PostgreSQL Engine ERROR] order_items discounts alter error:', e);
+  }
 
   try {
     // Clean and deduplicate products before unique index creation

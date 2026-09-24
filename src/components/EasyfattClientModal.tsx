@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Client, User } from '../types';
+import { apiClient } from '../lib/api';
 
 interface EasyfattClientModalProps {
   isOpen: boolean;
@@ -183,14 +184,11 @@ export const EasyfattClientModal: React.FC<EasyfattClientModalProps> = ({
     try {
       const isEditing = !!initialClient?.id;
       const url = isEditing ? `/api/clients/${initialClient.id}` : '/api/clients';
-      const method = isEditing ? 'PATCH' : 'POST';
 
       const res = await fetch(url, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
+        method: isEditing ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
@@ -199,10 +197,12 @@ export const EasyfattClientModal: React.FC<EasyfattClientModalProps> = ({
         throw new Error(errData.error || 'Errore nel salvataggio dell\'anagrafica cliente');
       }
 
-      const result = await res.json();
+      const result = await res.json().catch(() => ({}));
+      apiClient.invalidate('client');
+
       const savedClientObj: Client = {
         ...payload,
-        id: result.id || initialClient?.id || Date.now(),
+        id: result?.id || initialClient?.id || Date.now(),
         name: payload.name || '',
         contact: payload.contact || '',
         phone: payload.phone || '',
@@ -211,11 +211,16 @@ export const EasyfattClientModal: React.FC<EasyfattClientModalProps> = ({
         notes: payload.notes || ''
       } as Client;
 
-      onSave(savedClientObj);
-      onClose();
+      setIsSubmitting(false);
+      if (onSave) {
+        onSave(savedClientObj);
+      }
+      if (onClose) {
+        onClose();
+      }
     } catch (err: any) {
+      console.error('Errore salvataggio cliente Easyfatt:', err);
       setError(err.message || 'Si è verificato un errore durante il salvataggio.');
-    } finally {
       setIsSubmitting(false);
     }
   };

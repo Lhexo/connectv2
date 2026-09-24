@@ -6146,13 +6146,6 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                   <Eye size={15} />
                                 </button>
                                 <button
-                                  onClick={() => downloadOrderPDF(order)}
-                                  className="p-1.5 hover:bg-rose-50 text-rose-600 rounded-lg transition-colors inline-block cursor-pointer"
-                                  title="Scarica PDF con Intestazione"
-                                >
-                                  <FileText size={15} />
-                                </button>
-                                <button
                                   onClick={() => openPrintWindow(order)}
                                   className="p-1.5 hover:bg-gray-100 text-gray-700 rounded-lg transition-colors inline-block cursor-pointer"
                                   title="Stampa / Salva PDF"
@@ -7672,14 +7665,6 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <div className="text-xl font-black text-[#5A5A40]">€ {selectedOrder.total.toFixed(2)}</div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={() => downloadOrderPDF(selectedOrder)}
-                        className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95"
-                        title="Scarica PDF con Intestazione e Logo Aziendale"
-                      >
-                        <FileText size={14} />
-                        Scarica PDF
-                      </button>
                       <button
                         onClick={() => openPrintWindow(selectedOrder)}
                         className="flex items-center gap-1.5 px-3.5 py-2 bg-gray-800 hover:bg-black text-white rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95"

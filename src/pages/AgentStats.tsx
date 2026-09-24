@@ -770,20 +770,6 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
                             <Printer size={16} />
                           </button>
 
-                          {/* Download PDF */}
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              const ok = await downloadOrderPdf(getPrintableFromOrder(order));
-                              if (ok) showToast('PDF scaricato con successo!');
-                              else showToast('Errore nel download del PDF', 'error');
-                            }}
-                            className="p-1.5 hover:bg-gray-200 text-gray-600 rounded-lg transition-colors cursor-pointer"
-                            title="Scarica PDF"
-                          >
-                            <Download size={16} />
-                          </button>
-
                           {/* Copy order text */}
                           <button
                             type="button"
@@ -900,7 +886,7 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
+                <div className="grid grid-cols-3 gap-2 pt-2">
                   <button
                     type="button"
                     onClick={() => {
@@ -933,19 +919,6 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
                   >
                     <Printer size={14} />
                     <span>Stampa</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const ok = await downloadOrderPdf(getPrintableFromOrder(selectedOrderDetails));
-                      if (ok) showToast('PDF scaricato con successo!');
-                      else showToast('Errore durante il download del PDF', 'error');
-                    }}
-                    className="w-full bg-emerald-50 text-emerald-900 border border-emerald-200 py-2.5 rounded-xl font-bold text-xs hover:bg-emerald-100 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                    title="Scarica PDF A4"
-                  >
-                    <Download size={14} />
-                    <span>Scarica PDF</span>
                   </button>
                 </div>
               </div>

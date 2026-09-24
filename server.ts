@@ -1962,188 +1962,194 @@ app.get('/api/suppliers/:id', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/clients', authMiddleware, async (req: any, res) => {
-  const {
-    code, web_login, name, contact, phone, cell_phone, fax, email, pec,
-    address, postcode, city, province, country,
-    fiscal_code, vat_code, sdi_pec,
-    delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country,
-    price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente
-  } = req.body;
-
-  let assignedAgente = agente || null;
-  if (!assignedAgente && isUserAgent(req.user) && !isUserAdmin(req.user)) {
-    assignedAgente = req.user.name;
-  }
-
-  let newId: number | null = null;
-  // 1. Direct write/upsert to PostgreSQL on Neon.tech
   try {
-    const pgRes = await upsertClientInPostgres({
-      code: code || null,
-      name,
-      web_login: web_login || null,
-      address: address || null,
-      postcode: postcode || null,
-      city: city || null,
-      province: province || null,
-      country: country || 'Italia',
-      fiscal_code: fiscal_code || null,
-      vat_code: vat_code || null,
-      sdi_pec: sdi_pec || null,
-      phone: phone || null,
-      cell_phone: cell_phone || null,
-      fax: fax || null,
-      email: email || null,
-      pec: pec || null,
-      contact: contact || null,
-      agente: assignedAgente,
-      delivery_name: delivery_name || null,
-      delivery_address: delivery_address || null,
-      delivery_postcode: delivery_postcode || null,
-      delivery_city: delivery_city || null,
-      delivery_province: delivery_province || null,
-      delivery_country: delivery_country || null,
-      price_list: price_list || null,
-      payment_name: payment_name || null,
-      payment_bank: payment_bank || null,
-      custom_field1: custom_field1 || null,
-      custom_field2: custom_field2 || null,
-      custom_field3: custom_field3 || null,
-      custom_field4: custom_field4 || null,
-      notes: notes || null
-    });
-    if (pgRes && pgRes.id && Number(pgRes.id) > 0) {
-      newId = Number(pgRes.id);
+    const {
+      code, web_login, name, contact, phone, cell_phone, fax, email, pec,
+      address, postcode, city, province, country,
+      fiscal_code, vat_code, sdi_pec,
+      delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country,
+      price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente
+    } = req.body;
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'La Ragione Sociale / Nome cliente è un campo obbligatorio.' });
     }
+
+    let assignedAgente = agente || null;
+    if (!assignedAgente && isUserAgent(req.user) && !isUserAdmin(req.user)) {
+      assignedAgente = req.user.name;
+    }
+
+    const clientPayload = {
+      code: code ? String(code).trim() : null,
+      name: String(name).trim(),
+      web_login: web_login ? String(web_login).trim() : null,
+      address: address ? String(address).trim() : null,
+      postcode: postcode ? String(postcode).trim() : null,
+      city: city ? String(city).trim() : null,
+      province: province ? String(province).trim() : null,
+      country: country ? String(country).trim() : 'Italia',
+      fiscal_code: fiscal_code ? String(fiscal_code).trim() : null,
+      vat_code: vat_code ? String(vat_code).trim() : null,
+      sdi_pec: sdi_pec ? String(sdi_pec).trim() : null,
+      phone: phone ? String(phone).trim() : null,
+      cell_phone: cell_phone ? String(cell_phone).trim() : null,
+      fax: fax ? String(fax).trim() : null,
+      email: email ? String(email).trim() : null,
+      pec: pec ? String(pec).trim() : null,
+      contact: contact ? String(contact).trim() : null,
+      agente: assignedAgente,
+      delivery_name: delivery_name ? String(delivery_name).trim() : null,
+      delivery_address: delivery_address ? String(delivery_address).trim() : null,
+      delivery_postcode: delivery_postcode ? String(delivery_postcode).trim() : null,
+      delivery_city: delivery_city ? String(delivery_city).trim() : null,
+      delivery_province: delivery_province ? String(delivery_province).trim() : null,
+      delivery_country: delivery_country ? String(delivery_country).trim() : null,
+      price_list: price_list ? String(price_list).trim() : null,
+      payment_name: payment_name ? String(payment_name).trim() : null,
+      payment_bank: payment_bank ? String(payment_bank).trim() : null,
+      custom_field1: custom_field1 ? String(custom_field1).trim() : null,
+      custom_field2: custom_field2 ? String(custom_field2).trim() : null,
+      custom_field3: custom_field3 ? String(custom_field3).trim() : null,
+      custom_field4: custom_field4 ? String(custom_field4).trim() : null,
+      notes: notes ? String(notes).trim() : null
+    };
+
+    let newId: number | null = null;
+    try {
+      const pgRes = await upsertClientInPostgres(clientPayload);
+      if (pgRes && pgRes.id && Number(pgRes.id) > 0) {
+        newId = Number(pgRes.id);
+      }
+    } catch (err: any) {
+      console.warn('[PostgreSQL Upsert Client Error]:', err?.message || err);
+    }
+
+    if (!newId) {
+      const fallbackInsert = await queryRun(`
+        INSERT INTO clients (
+          code, web_login, name, contact, phone, cell_phone, fax, email, pec,
+          address, postcode, city, province, country,
+          fiscal_code, vat_code, sdi_pec,
+          delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country,
+          price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?,
+          ?, ?, ?,
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+      `, [
+        clientPayload.code, clientPayload.web_login, clientPayload.name, clientPayload.contact, clientPayload.phone, clientPayload.cell_phone, clientPayload.fax, clientPayload.email, clientPayload.pec,
+        clientPayload.address, clientPayload.postcode, clientPayload.city, clientPayload.province, clientPayload.country,
+        clientPayload.fiscal_code, clientPayload.vat_code, clientPayload.sdi_pec,
+        clientPayload.delivery_name, clientPayload.delivery_address, clientPayload.delivery_postcode, clientPayload.delivery_city, clientPayload.delivery_province, clientPayload.delivery_country,
+        clientPayload.price_list, clientPayload.payment_name, clientPayload.payment_bank, clientPayload.custom_field1, clientPayload.custom_field2, clientPayload.custom_field3, clientPayload.custom_field4, clientPayload.notes, assignedAgente
+      ]);
+      newId = Number(fallbackInsert.lastInsertRowid);
+    }
+
+    let created: any = null;
+    if (newId && Number(newId) > 0) {
+      try {
+        created = await queryGet('SELECT * FROM clients WHERE id = ?', [newId]);
+      } catch (getErr) {
+        console.warn('[Get Created Client Error]:', getErr);
+      }
+    }
+
+    return res.status(201).json(created || { id: newId, ...clientPayload });
   } catch (err: any) {
-    console.warn('[Neon DB] Postgres insert client notice (synced to local):', err?.message || err);
+    console.error('[API ERROR] POST /api/clients failed:', err);
+    return res.status(500).json({ error: err?.message || 'Errore durante la creazione del cliente' });
   }
-
-  // 2. Also keep SQLite in sync with the exact same ID
-  if (newId) {
-    await queryRun(`
-      INSERT OR REPLACE INTO clients (
-        id, code, web_login, name, contact, phone, cell_phone, fax, email, pec,
-        address, postcode, city, province, country,
-        fiscal_code, vat_code, sdi_pec,
-        delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country,
-        price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?
-      )
-    `, [newId,
-      code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
-      address || null, postcode || null, city || null, province || null, country || 'Italia',
-      fiscal_code || null, vat_code || null, sdi_pec || null,
-      delivery_name || null, delivery_address || null, delivery_postcode || null, delivery_city || null, delivery_province || null, delivery_country || null,
-      price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente]);
-  } else {
-    const result = await queryRun(`
-      INSERT INTO clients (
-        code, web_login, name, contact, phone, cell_phone, fax, email, pec,
-        address, postcode, city, province, country,
-        fiscal_code, vat_code, sdi_pec,
-        delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country,
-        price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?
-      )
-    `, [code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
-      address || null, postcode || null, city || null, province || null, country || 'Italia',
-      fiscal_code || null, vat_code || null, sdi_pec || null,
-      delivery_name || null, delivery_address || null, delivery_postcode || null, delivery_city || null, delivery_province || null, delivery_country || null,
-      price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente]);
-    newId = Number(result.lastInsertRowid);
-  }
-
-  const created = await queryGet('SELECT * FROM clients WHERE id = ?', [newId]);
-  res.json(created || { id: newId });
 });
 
 app.patch('/api/clients/:id', authMiddleware, async (req: any, res) => {
-  await ensureClientInPostgres(req.params.id);
-  const {
-    code, web_login, name, contact, phone, cell_phone, fax, email, pec,
-    address, postcode, city, province, country,
-    fiscal_code, vat_code, sdi_pec,
-    delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country,
-    price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente
-  } = req.body;
-
-  let assignedAgente = agente;
-  if (assignedAgente === undefined && isUserAgent(req.user) && !isUserAdmin(req.user)) {
-    // Keep existing agente if present, else default
-  }
-
-  // 1. Direct update to PostgreSQL on Neon.tech
   try {
-    const existing = await queryGet('SELECT * FROM clients WHERE id = ?', [req.params.id]) as any;
-    if (existing) {
-      await upsertClientInPostgres({
-        code: code !== undefined ? (code || null) : existing.code,
-        name: name !== undefined ? name : existing.name,
-        web_login: web_login !== undefined ? (web_login || null) : existing.web_login,
-        address: address !== undefined ? (address || null) : existing.address,
-        postcode: postcode !== undefined ? (postcode || null) : existing.postcode,
-        city: city !== undefined ? (city || null) : existing.city,
-        province: province !== undefined ? (province || null) : existing.province,
-        country: country !== undefined ? (country || 'Italia') : existing.country,
-        fiscal_code: fiscal_code !== undefined ? (fiscal_code || null) : existing.fiscal_code,
-        vat_code: vat_code !== undefined ? (vat_code || null) : existing.vat_code,
-        sdi_pec: sdi_pec !== undefined ? (sdi_pec || null) : existing.sdi_pec,
-        phone: phone !== undefined ? (phone || null) : existing.phone,
-        cell_phone: cell_phone !== undefined ? (cell_phone || null) : existing.cell_phone,
-        fax: fax !== undefined ? (fax || null) : existing.fax,
-        email: email !== undefined ? (email || null) : existing.email,
-        pec: pec !== undefined ? (pec || null) : existing.pec,
-        contact: contact !== undefined ? (contact || null) : existing.contact,
-        agente: assignedAgente !== undefined ? assignedAgente : existing.agente,
-        delivery_name: delivery_name !== undefined ? (delivery_name || null) : existing.delivery_name,
-        delivery_address: delivery_address !== undefined ? (delivery_address || null) : existing.delivery_address,
-        delivery_postcode: delivery_postcode !== undefined ? (delivery_postcode || null) : existing.delivery_postcode,
-        delivery_city: delivery_city !== undefined ? (delivery_city || null) : existing.delivery_city,
-        delivery_province: delivery_province !== undefined ? (delivery_province || null) : existing.delivery_province,
-        delivery_country: delivery_country !== undefined ? (delivery_country || null) : existing.delivery_country,
-        price_list: price_list !== undefined ? (price_list || null) : existing.price_list,
-        payment_name: payment_name !== undefined ? (payment_name || null) : existing.payment_name,
-        payment_bank: payment_bank !== undefined ? (payment_bank || null) : existing.payment_bank,
-        custom_field1: custom_field1 !== undefined ? (custom_field1 || null) : existing.custom_field1,
-        custom_field2: custom_field2 !== undefined ? (custom_field2 || null) : existing.custom_field2,
-        custom_field3: custom_field3 !== undefined ? (custom_field3 || null) : existing.custom_field3,
-        custom_field4: custom_field4 !== undefined ? (custom_field4 || null) : existing.custom_field4,
-        notes: notes !== undefined ? (notes || null) : existing.notes
-      });
+    const clientId = Number(req.params.id);
+    if (isNaN(clientId)) {
+      return res.status(400).json({ error: 'ID cliente non valido' });
     }
+
+    await ensureClientInPostgres(clientId).catch(() => {});
+    const {
+      code, web_login, name, contact, phone, cell_phone, fax, email, pec,
+      address, postcode, city, province, country,
+      fiscal_code, vat_code, sdi_pec,
+      delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country,
+      price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente
+    } = req.body;
+
+    const existing = await queryGet('SELECT * FROM clients WHERE id = ?', [clientId]) as any;
+    if (!existing) {
+      return res.status(404).json({ error: 'Cliente non trovato' });
+    }
+
+    let assignedAgente = agente;
+    if (assignedAgente === undefined && isUserAgent(req.user) && !isUserAdmin(req.user)) {
+      assignedAgente = existing.agente;
+    }
+
+    const updatedData = {
+      code: code !== undefined ? (code ? String(code).trim() : null) : existing.code,
+      name: name !== undefined ? String(name).trim() : existing.name,
+      web_login: web_login !== undefined ? (web_login ? String(web_login).trim() : null) : existing.web_login,
+      address: address !== undefined ? (address ? String(address).trim() : null) : existing.address,
+      postcode: postcode !== undefined ? (postcode ? String(postcode).trim() : null) : existing.postcode,
+      city: city !== undefined ? (city ? String(city).trim() : null) : existing.city,
+      province: province !== undefined ? (province ? String(province).trim() : null) : existing.province,
+      country: country !== undefined ? (country ? String(country).trim() : 'Italia') : existing.country,
+      fiscal_code: fiscal_code !== undefined ? (fiscal_code ? String(fiscal_code).trim() : null) : existing.fiscal_code,
+      vat_code: vat_code !== undefined ? (vat_code ? String(vat_code).trim() : null) : existing.vat_code,
+      sdi_pec: sdi_pec !== undefined ? (sdi_pec ? String(sdi_pec).trim() : null) : existing.sdi_pec,
+      phone: phone !== undefined ? (phone ? String(phone).trim() : null) : existing.phone,
+      cell_phone: cell_phone !== undefined ? (cell_phone ? String(cell_phone).trim() : null) : existing.cell_phone,
+      fax: fax !== undefined ? (fax ? String(fax).trim() : null) : existing.fax,
+      email: email !== undefined ? (email ? String(email).trim() : null) : existing.email,
+      pec: pec !== undefined ? (pec ? String(pec).trim() : null) : existing.pec,
+      contact: contact !== undefined ? (contact ? String(contact).trim() : null) : existing.contact,
+      agente: assignedAgente !== undefined ? assignedAgente : existing.agente,
+      delivery_name: delivery_name !== undefined ? (delivery_name ? String(delivery_name).trim() : null) : existing.delivery_name,
+      delivery_address: delivery_address !== undefined ? (delivery_address ? String(delivery_address).trim() : null) : existing.delivery_address,
+      delivery_postcode: delivery_postcode !== undefined ? (delivery_postcode ? String(delivery_postcode).trim() : null) : existing.delivery_postcode,
+      delivery_city: delivery_city !== undefined ? (delivery_city ? String(delivery_city).trim() : null) : existing.delivery_city,
+      delivery_province: delivery_province !== undefined ? (delivery_province ? String(delivery_province).trim() : null) : existing.delivery_province,
+      delivery_country: delivery_country !== undefined ? (delivery_country ? String(delivery_country).trim() : null) : existing.delivery_country,
+      price_list: price_list !== undefined ? (price_list ? String(price_list).trim() : null) : existing.price_list,
+      payment_name: payment_name !== undefined ? (payment_name ? String(payment_name).trim() : null) : existing.payment_name,
+      payment_bank: payment_bank !== undefined ? (payment_bank ? String(payment_bank).trim() : null) : existing.payment_bank,
+      custom_field1: custom_field1 !== undefined ? (custom_field1 ? String(custom_field1).trim() : null) : existing.custom_field1,
+      custom_field2: custom_field2 !== undefined ? (custom_field2 ? String(custom_field2).trim() : null) : existing.custom_field2,
+      custom_field3: custom_field3 !== undefined ? (custom_field3 ? String(custom_field3).trim() : null) : existing.custom_field3,
+      custom_field4: custom_field4 !== undefined ? (custom_field4 ? String(custom_field4).trim() : null) : existing.custom_field4,
+      notes: notes !== undefined ? (notes ? String(notes).trim() : null) : existing.notes
+    };
+
+    await queryRun(`
+      UPDATE clients SET
+        code = ?, web_login = ?, name = ?, contact = ?, phone = ?, cell_phone = ?, fax = ?, email = ?, pec = ?,
+        address = ?, postcode = ?, city = ?, province = ?, country = ?,
+        fiscal_code = ?, vat_code = ?, sdi_pec = ?,
+        delivery_name = ?, delivery_address = ?, delivery_postcode = ?, delivery_city = ?, delivery_province = ?, delivery_country = ?,
+        price_list = ?, payment_name = ?, payment_bank = ?, custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?, notes = ?, agente = COALESCE(?, agente)
+      WHERE id = ?
+    `, [
+      updatedData.code, updatedData.web_login, updatedData.name, updatedData.contact, updatedData.phone, updatedData.cell_phone, updatedData.fax, updatedData.email, updatedData.pec,
+      updatedData.address, updatedData.postcode, updatedData.city, updatedData.province, updatedData.country,
+      updatedData.fiscal_code, updatedData.vat_code, updatedData.sdi_pec,
+      updatedData.delivery_name, updatedData.delivery_address, updatedData.delivery_postcode, updatedData.delivery_city, updatedData.delivery_province, updatedData.delivery_country,
+      updatedData.price_list, updatedData.payment_name, updatedData.payment_bank, updatedData.custom_field1, updatedData.custom_field2, updatedData.custom_field3, updatedData.custom_field4, updatedData.notes, updatedData.agente,
+      clientId
+    ]);
+
+    const updated = await queryGet('SELECT * FROM clients WHERE id = ?', [clientId]);
+    return res.json(updated || { id: clientId, ...updatedData });
   } catch (err: any) {
-    console.warn('[Neon DB] Postgres update client notice (synced to local):', err?.message || err);
+    console.error('[API ERROR] PATCH /api/clients/:id failed:', err);
+    return res.status(500).json({ error: err?.message || 'Errore durante l\'aggiornamento del cliente' });
   }
-
-  // 2. Also update SQLite
-  await queryRun(`
-    UPDATE clients SET
-      code = ?, web_login = ?, name = ?, contact = ?, phone = ?, cell_phone = ?, fax = ?, email = ?, pec = ?,
-      address = ?, postcode = ?, city = ?, province = ?, country = ?,
-      fiscal_code = ?, vat_code = ?, sdi_pec = ?,
-      delivery_name = ?, delivery_address = ?, delivery_postcode = ?, delivery_city = ?, delivery_province = ?, delivery_country = ?,
-      price_list = ?, payment_name = ?, payment_bank = ?, custom_field1 = ?, custom_field2 = ?, custom_field3 = ?, custom_field4 = ?, notes = ?, agente = COALESCE(?, agente)
-    WHERE id = ?
-  `, [code || null, web_login || null, name, contact || null, phone || null, cell_phone || null, fax || null, email || null, pec || null,
-    address || null, postcode || null, city || null, province || null, country || 'Italia',
-    fiscal_code || null, vat_code || null, sdi_pec || null,
-    delivery_name || null, delivery_address || null, delivery_postcode || null, delivery_city || null, delivery_province || null, delivery_country || null,
-    price_list || null, payment_name || null, payment_bank || null, custom_field1 || null, custom_field2 || null, custom_field3 || null, custom_field4 || null, notes || null, assignedAgente || null,
-    req.params.id]);
-
-  const updated = await queryGet('SELECT * FROM clients WHERE id = ?', [req.params.id]);
-  res.json(updated || { success: true });
 });
 
 app.delete('/api/clients/:id', authMiddleware, async (req, res) => {
@@ -4472,13 +4478,24 @@ function parseClientMetadata(notesStr: string | null | undefined) {
 
 async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsExported: boolean = true) {
   const settings = await queryGet('SELECT * FROM easyfatt_settings WHERE id = 1') as any;
+  const companyHeader = await queryGet('SELECT * FROM company_header WHERE id = 1') as any;
   const pricesIncludeVat = settings && settings.prices_include_vat === 1 ? 'true' : 'false';
 
   let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
   xml += `<EasyfattDocuments AppVersion="${appver || '2'}" Version="${appver || '2'}" Creator="Connect" CreatorUrl="https://connect.com">\n`;
   xml += `  <Company>\n`;
-  xml += `    <Name>Connect Beauty Srl</Name>\n`;
-  xml += `    <Country>Italia</Country>\n`;
+  xml += `    <Name>${escapeXml(companyHeader?.company_name || 'Connect Beauty Srl')}</Name>\n`;
+  if (companyHeader?.company_address) xml += `    <Address>${escapeXml(companyHeader.company_address)}</Address>\n`;
+  if (companyHeader?.company_postcode) xml += `    <Postcode>${escapeXml(companyHeader.company_postcode)}</Postcode>\n`;
+  if (companyHeader?.company_city) xml += `    <City>${escapeXml(companyHeader.company_city)}</City>\n`;
+  if (companyHeader?.company_province) xml += `    <Province>${escapeXml(companyHeader.company_province)}</Province>\n`;
+  xml += `    <Country>${escapeXml(companyHeader?.company_country || 'Italia')}</Country>\n`;
+  if (companyHeader?.company_fiscal_code) xml += `    <FiscalCode>${escapeXml(companyHeader.company_fiscal_code)}</FiscalCode>\n`;
+  if (companyHeader?.company_vat_code) xml += `    <VatCode>${escapeXml(companyHeader.company_vat_code)}</VatCode>\n`;
+  if (companyHeader?.company_tel) xml += `    <Tel>${escapeXml(companyHeader.company_tel)}</Tel>\n`;
+  if (companyHeader?.company_fax) xml += `    <Fax>${escapeXml(companyHeader.company_fax)}</Fax>\n`;
+  if (companyHeader?.company_email) xml += `    <Email>${escapeXml(companyHeader.company_email)}</Email>\n`;
+  if (companyHeader?.company_website) xml += `    <HomePage>${escapeXml(companyHeader.company_website)}</HomePage>\n`;
   xml += `  </Company>\n`;
   xml += `  <Documents>\n`;
 
@@ -4518,9 +4535,13 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
       deliveryName = `${deliveryName} c/o ${o.client_name}`;
     }
 
+    // Allineamento dati Bancari e Metodo di Pagamento
+    const paymentName = String(o.payment_name || o.client_payment_name || (settings && settings.default_payment) || 'Bonifico bancario').trim();
+    const paymentBank = String(o.payment_bank || o.client_payment_bank || meta['Banca'] || meta['IBAN'] || meta['Appoggio bancario'] || '').trim();
+
     xml += `    <Document>\n`;
     xml += `      <DocumentType>C</DocumentType>\n`; 
-    xml += `      <CustomerCode>${customerCode}</CustomerCode>\n`;
+    xml += `      <CustomerCode>${escapeXml(customerCode)}</CustomerCode>\n`;
     xml += `      <CustomerName>${escapeXml(o.client_name)}</CustomerName>\n`;
     if (webLogin) xml += `      <CustomerWebLogin>${escapeXml(webLogin)}</CustomerWebLogin>\n`;
     if (address) xml += `      <CustomerAddress>${escapeXml(address)}</CustomerAddress>\n`;
@@ -4542,7 +4563,7 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
     if (o.client_delivery_city) xml += `      <DeliveryCity>${escapeXml(o.client_delivery_city)}</DeliveryCity>\n`;
     if (formattedDelivProvince) xml += `      <DeliveryProvince>${escapeXml(formattedDelivProvince)}</DeliveryProvince>\n`;
     if (o.client_delivery_country) xml += `      <DeliveryCountry>${escapeXml(o.client_delivery_country)}</DeliveryCountry>\n`;
-    xml += `      <Date>${o.date}</Date>\n`;
+    xml += `      <Date>${escapeXml(o.date)}</Date>\n`;
     const rawNumberStr = String(o.number || o.id || '').trim();
     const numMatch = rawNumberStr.match(/^(\d+)/);
     const numericDocNumber = numMatch ? parseInt(numMatch[1], 10) : (parseInt(String(o.id).replace(/[^0-9]/g, ''), 10) || 1);
@@ -4569,8 +4590,8 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
     }
 
     xml += `      <Total>${Number(o.total || 0).toFixed(2)}</Total>\n`;
-    xml += `      <PaymentName>${escapeXml(o.payment_name)}</PaymentName>\n`;
-    xml += `      <PaymentBank>${escapeXml(o.payment_bank || '')}</PaymentBank>\n`;
+    xml += `      <PaymentName>${escapeXml(paymentName)}</PaymentName>\n`;
+    xml += `      <PaymentBank>${escapeXml(paymentBank)}</PaymentBank>\n`;
     xml += `      <InternalComment>${escapeXml(o.notes || '')}</InternalComment>\n`;
     xml += `      <SalesAgent>${escapeXml(o.agent_name || '')}</SalesAgent>\n`;
     xml += `      <PricesIncludeVat>${pricesIncludeVat}</PricesIncludeVat>\n`;
@@ -4579,14 +4600,48 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
     for (const item of (o.items || [])) {
       const vatCode = item.vat_code || (settings && settings.default_vat) || '22';
       const vatPerc = parseFloat(String(vatCode).replace(/[^0-9.]/g, '')) || 22;
+      const rawQty = Number(item.qty || 1);
+      const rawPrice = Number(item.price || 0);
+
+      // Estrazione e formattazione rigorosa dello sconto di riga
+      let discountStr = '';
+      if (item.discounts && String(item.discounts).trim()) {
+        discountStr = String(item.discounts).trim();
+      } else if (item.discount !== undefined && item.discount !== null && String(item.discount).trim() !== '' && Number(item.discount) !== 0) {
+        const numDisc = Number(item.discount);
+        if (!isNaN(numDisc) && numDisc !== 0) {
+          discountStr = `${numDisc}%`;
+        } else {
+          discountStr = String(item.discount).trim();
+        }
+      } else if (item.discount_perc !== undefined && item.discount_perc !== null && Number(item.discount_perc) > 0) {
+        discountStr = `${Number(item.discount_perc)}%`;
+      } else if (item.discount_percent !== undefined && item.discount_percent !== null && Number(item.discount_percent) > 0) {
+        discountStr = `${Number(item.discount_percent)}%`;
+      }
+
+      let rowTotal = Number(item.total);
+      if (isNaN(rowTotal) || rowTotal === 0) {
+        const matchSinglePerc = discountStr.match(/^(\d+(?:\.\d+)?)%?$/);
+        if (matchSinglePerc) {
+          const perc = parseFloat(matchSinglePerc[1]);
+          rowTotal = rawQty * rawPrice * (1 - perc / 100);
+        } else {
+          rowTotal = rawQty * rawPrice;
+        }
+      }
+
       xml += `        <Row>\n`;
       xml += `          <Code>${escapeXml(item.product_code)}</Code>\n`;
       xml += `          <Description>${escapeXml(item.description)}</Description>\n`;
-      xml += `          <Qty>${item.qty}</Qty>\n`;
+      xml += `          <Qty>${rawQty}</Qty>\n`;
       xml += `          <Um>${escapeXml(item.um || 'pz')}</Um>\n`;
-      xml += `          <Price>${Number(item.price || 0).toFixed(2)}</Price>\n`;
+      xml += `          <Price>${rawPrice.toFixed(2)}</Price>\n`;
+      if (discountStr) {
+        xml += `          <Discounts>${escapeXml(discountStr)}</Discounts>\n`;
+      }
       xml += `          <VatCode Perc="${vatPerc}" Class="Imponibile">${escapeXml(vatCode)}</VatCode>\n`;
-      xml += `          <Total>${(Number(item.qty || 0) * Number(item.price || 0)).toFixed(2)}</Total>\n`;
+      xml += `          <Total>${rowTotal.toFixed(2)}</Total>\n`;
       xml += `        </Row>\n`;
     }
     xml += `      </Rows>\n`;
@@ -4661,7 +4716,8 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
   xml += `  </Documents>\n`;
   xml += `</EasyfattDocuments>\n`;
 
-  return xml.trim();
+  // Tassativo .trimStart() per assicurare inizio a Byte 0 con <?xml
+  return xml.trimStart();
 }
 
 // 10. Export Selected Orders to Easyfatt-XML
@@ -4672,6 +4728,14 @@ app.get('/api/easyfatt/export-orders', authMiddleware, async (req: any, res: any
       SELECT o.*, 
              c.code as client_code, c.name as client_name, c.email as client_email, c.phone as client_phone, 
              c.city as client_city, c.contact as client_contact, c.notes as client_notes,
+             c.payment_name as client_payment_name, c.payment_bank as client_payment_bank,
+             c.address as client_address, c.postcode as client_postcode, c.province as client_province,
+             c.country as client_country, c.fiscal_code as client_fiscal_code, c.vat_code as client_vat_code,
+             c.sdi_pec as client_sdi_pec, c.cell_phone as client_cell_phone, c.pec as client_pec,
+             c.web_login as client_web_login,
+             c.delivery_name as client_delivery_name, c.delivery_address as client_delivery_address,
+             c.delivery_postcode as client_delivery_postcode, c.delivery_city as client_delivery_city,
+             c.delivery_province as client_delivery_province, c.delivery_country as client_delivery_country,
              u.name as agent_name
       FROM orders o
       JOIN clients c ON o.client_id = c.id
@@ -4711,9 +4775,9 @@ app.get('/api/easyfatt/export-orders', authMiddleware, async (req: any, res: any
 
     const xml = await buildEasyfattOrdersXml(ordersList, '2', true);
 
-    res.header('Content-Type', 'text/xml');
+    res.header('Content-Type', 'text/xml; charset=utf-8');
     res.header('Content-Disposition', `attachment; filename="ordini_clienti_easyfatt_${new Date().toISOString().split('T')[0]}.xml"`);
-    res.send(xml);
+    res.send(xml.trimStart());
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -4759,6 +4823,14 @@ async function handleEasyfattOrderDownload(req: any, res: any) {
       SELECT o.*, 
              c.code as client_code, c.name as client_name, c.email as client_email, c.phone as client_phone, 
              c.city as client_city, c.contact as client_contact, c.notes as client_notes,
+             c.payment_name as client_payment_name, c.payment_bank as client_payment_bank,
+             c.address as client_address, c.postcode as client_postcode, c.province as client_province,
+             c.country as client_country, c.fiscal_code as client_fiscal_code, c.vat_code as client_vat_code,
+             c.sdi_pec as client_sdi_pec, c.cell_phone as client_cell_phone, c.pec as client_pec,
+             c.web_login as client_web_login,
+             c.delivery_name as client_delivery_name, c.delivery_address as client_delivery_address,
+             c.delivery_postcode as client_delivery_postcode, c.delivery_city as client_delivery_city,
+             c.delivery_province as client_delivery_province, c.delivery_country as client_delivery_country,
              u.name as agent_name
       FROM orders o
       JOIN clients c ON o.client_id = c.id
@@ -4846,14 +4918,14 @@ async function handleEasyfattOrderDownload(req: any, res: any) {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
-    return res.status(200).send(xml);
+    return res.status(200).send(xml.trimStart());
   } catch (err: any) {
     console.error('[Easyfatt Download Orders Error]', err);
-    // Safe XML fallback to prevent Delphi XML parser EParserException
+    // Safe XML fallback starting strictly at byte 0 to prevent Delphi XML parser EParserException
     const safeEmptyXml = `<?xml version="1.0" encoding="UTF-8"?>\n<EasyfattDocuments AppVersion="${appver || '2'}" Creator="Connect" CreatorUrl="https://connect.com">\n  <Company>\n    <Name>Connect Beauty Srl</Name>\n    <Country>Italia</Country>\n  </Company>\n  <Documents>\n  </Documents>\n</EasyfattDocuments>\n`;
     res.setHeader('Content-Type', 'text/xml; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    return res.status(200).send(safeEmptyXml);
+    return res.status(200).send(safeEmptyXml.trimStart());
   }
 }
 

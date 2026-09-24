@@ -254,6 +254,8 @@ export interface OrderItem {
   price: number;
   vat_code: string;
   um: string;
+  discount_perc?: number | null;
+  discounts?: string | null;
 }
 
 export interface Order {
