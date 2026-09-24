@@ -58,7 +58,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import GirovisiteSection from '../components/GirovisiteSection';
 import ClientSalesHistory from '../components/ClientSalesHistory';
-import { printOrderDocument, copyOrderToClipboard } from '../utils/printAndCopyOrder';
+import { printOrderDocument, copyOrderToClipboard, setCachedCompanyHeader } from '../utils/printAndCopyOrder';
 import EditableAmountInput from '../components/EditableAmountInput';
 import { useTablePagination } from '../hooks/useTablePagination';
 import { DataTablePagination } from '../components/DataTablePagination';
@@ -1147,10 +1147,18 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const fetchCompanyHeader = async () => {
     try {
-      const res = await fetch('/api/easyfatt/company-header');
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      const res = await fetch('/api/easyfatt/company-header', {
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        }
+      });
       if (res.ok) {
         const data = await res.json();
-        if (data) setCompanyHeader(prev => ({ ...prev, ...data }));
+        if (data && (data.company_name || data.company_vat_code)) {
+          setCompanyHeader(prev => ({ ...prev, ...data }));
+          setCachedCompanyHeader(data);
+        }
       }
     } catch (err) {
       console.error('Error fetching company header:', err);
@@ -1161,15 +1169,26 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     e.preventDefault();
     setSavingCompanyHeader(true);
     try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
       const res = await fetch('/api/easyfatt/company-header', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
         body: JSON.stringify(companyHeader)
       });
       if (res.ok) {
+        const data = await res.json();
+        if (data?.data) {
+          setCompanyHeader(prev => ({ ...prev, ...data.data }));
+          setCachedCompanyHeader(data.data);
+        } else {
+          setCachedCompanyHeader(companyHeader);
+        }
         showStatus('Intestazione aziendale e logo salvati con successo!', 'success');
       } else {
-        const errData = await res.json();
+        const errData = await res.json().catch(() => ({}));
         showStatus('Errore durante il salvataggio: ' + (errData.error || 'Errore generico'), 'error');
       }
     } catch (err: any) {
@@ -3013,11 +3032,10 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                         {/* Unit Price */}
                                         <div className="text-right min-w-[90px]">
                                           <div className="font-mono text-xs font-black text-[#5A5A40]">
-                                            € {calculateTaxable(p.price, p.vat_code || 22).toFixed(2)}{' '}
-                                            <span className="text-[9px] font-sans font-normal text-gray-500">+ IVA</span>
+                                            € {p.price.toFixed(2)}
                                           </div>
                                           <div className="text-[10px] text-gray-400 font-medium">
-                                            (€ {p.price.toFixed(2)} inc.)
+                                            Imponibile
                                           </div>
                                         </div>
                                       </div>
@@ -3304,25 +3322,15 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                         </button>
                                       </div>
 
-                                      {/* Dynamic Imponibile & Ivato breakdown */}
-                                      <div className="grid grid-cols-2 gap-2 bg-amber-50/70 p-2 rounded-lg border border-amber-200/70 text-[11px]">
-                                        <div>
-                                          <span className="text-[9px] text-gray-500 font-medium block">Prezzo Unit. Imponibile</span>
-                                          <div className="font-mono font-bold text-gray-900">
-                                            € {line.unitTaxable.toFixed(2)}
-                                          </div>
-                                          <span className="text-[9px] text-gray-400 font-normal">
-                                            (Ivato: € {item.price.toFixed(2)})
-                                          </span>
+                                      {/* Dynamic Imponibile breakdown */}
+                                      <div className="bg-gray-50/90 p-2 rounded-lg border border-gray-200/70 text-[11px] space-y-1">
+                                        <div className="flex justify-between items-center text-gray-600">
+                                          <span>Prezzo Unit. Imponibile:</span>
+                                          <span className="font-mono font-bold text-gray-900">€ {line.unitTaxable.toFixed(2)}</span>
                                         </div>
-                                        <div className="text-right">
-                                          <span className="text-[9px] text-gray-500 font-medium block">Totale Riga</span>
-                                          <div className="font-mono font-bold text-gray-900">
-                                            Imp. € {line.totalTaxable.toFixed(2)}
-                                          </div>
-                                          <div className="font-mono font-black text-[#5A5A40] text-xs">
-                                            Ivato: € {line.totalGross.toFixed(2)}
-                                          </div>
+                                        <div className="flex justify-between items-center text-gray-600">
+                                          <span>Totale Riga Imponibile:</span>
+                                          <span className="font-mono font-bold text-gray-900">€ {line.totalTaxable.toFixed(2)}</span>
                                         </div>
                                       </div>
 
@@ -3361,7 +3369,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                         {/* Interactive Price & Line Total Inputs */}
                                         <div className="grid grid-cols-2 gap-1.5 bg-white/80 p-1.5 rounded-lg border border-gray-150">
                                           <div>
-                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Prezzo Ivato Unit.</div>
+                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">PREZZO UNIT. IMPONIBILE</div>
                                             <EditableAmountInput
                                               value={item.price}
                                               onChange={(newPrice) => handleUpdateItemPrice(item.product_code, newPrice, idx)}
@@ -3370,9 +3378,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                             />
                                           </div>
                                           <div>
-                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">Tot. Ivato Riga</div>
+                                            <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-0.5">TOTALE RIGA IMPONIBILE</div>
                                             <EditableAmountInput
-                                              value={Math.round(line.totalGross * 100) / 100}
+                                              value={Math.round(line.totalTaxable * 100) / 100}
                                               onChange={(newTotal) => handleUpdateItemTotal(item.product_code, newTotal, idx)}
                                               prefix="€"
                                               placeholder="0.00"
@@ -6138,13 +6146,6 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                   <Eye size={15} />
                                 </button>
                                 <button
-                                  onClick={() => downloadOrderPDF(order)}
-                                  className="p-1.5 hover:bg-rose-50 text-rose-600 rounded-lg transition-colors inline-block cursor-pointer"
-                                  title="Scarica PDF con Intestazione"
-                                >
-                                  <FileText size={15} />
-                                </button>
-                                <button
                                   onClick={() => openPrintWindow(order)}
                                   className="p-1.5 hover:bg-gray-100 text-gray-700 rounded-lg transition-colors inline-block cursor-pointer"
                                   title="Stampa / Salva PDF"
@@ -7634,17 +7635,30 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                             <th className="py-2 px-3">Articolo</th>
                             <th className="py-2 px-3">Qta</th>
                             <th className="py-2 px-3">Prezzo</th>
+                            <th className="py-2 px-3 text-center">Sconto</th>
+                            <th className="py-2 px-3 text-right">Totale</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {selectedOrder.items?.map(i => (
-                            <tr key={i.id} className="border-t hover:bg-gray-50 text-xs">
-                              <td className="py-2.5 px-3 font-mono font-bold text-gray-700">{i.product_code}</td>
-                              <td className="py-2.5 px-3 font-semibold text-gray-800">{i.description}</td>
-                              <td className="py-2.5 px-3 font-mono font-bold text-gray-600">{i.qty}</td>
-                              <td className="py-2.5 px-3 font-mono font-bold text-emerald-600">€ {i.price.toFixed(2)}</td>
-                            </tr>
-                          ))}
+                          {selectedOrder.items?.map((i: any) => {
+                            const discPerc = i.discount_perc ?? i.discount ?? (i.discounts ? parseFloat(String(i.discounts).replace('%','')) : 0);
+                            const discDisplay = i.discounts || (discPerc ? `${discPerc}%` : '-');
+                            const hasDisc = Boolean(discPerc && Number(discPerc) > 0);
+                            const lineTotal = i.total !== undefined && i.total !== null ? Number(i.total) : (Number(i.qty || 1) * Number(i.price || 0) * (hasDisc ? (1 - Number(discPerc) / 100) : 1));
+
+                            return (
+                              <tr key={i.id} className="border-t hover:bg-gray-50 text-xs">
+                                <td className="py-2.5 px-3 font-mono font-bold text-gray-700">{i.product_code}</td>
+                                <td className="py-2.5 px-3 font-semibold text-gray-800">{i.description}</td>
+                                <td className="py-2.5 px-3 font-mono font-bold text-gray-600">{i.qty} {i.um || ''}</td>
+                                <td className="py-2.5 px-3 font-mono font-bold text-gray-700">€ {Number(i.price || 0).toFixed(2)}</td>
+                                <td className={`py-2.5 px-3 font-mono text-center font-bold ${hasDisc ? 'text-rose-600' : 'text-gray-400'}`}>
+                                  {discDisplay}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono font-bold text-emerald-600 text-right">€ {lineTotal.toFixed(2)}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -7664,14 +7678,6 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <div className="text-xl font-black text-[#5A5A40]">€ {selectedOrder.total.toFixed(2)}</div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={() => downloadOrderPDF(selectedOrder)}
-                        className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95"
-                        title="Scarica PDF con Intestazione e Logo Aziendale"
-                      >
-                        <FileText size={14} />
-                        Scarica PDF
-                      </button>
                       <button
                         onClick={() => openPrintWindow(selectedOrder)}
                         className="flex items-center gap-1.5 px-3.5 py-2 bg-gray-800 hover:bg-black text-white rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95"
@@ -7805,7 +7811,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
                 {/* Body (Scrollable) */}
                 {clientModalTab === 'storico' ? (
-                  <div className="p-6 overflow-y-auto max-h-[calc(90vh-80px)]">
+                  <div className="p-6 overflow-y-auto overscroll-contain max-h-[calc(90dvh-80px)]">
                     <ClientSalesHistory 
                       clientId={selectedDetailClient.id} 
                       clientName={selectedDetailClient.name} 
@@ -7813,7 +7819,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                     />
                   </div>
                 ) : (
-                  <div className="p-6 overflow-y-auto space-y-6">
+                  <div className="p-6 overflow-y-auto overscroll-contain space-y-6">
                     {/* Banner to Switch to Full History */}
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-gradient-to-r from-[#5A5A40]/10 via-[#5A5A40]/5 to-transparent rounded-2xl border border-[#5A5A40]/15">
                       <div className="flex items-center gap-2.5">
@@ -8781,12 +8787,12 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
       {/* 4. EXPANDED CHECKOUT & CART SHEET */}
       <AnimatePresence>
         {isStickyCartOpen && (
-          <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 overflow-y-auto overscroll-contain">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-white rounded-3xl border border-gray-200 w-full max-w-3xl max-h-[90vh] shadow-2xl flex flex-col overflow-hidden"
+              className="bg-white rounded-3xl border border-gray-200 w-full max-w-3xl max-h-[90dvh] shadow-2xl flex flex-col overflow-hidden"
             >
               {/* Header */}
               <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-gray-50/70 shrink-0">
@@ -8809,7 +8815,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
               </div>
 
               {/* Body */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              <div className="flex-1 overflow-y-auto overscroll-contain p-6 space-y-6">
                 {/* Client Selection Section */}
                 <div className="bg-[#F8F9FA] p-4 rounded-2xl border border-gray-200 space-y-3">
                   <label className="text-xs font-black uppercase text-[#5A5A40] flex items-center gap-1.5">

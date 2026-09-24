@@ -16,7 +16,24 @@ import {
 import { calculateInstallments } from '../services/paymentScheduler';
 
 const router = Router();
-const upload = multer({ dest: path.join(process.cwd(), 'uploads') });
+// Multer setup per salvare i file nella cartella uploads/ alla radice del progetto
+const uploadDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    // Se Danea invia fileName nel body (o se disponibile), preserva il nome file originale
+    const rawFileName = req.body?.fileName || req.body?.filename || req.body?.FileName || file.originalname || 'image.jpg';
+    const safeName = path.basename(String(rawFileName).trim());
+    cb(null, `${Date.now()}-${safeName}`);
+  }
+});
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
 
 // ==============================================================================
 // HELPER: Sanitizzazione e Codifica XML & Customer Mapper
@@ -304,13 +321,24 @@ export async function handleDownloadOrders(req: Request, res: Response) {
 // ==============================================================================
 export async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', markAsExported: boolean = true): Promise<string> {
   const settings = await queryGet('SELECT * FROM easyfatt_settings WHERE id = 1') as any;
+  const companyHeader = await queryGet('SELECT * FROM company_header WHERE id = 1') as any;
   const pricesIncludeVat = settings && settings.prices_include_vat === 1 ? 'true' : 'false';
 
   let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
   xml += `<EasyfattDocuments AppVersion="${appver || '2'}" Version="${appver || '2'}" Creator="Connect" CreatorUrl="https://connect.com">\n`;
   xml += `  <Company>\n`;
-  xml += `    <Name>Connect Beauty Srl</Name>\n`;
-  xml += `    <Country>Italia</Country>\n`;
+  xml += `    <Name>${escapeXml(companyHeader?.company_name || 'Connect Beauty Srl')}</Name>\n`;
+  if (companyHeader?.company_address) xml += `    <Address>${escapeXml(companyHeader.company_address)}</Address>\n`;
+  if (companyHeader?.company_postcode) xml += `    <Postcode>${escapeXml(companyHeader.company_postcode)}</Postcode>\n`;
+  if (companyHeader?.company_city) xml += `    <City>${escapeXml(companyHeader.company_city)}</City>\n`;
+  if (companyHeader?.company_province) xml += `    <Province>${escapeXml(companyHeader.company_province)}</Province>\n`;
+  xml += `    <Country>${escapeXml(companyHeader?.company_country || 'Italia')}</Country>\n`;
+  if (companyHeader?.company_fiscal_code) xml += `    <FiscalCode>${escapeXml(companyHeader.company_fiscal_code)}</FiscalCode>\n`;
+  if (companyHeader?.company_vat_code) xml += `    <VatCode>${escapeXml(companyHeader.company_vat_code)}</VatCode>\n`;
+  if (companyHeader?.company_tel) xml += `    <Tel>${escapeXml(companyHeader.company_tel)}</Tel>\n`;
+  if (companyHeader?.company_fax) xml += `    <Fax>${escapeXml(companyHeader.company_fax)}</Fax>\n`;
+  if (companyHeader?.company_email) xml += `    <Email>${escapeXml(companyHeader.company_email)}</Email>\n`;
+  if (companyHeader?.company_website) xml += `    <HomePage>${escapeXml(companyHeader.company_website)}</HomePage>\n`;
   xml += `  </Company>\n`;
   xml += `  <Documents>\n`;
 
@@ -329,10 +357,14 @@ export async function buildEasyfattOrdersXml(ordersList: any[], appver: string =
       deliveryName = `${deliveryName} c/o ${o.client_name}`;
     }
 
+    const paymentName = String(o.payment_name || o.client_payment_name || (settings && settings.default_payment) || 'Bonifico bancario').trim();
+    const paymentBank = String(o.payment_bank || o.client_payment_bank || '').trim();
+
     xml += `    <Document>\n`;
     xml += `      <DocumentType>C</DocumentType>\n`;
-    xml += `      <CustomerCode>${customerCode}</CustomerCode>\n`;
+    xml += `      <CustomerCode>${escapeXml(customerCode)}</CustomerCode>\n`;
     xml += `      <CustomerName>${escapeXml(o.client_name)}</CustomerName>\n`;
+    if (o.client_web_login) xml += `      <CustomerWebLogin>${escapeXml(o.client_web_login)}</CustomerWebLogin>\n`;
     if (o.client_address) xml += `      <CustomerAddress>${escapeXml(o.client_address)}</CustomerAddress>\n`;
     if (o.client_postcode) xml += `      <CustomerPostcode>${escapeXml(formatCap(o.client_postcode))}</CustomerPostcode>\n`;
     if (o.client_city) xml += `      <CustomerCity>${escapeXml(o.client_city)}</CustomerCity>\n`;
@@ -340,15 +372,19 @@ export async function buildEasyfattOrdersXml(ordersList: any[], appver: string =
     xml += `      <CustomerCountry>${escapeXml(o.client_country || 'Italia')}</CustomerCountry>\n`;
     if (o.client_fiscal_code) xml += `      <CustomerFiscalCode>${escapeXml(o.client_fiscal_code)}</CustomerFiscalCode>\n`;
     if (o.client_vat_code) xml += `      <CustomerVatCode>${escapeXml(o.client_vat_code)}</CustomerVatCode>\n`;
+    if (o.client_sdi_pec) xml += `      <CustomerEInvoiceDestCode>${escapeXml(o.client_sdi_pec)}</CustomerEInvoiceDestCode>\n`;
     if (o.client_phone) xml += `      <CustomerTel>${escapeXml(o.client_phone)}</CustomerTel>\n`;
+    if (o.client_cell_phone) xml += `      <CustomerCellPhone>${escapeXml(o.client_cell_phone)}</CustomerCellPhone>\n`;
     if (o.client_email) xml += `      <CustomerEmail>${escapeXml(o.client_email)}</CustomerEmail>\n`;
+    if (o.client_pec) xml += `      <CustomerPec>${escapeXml(o.client_pec)}</CustomerPec>\n`;
     if (o.client_contact) xml += `      <CustomerReference>${escapeXml(o.client_contact)}</CustomerReference>\n`;
     if (deliveryName) xml += `      <DeliveryName>${escapeXml(deliveryName)}</DeliveryName>\n`;
     if (o.client_delivery_address) xml += `      <DeliveryAddress>${escapeXml(o.client_delivery_address)}</DeliveryAddress>\n`;
     if (o.client_delivery_postcode) xml += `      <DeliveryPostcode>${escapeXml(formatCap(o.client_delivery_postcode))}</DeliveryPostcode>\n`;
     if (o.client_delivery_city) xml += `      <DeliveryCity>${escapeXml(o.client_delivery_city)}</DeliveryCity>\n`;
     if (o.client_delivery_province) xml += `      <DeliveryProvince>${escapeXml(formatProvince(o.client_delivery_province))}</DeliveryProvince>\n`;
-    xml += `      <Date>${o.date}</Date>\n`;
+    if (o.client_delivery_country) xml += `      <DeliveryCountry>${escapeXml(o.client_delivery_country)}</DeliveryCountry>\n`;
+    xml += `      <Date>${escapeXml(o.date)}</Date>\n`;
 
     const rawNumberStr = String(o.number || o.id || '').trim();
     const numMatch = rawNumberStr.match(/^(\d+)/);
@@ -375,21 +411,58 @@ export async function buildEasyfattOrdersXml(ordersList: any[], appver: string =
     }
 
     xml += `      <Total>${Number(o.total || 0).toFixed(2)}</Total>\n`;
-    xml += `      <PaymentName>${escapeXml(o.payment_name)}</PaymentName>\n`;
+    xml += `      <PaymentName>${escapeXml(paymentName)}</PaymentName>\n`;
+    xml += `      <PaymentBank>${escapeXml(paymentBank)}</PaymentBank>\n`;
+    if (o.notes) xml += `      <InternalComment>${escapeXml(o.notes)}</InternalComment>\n`;
+    if (o.agent_name) xml += `      <SalesAgent>${escapeXml(o.agent_name)}</SalesAgent>\n`;
     xml += `      <PricesIncludeVat>${pricesIncludeVat}</PricesIncludeVat>\n`;
 
     xml += `      <Rows>\n`;
     for (const item of (o.items || [])) {
       const vatCode = item.vat_code || (settings && settings.default_vat) || '22';
       const vatPerc = parseFloat(String(vatCode).replace(/[^0-9.]/g, '')) || 22;
+      const rawQty = Number(item.qty || 1);
+      const rawPrice = Number(item.price || 0);
+
+      // Estrazione e formattazione rigorosa dello sconto di riga
+      let discountStr = '';
+      if (item.discounts && String(item.discounts).trim()) {
+        discountStr = String(item.discounts).trim();
+      } else if (item.discount !== undefined && item.discount !== null && String(item.discount).trim() !== '' && Number(item.discount) !== 0) {
+        const numDisc = Number(item.discount);
+        if (!isNaN(numDisc) && numDisc !== 0) {
+          discountStr = `${numDisc}%`;
+        } else {
+          discountStr = String(item.discount).trim();
+        }
+      } else if (item.discount_perc !== undefined && item.discount_perc !== null && Number(item.discount_perc) > 0) {
+        discountStr = `${Number(item.discount_perc)}%`;
+      } else if (item.discount_percent !== undefined && item.discount_percent !== null && Number(item.discount_percent) > 0) {
+        discountStr = `${Number(item.discount_percent)}%`;
+      }
+
+      let rowTotal = Number(item.total);
+      if (isNaN(rowTotal) || rowTotal === 0) {
+        const matchSinglePerc = discountStr.match(/^(\d+(?:\.\d+)?)%?$/);
+        if (matchSinglePerc) {
+          const perc = parseFloat(matchSinglePerc[1]);
+          rowTotal = rawQty * rawPrice * (1 - perc / 100);
+        } else {
+          rowTotal = rawQty * rawPrice;
+        }
+      }
+
       xml += `        <Row>\n`;
       xml += `          <Code>${escapeXml(item.product_code)}</Code>\n`;
       xml += `          <Description>${escapeXml(item.description)}</Description>\n`;
-      xml += `          <Qty>${item.qty}</Qty>\n`;
+      xml += `          <Qty>${rawQty}</Qty>\n`;
       xml += `          <Um>${escapeXml(item.um || 'pz')}</Um>\n`;
-      xml += `          <Price>${Number(item.price || 0).toFixed(2)}</Price>\n`;
+      xml += `          <Price>${rawPrice.toFixed(2)}</Price>\n`;
+      if (discountStr) {
+        xml += `          <Discounts>${escapeXml(discountStr)}</Discounts>\n`;
+      }
       xml += `          <VatCode Perc="${vatPerc}" Class="Imponibile">${escapeXml(vatCode)}</VatCode>\n`;
-      xml += `          <Total>${(Number(item.qty || 0) * Number(item.price || 0)).toFixed(2)}</Total>\n`;
+      xml += `          <Total>${rowTotal.toFixed(2)}</Total>\n`;
       xml += `        </Row>\n`;
     }
     xml += `      </Rows>\n`;
@@ -397,7 +470,7 @@ export async function buildEasyfattOrdersXml(ordersList: any[], appver: string =
     xml += `      <Payments>\n`;
     const payments = (o.payments && o.payments.length > 0) 
       ? o.payments 
-      : calculateInstallments(o.total || 0, o.date, o.payment_name || 'Bonifico bancario', 'AUTO');
+      : calculateInstallments(o.total || 0, o.date, paymentName, 'AUTO');
 
     for (const p of payments) {
       xml += `        <Payment>\n`;
@@ -575,7 +648,7 @@ export async function handleUploadCatalog(req: Request, res: Response) {
 
     try { if (tempFilePathToUnlink) fs.unlinkSync(tempFilePathToUnlink); } catch (e) {}
 
-    // 4. Risposta Handshake Rigorosa per AppVersion
+    // 4. Risposta Handshake Rigorosa per AppVersion (TASK 1)
     let appVerNum = 2;
     if (jsonObj.EasyfattProducts?.AppVersion) {
       const raw = String(jsonObj.EasyfattProducts.AppVersion);
@@ -589,8 +662,8 @@ export async function handleUploadCatalog(req: Request, res: Response) {
     }
 
     const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const responseBody = `OK\nImageSendURL=${proto}://${host}/api/easyfatt/upload-image\nImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-image-finished\n`;
+    const host = req.headers['x-forwarded-host'] || req.get('host') || req.headers.host;
+    const responseBody = `OK\nImageSendURL=${proto}://${host}/api/easyfatt/upload-images\nImageSendFinishURL=${proto}://${host}/api/easyfatt/upload-images-finished\n`;
     return res.status(200).send(responseBody);
   } catch (err: any) {
     console.error('Easyfatt catalog import error:', err);
@@ -598,6 +671,58 @@ export async function handleUploadCatalog(req: Request, res: Response) {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.status(500).send("ERROR: " + (err.message || 'Errore elaborazione catalogo'));
   }
+}
+
+// ==============================================================================
+// 4. ROTTA UPLOAD IMMAGINI (TASK 2)
+// ==============================================================================
+export async function handleUploadImages(req: Request, res: Response) {
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(200).send("OK");
+  }
+
+  const isAuth = await checkDaneaAuth(req);
+  if (!isAuth) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(401).send("ERROR: Utente o password non validi.");
+  }
+
+  try {
+    const file = (req as any).file || ((req as any).files && (req as any).files[0]);
+    if (!file) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.status(400).send("ERROR: Nessun file caricato.");
+    }
+
+    // Danea invia il nome del file nel parametro form 'fileName' oppure usiamo l'originale
+    const rawFileName = req.body?.fileName || req.body?.filename || req.body?.FileName || file.originalname || 'image.jpg';
+    const safeFileName = path.basename(String(rawFileName).trim());
+
+    if (safeFileName && file.path) {
+      const targetPath = path.join(uploadDir, safeFileName);
+      if (file.path !== targetPath) {
+        fs.copyFileSync(file.path, targetPath);
+        try { fs.unlinkSync(file.path); } catch (e) {}
+      }
+    }
+
+    // Risposta TASSATIVAMENTE testo puro 'OK' status 200 (NO JSON)
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(200).send("OK");
+  } catch (err: any) {
+    console.error('[Easyfatt Image Upload Error]', err);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(500).send("ERROR: " + (err.message || 'Errore durante il salvataggio immagine'));
+  }
+}
+
+// ==============================================================================
+// 5. ROTTA FINE TRASMISSIONE IMMAGINI (TASK 3)
+// ==============================================================================
+export async function handleUploadImagesFinished(req: Request, res: Response) {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  return res.status(200).send("OK");
 }
 
 // ==============================================================================
@@ -617,7 +742,45 @@ const uploadPaths = [
   '/uploadclienti.php'
 ];
 
+const imageUploadPaths = [
+  '/api/easyfatt/upload-images',
+  '/api/easyfatt/upload-images.php',
+  '/api/easyfatt/upload-image',
+  '/api/easyfatt/upload-image.php',
+  '/api/easyfatt/uploadImmagini.php',
+  '/api/easyfatt/uploadimmagini.php',
+  '/upload-images',
+  '/upload-images.php',
+  '/upload-image',
+  '/upload-image.php',
+  '/uploadImmagini.php',
+  '/uploadimmagini.php'
+];
+
+const imageFinishPaths = [
+  '/api/easyfatt/upload-images-finished',
+  '/api/easyfatt/upload-images-finished.php',
+  '/api/easyfatt/upload-image-finished',
+  '/api/easyfatt/upload-image-finished.php',
+  '/api/easyfatt/uploadTerminato.php',
+  '/api/easyfatt/uploadterminato.php',
+  '/api/easyfatt/sync-finish',
+  '/api/easyfatt/invio_terminato.php',
+  '/api/easyfatt/invio_terminato.asp',
+  '/upload-images-finished',
+  '/upload-images-finished.php',
+  '/upload-image-finished',
+  '/upload-image-finished.php',
+  '/uploadTerminato.php',
+  '/uploadterminato.php',
+  '/sync-finish',
+  '/invio_terminato.php',
+  '/invio_terminato.asp'
+];
+
 router.all(downloadPaths, handleDownloadOrders);
 router.all(uploadPaths, upload.any(), handleUploadCatalog);
+router.all(imageUploadPaths, upload.any(), handleUploadImages);
+router.all(imageFinishPaths, handleUploadImagesFinished);
 
 export default router;

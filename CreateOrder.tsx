@@ -26,7 +26,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Product, Client, PaymentMethod, Order } from '../types';
 import { printOrderDocument, copyOrderToClipboard, downloadOrderPdf, PrintableOrderData } from '../utils/printAndCopyOrder';
 import EditableAmountInput from '../components/EditableAmountInput';
-import { calculateTaxable, calculateLineTotals, calculateOrderTotals, formatEuro } from '../utils/priceUtils';
+import { calculateTaxable, calculateLineTotals, calculateOrderTotals, formatEuro, parseDiscountPerc } from '../utils/priceUtils';
+import { useLockBodyScroll } from '../hooks/useLockBodyScroll';
 
 interface OrderItemDraft {
   product_code: string;
@@ -35,6 +36,8 @@ interface OrderItemDraft {
   price: number;
   vat_code: string;
   um: string;
+  discount_perc?: number | string;
+  discounts?: string;
 }
 
 export default function CreateOrder({ user, currentUser }: { user?: any; currentUser?: any }) {
@@ -78,6 +81,9 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
   // Client search within dropdown/picker
   const [clientSearch, setClientSearch] = useState('');
   const [isClientPickerOpen, setIsClientPickerOpen] = useState(false);
+
+  // Lock body scroll and isolate touch scroll events on iOS Safari when Cart or Client Modal is open
+  useLockBodyScroll(isCartOpen || isClientPickerOpen || orderSuccessModal.isOpen);
 
   // Fetch initial data
   useEffect(() => {
@@ -184,7 +190,9 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                   qty: Number(item.qty || item.quantity || item.qta) || 1,
                   price: Number(item.price !== undefined && item.price !== null ? item.price : (item.unit_price !== undefined ? item.unit_price : 0)),
                   vat_code: String(item.vat_code || item.vatCode || item.vat || '22'),
-                  um: String(item.um || item.unit || 'pz')
+                  um: String(item.um || item.unit || 'pz'),
+                  discount_perc: item.discount_perc !== undefined && item.discount_perc !== null ? item.discount_perc : (item.discount || item.discounts || 0),
+                  discounts: item.discounts ? String(item.discounts) : (item.discount_perc ? `${item.discount_perc}%` : '')
                 }));
                 setCartItems(mappedItems);
                 setIsCartOpen(true);
@@ -250,6 +258,18 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
     return Array.from(set).sort();
   }, [products]);
 
+  // Category items count for badges
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    products.forEach(p => {
+      const cat = p.category?.trim();
+      if (cat) {
+        counts[cat] = (counts[cat] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [products]);
+
   // Filtered products
   const filteredProducts = useMemo(() => {
     const q = productSearch.toLowerCase().trim();
@@ -307,7 +327,9 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
             qty: delta,
             price: Number(product.price) || 0,
             vat_code: product.vat_code || '22',
-            um: product.um || 'pz'
+            um: product.um || 'pz',
+            discount_perc: 0,
+            discounts: ''
           }
         ];
       }
@@ -327,6 +349,32 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
   const handleRemoveFromCart = (productCode: string) => {
     setCartItems(prev => prev.filter(item => item.product_code !== productCode));
     showToast('Articolo rimosso dal carrello', 'info');
+  };
+
+  const handleUpdateCartItemDiscount = (productCode: string, newDiscount: string | number, index?: number) => {
+    setCartItems(prev => {
+      if (typeof index === 'number' && index >= 0 && index < prev.length) {
+        const next = [...prev];
+        const discountVal = typeof newDiscount === 'string' ? newDiscount.trim() : newDiscount;
+        next[index] = { 
+          ...next[index], 
+          discount_perc: discountVal, 
+          discounts: discountVal ? String(discountVal) : '' 
+        };
+        return next;
+      }
+      return prev.map(item => {
+        if (item.product_code === productCode) {
+          const discountVal = typeof newDiscount === 'string' ? newDiscount.trim() : newDiscount;
+          return { 
+            ...item, 
+            discount_perc: discountVal, 
+            discounts: discountVal ? String(discountVal) : '' 
+          };
+        }
+        return item;
+      });
+    });
   };
 
   const handleUpdateCartItemPrice = (productCode: string, newPrice: number, index?: number) => {
@@ -349,13 +397,20 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
       if (typeof index === 'number' && index >= 0 && index < prev.length) {
         const next = [...prev];
         const qty = next[index].qty || 1;
-        next[index] = { ...next[index], price: Math.round((cleanTotal / qty) * 100) / 100 };
+        const discountPerc = parseDiscountPerc(next[index].discount_perc ?? next[index].discounts);
+        const discountMultiplier = Math.max(0.0001, 1 - (discountPerc / 100));
+        // cleanTotal = (price * qty) * (1 - discount/100) => price = cleanTotal / (qty * discountMultiplier)
+        const computedUnitPrice = Math.round((cleanTotal / (qty * discountMultiplier)) * 100) / 100;
+        next[index] = { ...next[index], price: computedUnitPrice };
         return next;
       }
       return prev.map(item => {
         if (item.product_code === productCode) {
           const qty = item.qty || 1;
-          return { ...item, price: Math.round((cleanTotal / qty) * 100) / 100 };
+          const discountPerc = parseDiscountPerc(item.discount_perc ?? item.discounts);
+          const discountMultiplier = Math.max(0.0001, 1 - (discountPerc / 100));
+          const computedUnitPrice = Math.round((cleanTotal / (qty * discountMultiplier)) * 100) / 100;
+          return { ...item, price: computedUnitPrice };
         }
         return item;
       });
@@ -367,18 +422,27 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
     return calculateOrderTotals(cartItems.map(item => ({
       qty: item.qty,
       price: item.price,
-      vatRate: item.vat_code || 22
+      vatRate: item.vat_code || 22,
+      discount_perc: item.discount_perc,
+      discounts: item.discounts
     })));
   }, [cartItems]);
 
   const cartSubtotal = useMemo(() => {
-    return cartItems.reduce((acc, item) => acc + (item.qty * item.price), 0);
-  }, [cartItems]);
+    return orderTotals.totalTaxable;
+  }, [orderTotals]);
 
   const grossSubtotal = useMemo(() => {
     return cartItems
       .filter(item => item.price > 0)
       .reduce((acc, item) => acc + (item.qty * item.price), 0);
+  }, [cartItems]);
+
+  const totalDiscountAmount = useMemo(() => {
+    return cartItems.reduce((acc, item) => {
+      const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts);
+      return acc + line.discountAmount;
+    }, 0);
   }, [cartItems]);
 
   const discountTotal = useMemo(() => {
@@ -411,12 +475,14 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
       paymentBank: selectedClient?.payment_bank || '',
       notes: notes || '',
       items: cartItems.map(item => {
-        const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22);
+        const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts);
         return {
           code: item.product_code,
           description: item.description,
           qty: item.qty,
           price: item.price,
+          discountPerc: line.discountPerc,
+          discounts: item.discounts || (line.discountPerc ? `${line.discountPerc}%` : undefined),
           vatRate: line.vatRate,
           taxablePrice: line.unitTaxable,
           taxableTotal: line.totalTaxable,
@@ -479,7 +545,14 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
         payment_bank: selectedClient?.payment_bank || '',
         notes: notes || '',
         status: status,
-        items: cartItems
+        items: cartItems.map(item => {
+          const discountVal = item.discount_perc !== undefined && item.discount_perc !== null ? item.discount_perc : (item.discounts || 0);
+          return {
+            ...item,
+            discount_perc: discountVal,
+            discounts: item.discounts || (discountVal ? `${discountVal}%` : '')
+          };
+        })
       };
 
       const url = editOrderId 
@@ -696,229 +769,294 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
         </div>
       </div>
 
-      {/* Catalog Search & Category Filter Bar */}
-      <div className="space-y-3">
-        <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
-          {/* Search bar */}
-          <div className="relative w-full sm:max-w-md">
-            <Search size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Cerca per nome articolo, codice..."
-              value={productSearch}
-              onChange={e => setProductSearch(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-200 rounded-2xl text-xs sm:text-sm font-medium text-gray-800 placeholder:text-gray-400 outline-none focus:border-[#5A5A40] shadow-2xs"
-            />
-            {productSearch && (
-              <button
-                type="button"
-                onClick={() => setProductSearch('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
-              >
-                <X size={14} />
-              </button>
-            )}
-          </div>
-
-          {/* Filter toggle: Disponibili */}
-          <div className="flex items-center gap-2 self-end sm:self-auto">
+      {/* Search & Availability Filter Bar */}
+      <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
+        {/* Search bar */}
+        <div className="relative w-full sm:max-w-md">
+          <Search size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            placeholder="Cerca per nome articolo, codice..."
+            value={productSearch}
+            onChange={e => setProductSearch(e.target.value)}
+            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-200 rounded-2xl text-xs sm:text-sm font-medium text-gray-800 placeholder:text-gray-400 outline-none focus:border-[#5A5A40] shadow-2xs"
+          />
+          {productSearch && (
             <button
               type="button"
-              onClick={() => setOnlyAvailable(!onlyAvailable)}
-              className={`text-xs font-bold px-3 py-2 rounded-xl border transition-all cursor-pointer ${
-                onlyAvailable 
-                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs' 
-                  : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-              }`}
+              onClick={() => setProductSearch('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
             >
-              Solo Disponibili
+              <X size={14} />
             </button>
-            <span className="text-xs text-gray-400 font-bold">
-              {filteredProducts.length} Articoli trovati
-            </span>
-          </div>
+          )}
         </div>
 
-        {/* Horizontal Category Chips */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none pt-1">
+        {/* Filter toggle: Disponibili */}
+        <div className="flex items-center gap-2 self-end sm:self-auto">
           <button
             type="button"
-            onClick={() => setSelectedCategory('all')}
-            className={`text-xs font-bold px-3.5 py-1.5 rounded-full whitespace-nowrap transition-all cursor-pointer ${
-              selectedCategory === 'all'
-                ? 'bg-[#5A5A40] text-white shadow-2xs'
-                : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-100'
+            onClick={() => setOnlyAvailable(!onlyAvailable)}
+            className={`text-xs font-bold px-3.5 py-2 rounded-xl border transition-all cursor-pointer ${
+              onlyAvailable 
+                ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs' 
+                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
             }`}
           >
-            Tutte le Categorie
+            Solo Disponibili
           </button>
-          {categories.map(cat => (
-            <button
-              key={cat}
-              type="button"
-              onClick={() => setSelectedCategory(cat)}
-              className={`text-xs font-bold px-3.5 py-1.5 rounded-full whitespace-nowrap transition-all cursor-pointer ${
-                selectedCategory === cat
-                  ? 'bg-[#5A5A40] text-white shadow-2xs'
-                  : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-100'
-              }`}
-            >
-              {cat}
-            </button>
-          ))}
+          <span className="text-xs text-gray-400 font-bold">
+            {filteredProducts.length} Articoli
+          </span>
         </div>
       </div>
 
-      {/* Product Grid: Large, Visual, Touch-Friendly Cards */}
-      {filteredProducts.length === 0 ? (
-        <div className="bg-white rounded-3xl p-12 text-center border border-gray-200/80 shadow-xs max-w-md mx-auto">
-          <Package size={44} className="mx-auto text-gray-300 mb-3" />
-          <h3 className="text-base font-bold text-gray-900 mb-1">Nessun articolo trovato</h3>
-          <p className="text-xs text-gray-500 mb-4">Prova a modificare i filtri di ricerca o la categoria selezionata.</p>
+      {/* Mobile Horizontal Category Bar (< lg) */}
+      <div className="lg:hidden flex overflow-x-auto whitespace-nowrap scrollbar-hide py-3 space-x-2 scroll-smooth">
+        <button
+          type="button"
+          onClick={() => setSelectedCategory('all')}
+          className={`text-xs font-bold px-3.5 py-2 rounded-xl whitespace-nowrap transition-all cursor-pointer shrink-0 flex items-center gap-1.5 ${
+            selectedCategory === 'all'
+              ? 'bg-[#5A5A40] text-white shadow-xs'
+              : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
+          }`}
+        >
+          <span>Tutte le Categorie</span>
+          <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+            selectedCategory === 'all' ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'
+          }`}>
+            {products.length}
+          </span>
+        </button>
+        {categories.map(cat => (
           <button
+            key={cat}
             type="button"
-            onClick={() => { setProductSearch(''); setSelectedCategory('all'); setOnlyAvailable(false); }}
-            className="bg-[#5A5A40] text-white text-xs font-bold px-4 py-2 rounded-xl"
+            onClick={() => setSelectedCategory(cat)}
+            className={`text-xs font-bold px-3.5 py-2 rounded-xl whitespace-nowrap transition-all cursor-pointer shrink-0 flex items-center gap-1.5 ${
+              selectedCategory === cat
+                ? 'bg-[#5A5A40] text-white shadow-xs'
+                : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
+            }`}
           >
-            Mostra tutti i prodotti
+            <span>{cat}</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+              selectedCategory === cat ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'
+            }`}>
+              {categoryCounts[cat] || 0}
+            </span>
           </button>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-5 [content-visibility:auto] [contain-intrinsic-size:auto_350px]">
-          {filteredProducts.map(product => {
-            const qtyInCart = getItemQtyInCart(product.code);
-            const isAvailable = Number(product.stock) > 0;
-            const price = Number(product.price) || 0;
-            const vatRate = product.vat_code ?? 22;
-            const taxablePrice = calculateTaxable(price, vatRate);
+        ))}
+      </div>
 
-            return (
-              <motion.div
-                layout
-                key={product.id}
-                className={`bg-white rounded-2xl border p-4 flex flex-col justify-between transition-all hover:shadow-md ${
-                  qtyInCart > 0 
-                    ? 'border-[#5A5A40] ring-2 ring-[#5A5A40]/15' 
-                    : 'border-gray-200/80 shadow-xs'
+      {/* Main Catalog Section: Desktop Sticky Sidebar + Products Grid */}
+      <div className="flex flex-col lg:flex-row gap-6 items-start">
+        {/* Desktop Sticky Category Sidebar (lg: and above) */}
+        <aside className="hidden lg:block sticky top-24 w-64 shrink-0 bg-white rounded-2xl border border-gray-200/80 p-4 shadow-xs">
+          <div className="flex items-center justify-between pb-3 border-b border-gray-100 mb-3">
+            <div className="flex items-center gap-2">
+              <span className="p-1.5 bg-[#5A5A40]/10 text-[#5A5A40] rounded-lg">
+                <Package size={16} />
+              </span>
+              <h3 className="text-xs font-bold text-gray-900 uppercase tracking-wider">Categorie</h3>
+            </div>
+            <span className="text-[11px] font-bold text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full font-mono">
+              {categories.length + 1}
+            </span>
+          </div>
+
+          <div className="space-y-1 max-h-[calc(100vh-14rem)] overflow-y-auto overscroll-contain pr-1 scrollbar-thin">
+            <button
+              type="button"
+              onClick={() => setSelectedCategory('all')}
+              className={`w-full text-left px-3 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between transition-colors cursor-pointer ${
+                selectedCategory === 'all'
+                  ? 'bg-[#5A5A40] text-white shadow-2xs'
+                  : 'text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              <span>Tutte le Categorie</span>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
+                selectedCategory === 'all' ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'
+              }`}>
+                {products.length}
+              </span>
+            </button>
+
+            {categories.map(cat => (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setSelectedCategory(cat)}
+                className={`w-full text-left px-3 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between transition-colors cursor-pointer ${
+                  selectedCategory === cat
+                    ? 'bg-[#5A5A40] text-white shadow-2xs'
+                    : 'text-gray-700 hover:bg-gray-50'
                 }`}
               >
-                <div>
-                  {/* Top Image or Placeholder */}
-                  <div className="relative aspect-4/3 rounded-xl bg-gray-50 border border-gray-100 overflow-hidden mb-3 flex items-center justify-center">
-                    {product.image_file_name ? (
-                      <img 
-                        src={`/uploads/${product.image_file_name}`} 
-                        alt={product.description}
-                        loading="lazy"
-                        decoding="async"
-                        className="w-full h-full object-contain p-2"
-                        referrerPolicy="no-referrer"
-                        onError={(e: any) => {
-                          e.target.style.display = 'none';
-                          e.target.nextSibling.style.display = 'flex';
-                        }}
-                      />
-                    ) : null}
-                    <div 
-                      className={`flex flex-col items-center justify-center text-gray-300 ${
-                        product.image_file_name ? 'hidden' : 'flex'
-                      }`}
-                    >
-                      <Package size={32} />
-                      <span className="text-[10px] text-gray-400 font-bold mt-1">Connect</span>
+                <span className="truncate pr-2">{cat}</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold shrink-0 ${
+                  selectedCategory === cat ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'
+                }`}>
+                  {categoryCounts[cat] || 0}
+                </span>
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        {/* Product Grid Container */}
+        <main className="flex-1 min-w-0 w-full">
+          {filteredProducts.length === 0 ? (
+            <div className="bg-white rounded-3xl p-12 text-center border border-gray-200/80 shadow-xs max-w-md mx-auto">
+              <Package size={44} className="mx-auto text-gray-300 mb-3" />
+              <h3 className="text-base font-bold text-gray-900 mb-1">Nessun articolo trovato</h3>
+              <p className="text-xs text-gray-500 mb-4">Prova a modificare i filtri di ricerca o la categoria selezionata.</p>
+              <button
+                type="button"
+                onClick={() => { setProductSearch(''); setSelectedCategory('all'); setOnlyAvailable(false); }}
+                className="bg-[#5A5A40] text-white text-xs font-bold px-4 py-2 rounded-xl cursor-pointer"
+              >
+                Mostra tutti i prodotti
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4 sm:gap-5 [content-visibility:auto] [contain-intrinsic-size:auto_350px]">
+              {filteredProducts.map(product => {
+                const qtyInCart = getItemQtyInCart(product.code);
+                const isAvailable = Number(product.stock) > 0;
+                // Always map from net price properties
+                const netPrice = Number((product as any).net_price ?? (product as any).net_price_1 ?? product.price ?? 0) || 0;
+
+                return (
+                  <motion.div
+                    layout
+                    key={product.id}
+                    className={`bg-white rounded-xl border flex flex-col h-full overflow-hidden transition-all hover:shadow-md ${
+                      qtyInCart > 0 
+                        ? 'border-[#5A5A40] ring-2 ring-[#5A5A40]/20' 
+                        : 'border-gray-200/80 shadow-xs'
+                    }`}
+                  >
+                    <div className="p-4 flex-1 flex flex-col">
+                      {/* Top Image or Placeholder */}
+                      <div className="relative aspect-4/3 rounded-lg bg-gray-50 border border-gray-100 overflow-hidden mb-3 flex items-center justify-center shrink-0">
+                        {product.image_file_name ? (
+                          <img 
+                            src={`/uploads/${product.image_file_name}`} 
+                            alt={product.description}
+                            loading="lazy"
+                            decoding="async"
+                            className="w-full h-full object-contain p-2"
+                            referrerPolicy="no-referrer"
+                            onError={(e: any) => {
+                              e.target.style.display = 'none';
+                              e.target.nextSibling.style.display = 'flex';
+                            }}
+                          />
+                        ) : null}
+                        <div 
+                          className={`flex flex-col items-center justify-center text-gray-300 ${
+                            product.image_file_name ? 'hidden' : 'flex'
+                          }`}
+                        >
+                          <Package size={32} />
+                          <span className="text-[10px] text-gray-400 font-bold mt-1">Connect</span>
+                        </div>
+
+                        {/* Stock Status Badge */}
+                        <div className="absolute top-2 left-2">
+                          {isAvailable ? (
+                            <span className="bg-emerald-600/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs backdrop-blur-xs">
+                              Disp. ({product.stock} {product.um || 'pz'})
+                            </span>
+                          ) : (
+                            <span className="bg-amber-500/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs backdrop-blur-xs">
+                              In arrivo / Pre-ordine
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Quantity already in cart badge */}
+                        {qtyInCart > 0 && (
+                          <div className="absolute top-2 right-2 bg-[#5A5A40] text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-2xs">
+                            Nel Carrello: {qtyInCart}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Product Details */}
+                      <div className="space-y-1.5 flex-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-[10px] font-mono font-bold text-gray-400 uppercase">
+                            Cod. {product.code}
+                          </span>
+                          {product.category && (
+                            <span className="inline-block text-[10px] text-gray-500 bg-gray-100 px-2 py-0.5 rounded font-medium truncate max-w-[120px]">
+                              {product.category}
+                            </span>
+                          )}
+                        </div>
+                        <h4 className="text-sm font-bold text-gray-900 line-clamp-2 leading-snug" title={product.description}>
+                          {product.description}
+                        </h4>
+                      </div>
                     </div>
 
-                    {/* Stock Status Badge */}
-                    <div className="absolute top-2 left-2">
-                      {isAvailable ? (
-                        <span className="bg-emerald-600/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs backdrop-blur-xs">
-                          Disp. ({product.stock} {product.um || 'pz'})
-                        </span>
+                    {/* Price and Action Button in Dedicated Bottom Div */}
+                    <div className="mt-auto w-full p-4 pt-3 border-t border-gray-100 bg-gray-50/40 space-y-2.5">
+                      <div className="flex items-baseline justify-between gap-1">
+                        <span className="text-[10px] text-gray-400 uppercase font-bold">Imponibile</span>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-base font-black text-[#5A5A40] font-mono leading-tight">
+                            {formatEuro(netPrice)}
+                          </span>
+                          <span className="text-[10px] font-sans font-medium text-gray-500">cad.</span>
+                        </div>
+                      </div>
+
+                      {/* Touch Stepper & Add Button */}
+                      {qtyInCart > 0 ? (
+                        <div className="w-full flex items-center justify-between bg-white border border-gray-200 p-1 rounded-xl shadow-2xs">
+                          <button
+                            type="button"
+                            onClick={() => handleAddToCart(product, -1)}
+                            className="w-8 h-8 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 flex items-center justify-center font-bold shadow-2xs active:scale-95 cursor-pointer transition-colors"
+                            title="Diminuisci quantità"
+                          >
+                            <Minus size={14} />
+                          </button>
+                          <span className="flex-1 text-center font-black font-mono text-sm text-gray-900">
+                            {qtyInCart}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleAddToCart(product, 1)}
+                            className="w-8 h-8 rounded-lg bg-[#5A5A40] hover:bg-[#4A4A30] text-white flex items-center justify-center font-bold shadow-2xs active:scale-95 cursor-pointer transition-colors"
+                            title="Aumenta quantità"
+                          >
+                            <Plus size={14} />
+                          </button>
+                        </div>
                       ) : (
-                        <span className="bg-amber-500/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs backdrop-blur-xs">
-                          In arrivo / Pre-ordine
-                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleAddToCart(product, 1)}
+                          className="w-full bg-[#5A5A40] hover:bg-[#4A4A30] text-white py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-2xs active:scale-98 cursor-pointer"
+                        >
+                          <Plus size={16} />
+                          <span>Aggiungi</span>
+                        </button>
                       )}
                     </div>
-
-                    {/* Quantity already in cart badge */}
-                    {qtyInCart > 0 && (
-                      <div className="absolute top-2 right-2 bg-[#5A5A40] text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-2xs">
-                        Nel Carrello: {qtyInCart}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Product Details */}
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-mono font-bold text-gray-400 uppercase">
-                      Cod. {product.code}
-                    </span>
-                    <h4 className="text-sm font-bold text-gray-900 line-clamp-2 leading-snug" title={product.description}>
-                      {product.description}
-                    </h4>
-                    {product.category && (
-                      <span className="inline-block text-[10px] text-gray-500 bg-gray-100 px-2 py-0.5 rounded font-medium">
-                        {product.category}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Price and Cart Controls */}
-                <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between gap-2">
-                  <div>
-                    <span className="text-[9px] text-gray-400 uppercase font-semibold block">Prezzo Base</span>
-                    <div className="flex flex-col">
-                      <span className="text-sm font-black text-[#5A5A40] font-mono leading-tight">
-                        {formatEuro(taxablePrice)}{' '}
-                        <span className="text-[10px] font-sans font-normal text-gray-500">+ IVA</span>
-                      </span>
-                      <span className="text-[11px] text-gray-500 font-medium">
-                        ({formatEuro(price)} inc.)
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Touch Stepper & Add Button */}
-                  {qtyInCart > 0 ? (
-                    <div className="flex items-center gap-1.5 bg-gray-100 p-1 rounded-xl">
-                      <button
-                        type="button"
-                        onClick={() => handleAddToCart(product, -1)}
-                        className="w-8 h-8 rounded-lg bg-white hover:bg-gray-200 text-gray-800 flex items-center justify-center font-bold shadow-2xs active:scale-95 cursor-pointer transition-colors"
-                        title="Diminuisci quantità"
-                      >
-                        <Minus size={14} />
-                      </button>
-                      <span className="w-7 text-center font-black font-mono text-sm text-gray-900">
-                        {qtyInCart}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleAddToCart(product, 1)}
-                        className="w-8 h-8 rounded-lg bg-[#5A5A40] hover:bg-[#4A4A30] text-white flex items-center justify-center font-bold shadow-2xs active:scale-95 cursor-pointer transition-colors"
-                        title="Aumenta quantità"
-                      >
-                        <Plus size={14} />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleAddToCart(product, 1)}
-                      className="bg-[#5A5A40] hover:bg-[#4A4A30] text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-2xs active:scale-95 cursor-pointer"
-                    >
-                      <Plus size={14} />
-                      <span>Aggiungi</span>
-                    </button>
-                  )}
-                </div>
-              </motion.div>
-            );
-          })}
-        </div>
-      )}
+                  </motion.div>
+                );
+              })}
+            </div>
+          )}
+        </main>
+      </div>
 
       {/* Floating Bottom Cart Bar for Quick Mobile Access */}
       {totalItemsCount > 0 && (
@@ -972,20 +1110,20 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsCartOpen(false)}
-              className="fixed inset-0 bg-black/50 backdrop-blur-xs transition-opacity"
+              className="fixed inset-0 bg-black/50 backdrop-blur-xs transition-opacity pointer-events-auto cursor-pointer"
             />
 
             {/* Slide Drawer */}
-            <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
+            <div className="fixed inset-y-0 right-0 max-w-full flex pl-10 pointer-events-none">
               <motion.div
                 initial={{ x: '100%' }}
                 animate={{ x: 0 }}
                 exit={{ x: '100%' }}
                 transition={{ type: 'spring', damping: 25, stiffness: 250 }}
-                className="w-screen max-w-md bg-white shadow-2xl flex flex-col justify-between"
+                className="w-screen max-w-md bg-white shadow-2xl flex flex-col justify-between h-[100dvh] max-h-[100dvh] overflow-hidden pointer-events-auto"
               >
                 {/* Cart Header */}
-                <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+                <div className="p-5 border-b border-gray-100 flex items-center justify-between shrink-0 bg-white">
                   <div className="flex items-center gap-2.5">
                     <div className="p-2 bg-[#5A5A40]/10 text-[#5A5A40] rounded-xl font-bold">
                       <ShoppingBag size={20} />
@@ -1007,7 +1145,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 </div>
 
                 {/* Selected Client Pill in Cart */}
-                <div className="p-4 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+                <div className="p-4 bg-gray-50 border-b border-gray-100 flex items-center justify-between shrink-0">
                   <div>
                     <span className="text-[10px] uppercase font-bold text-gray-400 block tracking-wider">
                       Destinatario Ordine
@@ -1022,14 +1160,14 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                       setIsCartOpen(false);
                       setIsClientPickerOpen(true);
                     }}
-                    className="text-xs text-[#5A5A40] font-bold hover:underline"
+                    className="text-xs text-[#5A5A40] font-bold hover:underline cursor-pointer"
                   >
                     {selectedClient ? 'Cambia' : 'Scegli *'}
                   </button>
                 </div>
 
                 {/* Items List */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                <div className="flex-1 overflow-y-auto overscroll-contain p-4 space-y-3">
                   {cartItems.length === 0 ? (
                     <div className="text-center py-16 text-gray-400 space-y-2">
                       <ShoppingBag size={40} className="mx-auto text-gray-300" />
@@ -1038,7 +1176,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                     </div>
                   ) : (
                     cartItems.map((item, idx) => {
-                      const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22);
+                      const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts);
                       return (
                         <div
                           key={item.product_code + idx}
@@ -1053,6 +1191,11 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                                 <span className="text-[9px] bg-slate-100 text-slate-700 font-bold px-1.5 py-0.5 rounded border border-slate-200">
                                   IVA {line.vatRate}%
                                 </span>
+                                {line.discountPerc > 0 && (
+                                  <span className="text-[9px] bg-emerald-50 text-emerald-700 font-bold px-1.5 py-0.5 rounded border border-emerald-200">
+                                    Sconto {line.discountPerc}%
+                                  </span>
+                                )}
                                 {item.price < 0 && (
                                   <span className="text-[9px] bg-rose-50 text-rose-700 font-bold px-1.5 py-0.5 rounded border border-rose-200">
                                     Detrazione / Sconto
@@ -1073,30 +1216,26 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                             </button>
                           </div>
 
-                          {/* Dynamic Imponibile & Ivato breakdown */}
-                          <div className="grid grid-cols-2 gap-2 bg-amber-50/70 p-2 rounded-xl border border-amber-200/70 text-[11px]">
-                            <div>
-                              <span className="text-[10px] text-gray-500 font-medium block">Prezzo Unit. Imponibile</span>
-                              <div className="font-mono font-bold text-gray-900">
-                                € {line.unitTaxable.toFixed(2)}
-                              </div>
-                              <span className="text-[10px] text-gray-400 font-normal">
-                                (Ivato: € {item.price.toFixed(2)})
-                              </span>
+                          {/* Dynamic Imponibile breakdown */}
+                          <div className="bg-gray-50/90 p-2 rounded-xl border border-gray-100 text-[11px] space-y-1">
+                            <div className="flex justify-between items-center text-gray-600">
+                              <span>Prezzo Unit. Imponibile:</span>
+                              <span className="font-mono font-bold text-gray-900">€ {line.unitTaxable.toFixed(2)}</span>
                             </div>
-                            <div className="text-right">
-                              <span className="text-[10px] text-gray-500 font-medium block">Totale Riga</span>
-                              <div className="font-mono font-bold text-gray-900">
-                                Imp. € {line.totalTaxable.toFixed(2)}
+                            {line.discountPerc > 0 && (
+                              <div className="flex justify-between items-center text-emerald-700">
+                                <span>Sconto applicato ({line.discountPerc}%):</span>
+                                <span className="font-mono font-bold">-€ {line.discountAmount.toFixed(2)}</span>
                               </div>
-                              <div className="font-mono font-black text-[#5A5A40] text-xs">
-                                Ivato: € {line.totalGross.toFixed(2)}
-                              </div>
+                            )}
+                            <div className="flex justify-between items-center text-gray-600">
+                              <span>Totale Riga Imponibile:</span>
+                              <span className="font-mono font-bold text-gray-900">€ {line.totalTaxable.toFixed(2)}</span>
                             </div>
                           </div>
 
                           <div className="space-y-2 pt-1 border-t border-gray-100">
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-2">
                               {/* Quantity Controls */}
                               <div className="flex items-center gap-1.5 bg-gray-100 p-1 rounded-lg">
                                 <button
@@ -1117,9 +1256,24 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                                   +
                                 </button>
                               </div>
-                              <span className="text-[10px] text-gray-400 font-medium">
-                                Modifica importi ivati:
-                              </span>
+
+                              {/* Sconto % compact input */}
+                              <div className="flex items-center gap-1.5">
+                                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                                  Sconto %
+                                </label>
+                                <div className="relative flex items-center">
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={item.discount_perc !== undefined && item.discount_perc !== null ? item.discount_perc : ''}
+                                    onChange={(e) => handleUpdateCartItemDiscount(item.product_code, e.target.value, idx)}
+                                    placeholder="0"
+                                    className="w-16 text-xs text-center font-mono font-bold py-1 px-1.5 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#5A5A40] focus:border-[#5A5A40] text-gray-900"
+                                  />
+                                  <span className="ml-1 text-[10px] text-gray-400 font-bold">%</span>
+                                </div>
+                              </div>
                             </div>
 
                             {/* Editable Unit Price and Line Total */}
@@ -1127,7 +1281,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                               <div>
                                 <div className="flex items-center justify-between mb-1">
                                   <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
-                                    Prezzo Ivato Unit.
+                                    PREZZO UNIT. IMPONIBILE
                                   </label>
                                   <span className="text-[9px] text-gray-400">cad.</span>
                                 </div>
@@ -1142,12 +1296,12 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                               <div>
                                 <div className="flex items-center justify-between mb-1">
                                   <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
-                                    Totale Ivato Riga
+                                    TOTALE RIGA IMPONIBILE
                                   </label>
                                   <span className="text-[9px] text-gray-400">tot.</span>
                                 </div>
                                 <EditableAmountInput
-                                  value={Math.round(line.totalGross * 100) / 100}
+                                  value={Math.round(line.totalTaxable * 100) / 100}
                                   onChange={(newTotal) => handleUpdateCartItemTotal(item.product_code, newTotal, idx)}
                                   prefix="€"
                                   placeholder="0.00"
@@ -1162,19 +1316,23 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 </div>
 
                 {/* Cart Footer: Totals & Submit Buttons */}
-                <div className="p-5 border-t border-gray-100 bg-gray-50/50 space-y-4">
+                <div className="p-5 border-t border-gray-100 bg-gray-50/50 space-y-4 shrink-0 pb-safe pb-[env(safe-area-inset-bottom,1.25rem)]">
                   <div className="space-y-2 text-xs">
+                    <div className="flex justify-between text-gray-600">
+                      <span>Subtotale Articoli (Imponibile):</span>
+                      <span className="font-mono font-bold">€ {orderTotals.totalTaxable.toFixed(2)}</span>
+                    </div>
+                    {totalDiscountAmount > 0 && (
+                      <div className="flex justify-between text-emerald-700 font-semibold">
+                        <span>Totale Sconti di Riga:</span>
+                        <span className="font-mono font-bold">-€ {totalDiscountAmount.toFixed(2)}</span>
+                      </div>
+                    )}
                     {discountTotal > 0 && (
-                      <>
-                        <div className="flex justify-between text-gray-600">
-                          <span>Subtotale Articoli (Ivato):</span>
-                          <span className="font-mono font-bold">€ {grossSubtotal.toFixed(2)}</span>
-                        </div>
-                        <div className="flex justify-between text-rose-600 font-semibold">
-                          <span>Sconti / Detrazioni (Ivato):</span>
-                          <span className="font-mono font-bold">-€ {discountTotal.toFixed(2)}</span>
-                        </div>
-                      </>
+                      <div className="flex justify-between text-rose-600 font-semibold">
+                        <span>Detrazioni Aggiuntive:</span>
+                        <span className="font-mono font-bold">-€ {discountTotal.toFixed(2)}</span>
+                      </div>
                     )}
                     <div className="flex justify-between text-gray-700 font-bold">
                       <span>Totale Imponibile:</span>
@@ -1250,21 +1408,21 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
       {/* Client Picker Modal */}
       <AnimatePresence>
         {isClientPickerOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-hidden">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsClientPickerOpen(false)}
-              className="fixed inset-0 bg-black/50 backdrop-blur-xs"
+              className="fixed inset-0 bg-black/50 backdrop-blur-xs pointer-events-auto cursor-pointer"
             />
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="relative w-full max-w-lg bg-white rounded-3xl p-6 shadow-2xl border border-gray-200 z-10 max-h-[85vh] flex flex-col"
+              className="relative w-full max-w-lg bg-white rounded-3xl p-5 sm:p-6 shadow-2xl border border-gray-200 z-10 max-h-[90dvh] sm:max-h-[85dvh] flex flex-col pointer-events-auto pb-safe pb-[env(safe-area-inset-bottom,1.5rem)]"
             >
-              <div className="flex justify-between items-center pb-4 border-b border-gray-100">
+              <div className="flex justify-between items-center pb-4 border-b border-gray-100 shrink-0">
                 <div>
                   <h3 className="text-lg font-black text-gray-900">Seleziona Cliente</h3>
                   <p className="text-xs text-gray-500">Scegli a chi intestare l'ordine</p>
@@ -1272,14 +1430,14 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 <button
                   type="button"
                   onClick={() => setIsClientPickerOpen(false)}
-                  className="p-1.5 hover:bg-gray-100 rounded-xl text-gray-400"
+                  className="p-1.5 hover:bg-gray-100 rounded-xl text-gray-400 cursor-pointer"
                 >
                   <X size={20} />
                 </button>
               </div>
 
               {/* Search input in modal */}
-              <div className="py-3">
+              <div className="py-3 shrink-0">
                 <div className="relative">
                   <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                   <input
@@ -1294,7 +1452,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
               </div>
 
               {/* Clients List */}
-              <div className="flex-1 overflow-y-auto space-y-2 py-2 pr-1">
+              <div className="flex-1 overflow-y-auto overscroll-contain space-y-2 py-2 pr-1">
                 {filteredClients.map(c => {
                   const isSelected = String(c.id) === String(selectedClientId);
                   return (
@@ -1334,18 +1492,18 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
       {/* Order Success Confirmation Modal */}
       <AnimatePresence>
         {orderSuccessModal.isOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-hidden">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/60 backdrop-blur-xs"
+              className="fixed inset-0 bg-black/60 backdrop-blur-xs pointer-events-auto"
             />
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="relative w-full max-w-md bg-white rounded-3xl p-6 sm:p-8 shadow-2xl text-center z-10 space-y-4"
+              className="relative w-full max-w-md bg-white rounded-3xl p-6 sm:p-8 shadow-2xl text-center z-10 space-y-4 max-h-[90dvh] overflow-y-auto overscroll-contain pointer-events-auto pb-safe pb-[env(safe-area-inset-bottom,1.5rem)]"
             >
               <div className="w-16 h-16 rounded-3xl bg-emerald-100 text-emerald-600 mx-auto flex items-center justify-center shadow-inner">
                 <Check size={32} />
@@ -1391,12 +1549,12 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 </div>
               </div>
 
-              {/* Azioni Riepilogo Ordine: Copia, Stampa e PDF */}
-              <div className="grid grid-cols-3 gap-2 pt-1">
+              {/* Azioni Riepilogo Ordine: Copia e Stampa */}
+              <div className="grid grid-cols-2 gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => handleCopySummary()}
-                  className="bg-amber-50 hover:bg-amber-100 border border-amber-200/80 text-amber-900 py-2.5 px-2 rounded-xl font-bold text-xs flex flex-col sm:flex-row items-center justify-center gap-1 transition-all active:scale-98 shadow-2xs cursor-pointer"
+                  className="bg-amber-50 hover:bg-amber-100 border border-amber-200/80 text-amber-900 py-2.5 px-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-98 shadow-2xs cursor-pointer"
                   title="Copia testo formattato negli appunti"
                 >
                   <Copy size={15} className="text-amber-700" />
@@ -1405,20 +1563,11 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 <button
                   type="button"
                   onClick={() => handlePrintOrder()}
-                  className="bg-blue-50 hover:bg-blue-100 border border-blue-200/80 text-blue-900 py-2.5 px-2 rounded-xl font-bold text-xs flex flex-col sm:flex-row items-center justify-center gap-1 transition-all active:scale-98 shadow-2xs cursor-pointer"
+                  className="bg-blue-50 hover:bg-blue-100 border border-blue-200/80 text-blue-900 py-2.5 px-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-98 shadow-2xs cursor-pointer"
                   title="Stampa documento ordine"
                 >
                   <Printer size={15} className="text-blue-700" />
                   <span className="truncate">Stampa</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDownloadPdf()}
-                  className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200/80 text-emerald-900 py-2.5 px-2 rounded-xl font-bold text-xs flex flex-col sm:flex-row items-center justify-center gap-1 transition-all active:scale-98 shadow-2xs cursor-pointer"
-                  title="Scarica documento in formato PDF A4"
-                >
-                  <Download size={15} className="text-emerald-700" />
-                  <span className="truncate">Scarica PDF</span>
                 </button>
               </div>
 

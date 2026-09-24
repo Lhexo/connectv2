@@ -13,19 +13,22 @@ TARGET_CONF="/etc/nginx/sites-available/default"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_CONF="$SCRIPT_DIR/nginx-danea.conf"
 
-echo "[1/4] Copia della configurazione in $TARGET_CONF..."
+echo "[1/5] Eliminazione file statici fantasma (Phantom Files)..."
+find /var/www /usr/share/nginx/html /var/www/html -type f \( -name "*uploadarticoli*" -o -name "*downloadordini*" -o -name "*uploadclienti*" -o -name "articoli.xml" -o -name "ordini.xml" -o -name "clienti.xml" \) -delete 2>/dev/null || true
+
+echo "[2/5] Copia della configurazione in $TARGET_CONF..."
 cp "$SOURCE_CONF" "$TARGET_CONF"
 
-echo "[2/4] Verifica link simbolico in sites-enabled..."
+echo "[3/5] Verifica link simbolico in sites-enabled..."
 mkdir -p /etc/nginx/sites-enabled
 if [ ! -L /etc/nginx/sites-enabled/default ]; then
   ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
 fi
 
-echo "[3/4] Validazione sintassi Nginx..."
+echo "[4/5] Validazione sintassi Nginx..."
 nginx -t
 
-echo "[4/4] Riavvio servizio Nginx..."
+echo "[5/5] Riavvio servizio Nginx..."
 if command -v systemctl >/dev/null 2>&1; then
   systemctl restart nginx
 elif command -v service >/dev/null 2>&1; then

@@ -89,8 +89,8 @@ export function isCacheableApiUrl(url: string): boolean {
       return false;
     }
 
-    // Do not cache real-time notification polls or auth check endpoints that need real-time ping
-    if (path.includes('/api/notifications') || path.includes('/api/health')) {
+    // Do not cache real-time notification polls, auth checks, or binary/PDF generation endpoints
+    if (path.includes('/api/notifications') || path.includes('/api/health') || path.includes('/pdf') || path.endsWith('.pdf')) {
       return false;
     }
 

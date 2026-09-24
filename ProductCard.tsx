@@ -32,9 +32,13 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   className = '',
 }) => {
   const isAvailable = Number(product.stock) > 0;
-  const grossPrice = Number(product.price) || 0;
-  const vatRate = product.vat_code ?? 22;
-  const taxablePrice = calculateTaxable(grossPrice, vatRate);
+  // Always use net taxable price properties, ignoring any gross price fields
+  const netPrice = Number(
+    (product as any).net_price ?? 
+    (product as any).net_price_1 ?? 
+    product.price ?? 
+    0
+  ) || 0;
   const imageUrl = product.image_file_name
     ? `/uploads/${encodeURIComponent(product.image_file_name.trim())}`
     : null;
@@ -118,14 +122,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({
       <div className="pt-3 border-t border-gray-100 flex items-center justify-between mt-auto">
         <div>
           <span className="text-[9px] text-gray-400 uppercase font-semibold block">Prezzo Base</span>
-          <div className="flex flex-col">
+          <div className="flex items-baseline gap-1">
             <span className="text-sm font-serif font-black text-[#5A5A40] leading-tight">
-              {formatEuro(taxablePrice)}{' '}
-              <span className="text-[10px] font-sans font-normal text-gray-500">+ IVA</span>
+              {formatEuro(netPrice)}
             </span>
-            <span className="text-[11px] text-gray-500 font-medium">
-              ({formatEuro(grossPrice)} inc.)
-            </span>
+            <span className="text-[10px] font-sans font-medium text-gray-500">(Imponibile)</span>
           </div>
         </div>
 

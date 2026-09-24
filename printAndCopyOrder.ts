@@ -1,6 +1,4 @@
 // Utility to reliably copy and print order summaries, optimized for iframe environments
-import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
 import { calculateTaxable, calculateLineTotals, calculateOrderTotals, parseVatRate } from './priceUtils';
 
 export interface PrintableOrderData {
@@ -24,12 +22,14 @@ export interface PrintableOrderData {
     code?: string;
     description?: string;
     qty: number;
-    price: number; // Gross price (Prezzo Ivato)
-    taxablePrice?: number; // Prezzo Imponibile scorporato al volo
+    price: number; // Gross or net price base
+    taxablePrice?: number; // Prezzo Imponibile unitario
     vatRate?: number; // Aliquota IVA (es. 22)
-    taxableTotal?: number; // Totale Imponibile riga
+    taxableTotal?: number; // Totale Imponibile riga scontato
     total?: number; // Totale Ivato riga
     um?: string;
+    discounts?: string;
+    discountPerc?: number;
   }[];
   taxableTotal?: number; // Totale Imponibile complessivo ordine
   vatTotal?: number; // Totale IVA complessivo ordine
@@ -191,9 +191,11 @@ export function buildPrintableFromOrder(order: any, client?: any): PrintableOrde
     const qty = Number(it.qty ?? it.quantity ?? it.Qty ?? 1) || 1;
     const price = Number(it.price ?? it.unit_price ?? it.Price ?? 0) || 0;
     const vatRate = parseVatRate(it.vatRate ?? it.vat_rate ?? it.vat_code ?? it.vatCode ?? it.VatCode ?? it.vat ?? 22, 22);
+    const discountPerc = it.discount_perc ?? it.discount ?? it.discountPerc;
+    const discounts = it.discounts ?? (discountPerc ? `${discountPerc}%` : '');
 
-    // Apply calculateTaxable & calculateLineTotals al volo
-    const lineTotals = calculateLineTotals(qty, price, vatRate);
+    // Apply calculateTaxable & calculateLineTotals al volo with discount support
+    const lineTotals = calculateLineTotals(qty, price, vatRate, discountPerc || discounts);
     const itemTotal = it.total !== undefined && it.total !== null ? Number(it.total) : lineTotals.totalGross;
     const um = String(it.um || it.Um || 'pz').trim();
 
@@ -201,19 +203,23 @@ export function buildPrintableFromOrder(order: any, client?: any): PrintableOrde
       code,
       description,
       qty,
-      price, // Gross price (Ivato)
+      price,
       taxablePrice: it.taxablePrice !== undefined ? Number(it.taxablePrice) : lineTotals.unitTaxable,
       vatRate: lineTotals.vatRate,
       taxableTotal: it.taxableTotal !== undefined ? Number(it.taxableTotal) : lineTotals.totalTaxable,
       total: itemTotal,
-      um
+      um,
+      discounts: discounts || (lineTotals.discountPerc ? `${lineTotals.discountPerc}%` : ''),
+      discountPerc: lineTotals.discountPerc
     };
   });
 
   const orderTotals = calculateOrderTotals(items.map(it => ({
     qty: it.qty,
     price: it.price,
-    vatRate: it.vatRate
+    vatRate: it.vatRate,
+    discount_perc: it.discountPerc,
+    discounts: it.discounts
   })));
 
   const total = Number(order.total ?? order.Total) || orderTotals.totalGross;
@@ -294,14 +300,14 @@ export function formatOrderPlainText(orderOrData: any, client?: any): string {
     order.items.forEach((item, index) => {
       const unitTaxable = item.taxablePrice !== undefined ? item.taxablePrice : calculateTaxable(item.price, item.vatRate || 22);
       const rowTaxable = item.taxableTotal !== undefined ? item.taxableTotal : Math.round(Number(item.qty || 0) * unitTaxable * 100) / 100;
-      const rowGross = item.total !== undefined ? item.total : (Number(item.qty || 0) * Number(item.price || 0));
       const vatRate = item.vatRate !== undefined ? item.vatRate : 22;
       const codePart = item.code ? `[${item.code}] ` : '';
       const umPart = item.um ? ` ${item.um}` : ' pz';
+      const discPart = item.discounts ? ` | Sconto: ${item.discounts}` : (item.discountPerc ? ` | Sconto: ${item.discountPerc}%` : '');
 
       lines.push(`${index + 1}. ${codePart}${item.description}`);
-      lines.push(`   Quantità: ${item.qty}${umPart} | Imp. Unit: € ${unitTaxable.toFixed(2)} (IVA ${vatRate}%) [Ivato € ${item.price.toFixed(2)}]`);
-      lines.push(`   Totale Riga: Imp. € ${rowTaxable.toFixed(2)} | Ivato € ${rowGross.toFixed(2)}`);
+      lines.push(`   Quantità: ${item.qty}${umPart} | Imp. Unit: € ${unitTaxable.toFixed(2)} (IVA ${vatRate}%)${discPart}`);
+      lines.push(`   Totale Riga Imp: € ${rowTaxable.toFixed(2)}`);
     });
   } else {
     lines.push('(Nessun articolo registrato)');
@@ -309,10 +315,10 @@ export function formatOrderPlainText(orderOrData: any, client?: any): string {
 
   lines.push('----------------------------------------');
   if (order.taxableTotal !== undefined && order.vatTotal !== undefined) {
-    lines.push(`Totale Imponibile: € ${order.taxableTotal.toFixed(2)}`);
-    lines.push(`Totale IVA:        € ${order.vatTotal.toFixed(2)}`);
+    lines.push(`Totale Imponibile: € ${Number(order.taxableTotal).toFixed(2)}`);
+    lines.push(`Totale IVA:        € ${Number(order.vatTotal).toFixed(2)}`);
   }
-  lines.push(`TOTALE ORDINE (Ivato): € ${order.total.toFixed(2)}`);
+  lines.push(`TOTALE ORDINE (Ivato): € ${Number(order.total || 0).toFixed(2)}`);
   lines.push('========================================');
   lines.push('Connect Beauty S.r.l. - Via dell\'Innovazione 12, Milano - ordini@connectbeauty.it');
 
@@ -358,20 +364,90 @@ export async function copyOrderToClipboard(orderOrData: any, client?: any): Prom
   }
 }
 
+export interface CompanyHeaderData {
+  id?: number;
+  company_name?: string;
+  company_address?: string;
+  company_postcode?: string;
+  company_city?: string;
+  company_province?: string;
+  company_country?: string;
+  company_vat_code?: string;
+  company_fiscal_code?: string;
+  company_tel?: string;
+  company_fax?: string;
+  company_email?: string;
+  company_pec?: string;
+  company_website?: string;
+  company_logo?: string;
+}
+
+let cachedCompanyHeader: CompanyHeaderData | null = null;
+
+export function setCachedCompanyHeader(header: CompanyHeaderData) {
+  cachedCompanyHeader = header;
+}
+
+export async function fetchCompanyHeaderData(): Promise<CompanyHeaderData> {
+  if (cachedCompanyHeader) {
+    return cachedCompanyHeader;
+  }
+  try {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const res = await fetch('/api/easyfatt/company-header', {
+      headers: {
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && (data.company_name || data.company_vat_code)) {
+        cachedCompanyHeader = data;
+        return data;
+      }
+    }
+  } catch (err) {
+    console.warn('Could not fetch company header from backend:', err);
+  }
+
+  // Fallback defaults
+  return {
+    company_name: 'Connect Beauty S.r.l.',
+    company_address: 'Via Armando Diaz 162',
+    company_postcode: '35010',
+    company_city: 'Vigonza',
+    company_province: 'PD',
+    company_country: 'Italia',
+    company_vat_code: '00165987261',
+    company_fiscal_code: '00165987261',
+    company_tel: '049/1234567',
+    company_fax: '049/1234568',
+    company_email: 'info@connect-beauty.it',
+    company_pec: 'connectbeauty@pec.it',
+    company_website: 'www.connect-beauty.it',
+    company_logo: ''
+  };
+}
+
 /**
  * Builds the complete A4 printable HTML layout
  */
-export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
-  const company = {
-    name: 'Connect Beauty S.r.l.',
-    address: 'Via dell\'Innovazione 12',
-    postcode: '20126',
-    city: 'Milano',
-    province: 'MI',
-    vat: 'IT12345678901',
-    phone: '+39 02 87654321',
-    email: 'ordini@connectbeauty.it',
-    web: 'www.connectbeauty.it'
+export function buildOrderDocumentHtml(printable: PrintableOrderData, companyHeader?: CompanyHeaderData): string {
+  const company: CompanyHeaderData = companyHeader || cachedCompanyHeader || {
+    company_name: 'Connect Beauty S.r.l.',
+    company_address: 'Via Armando Diaz 162',
+    company_postcode: '35010',
+    company_city: 'Vigonza',
+    company_province: 'PD',
+    company_country: 'Italia',
+    company_vat_code: '00165987261',
+    company_fiscal_code: '00165987261',
+    company_tel: '049/1234567',
+    company_fax: '049/1234568',
+    company_email: 'info@connect-beauty.it',
+    company_pec: 'connectbeauty@pec.it',
+    company_website: 'www.connect-beauty.it',
+    company_logo: ''
   };
 
   const rowsHtml = printable.items.map((it: any, idx) => {
@@ -380,12 +456,18 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
     const rowGross = it.total !== undefined ? it.total : (Number(it.qty || 0) * Number(it.price || 0));
     const vatRate = it.vatRate !== undefined ? it.vatRate : 22;
 
+    const discountDisplay = it.discounts || (it.discountPerc ? `${it.discountPerc}%` : '-');
+    const hasDiscount = it.discounts || (it.discountPerc && Number(it.discountPerc) > 0);
+
     return `
       <tr style="border-bottom: 1px solid #e2e8f0; ${idx % 2 === 1 ? 'background-color: #f8fafc;' : ''}">
         <td style="padding: 9px 8px; font-family: monospace; font-size: 11px; color: #475569;">${it.code || '-'}</td>
-        <td style="padding: 9px 8px; font-size: 12px; font-weight: 500; color: #0f172a;">${it.description}</td>
+        <td style="padding: 9px 8px; font-size: 12px; font-weight: 500; color: #0f172a;">
+          ${it.description}
+        </td>
         <td style="padding: 9px 8px; text-align: center; font-size: 12px; color: #334155;">${it.qty} ${it.um || 'pz'}</td>
         <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: #334155;">€ ${unitTaxable.toFixed(2)}</td>
+        <td style="padding: 9px 8px; text-align: center; font-size: 11px; ${hasDiscount ? 'font-weight: 700; color: #b91c1c;' : 'color: #64748b;'}">${discountDisplay}</td>
         <td style="padding: 9px 8px; text-align: center; font-size: 11px; color: #64748b;">${vatRate}%</td>
         <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: #334155;">€ ${rowTaxable.toFixed(2)}</td>
         <td style="padding: 9px 8px; text-align: right; font-weight: 700; font-size: 12px; font-family: monospace; color: #0f172a;">€ ${rowGross.toFixed(2)}</td>
@@ -521,17 +603,26 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
       </head>
       <body>
         <div class="header-box">
-          <div>
-            <div class="company-title">${company.name}</div>
-            <div style="color: #475569; margin-top: 4px; font-size: 12px;">
-              ${company.address} - ${company.postcode} ${company.city} (${company.province})<br>
-              P.IVA: ${company.vat} | Tel: ${company.phone} | Email: ${company.email}
+          <div style="max-width: 62%;">
+            ${company.company_logo ? `<img src="${company.company_logo}" alt="Logo" style="max-height: 52px; max-width: 220px; object-fit: contain; margin-bottom: 8px; display: block;" />` : ''}
+            <div class="company-title">${company.company_name || 'Connect Beauty S.r.l.'}</div>
+            <div style="color: #475569; margin-top: 4px; font-size: 11px; line-height: 1.45;">
+              ${company.company_address ? `${company.company_address}<br>` : ''}
+              ${(company.company_postcode || company.company_city) ? `${company.company_postcode || ''} ${company.company_city || ''} ${company.company_province ? `(${company.company_province})` : ''} ${company.company_country && company.company_country !== 'Italia' ? `- ${company.company_country}` : ''}<br>` : ''}
+              ${company.company_vat_code ? `P.IVA: <strong>${company.company_vat_code}</strong> ` : ''}
+              ${company.company_fiscal_code && company.company_fiscal_code !== company.company_vat_code ? `| C.F.: <strong>${company.company_fiscal_code}</strong>` : ''}
+              ${(company.company_vat_code || company.company_fiscal_code) && (company.company_tel || company.company_email) ? '<br>' : ''}
+              ${company.company_tel ? `Tel: ${company.company_tel} ` : ''}
+              ${company.company_email ? `| Email: ${company.company_email}` : ''}
+              ${(company.company_pec || company.company_website) ? '<br>' : ''}
+              ${company.company_pec ? `PEC: ${company.company_pec} ` : ''}
+              ${company.company_website ? `| Web: ${company.company_website}` : ''}
             </div>
           </div>
           <div class="doc-badge">
-            <div style="font-size: 11px; opacity: 0.8; text-transform: uppercase;">Conferma d'Ordine</div>
-            <div style="font-size: 18px; font-weight: 800;">${printable.orderNumber || ''}</div>
-            <div style="font-size: 11px; margin-top: 2px;">Data: ${printable.date || ''}</div>
+            <div style="font-size: 11px; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.5px;">Conferma d'Ordine</div>
+            <div style="font-size: 18px; font-weight: 800; margin: 2px 0;">${printable.orderNumber || ''}</div>
+            <div style="font-size: 11px;">Data: ${printable.date || ''}</div>
           </div>
         </div>
 
@@ -565,17 +656,18 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
         <table>
           <thead>
             <tr>
-              <th style="width: 11%;">Codice</th>
+              <th style="width: 10%;">Codice</th>
               <th>Descrizione Articolo</th>
-              <th style="width: 9%; text-align: center;">Quantità</th>
-              <th style="width: 14%; text-align: right;">Prezzo Imp.</th>
-              <th style="width: 8%; text-align: center;">IVA %</th>
-              <th style="width: 14%; text-align: right;">Tot. Imponibile</th>
-              <th style="width: 15%; text-align: right;">Totale Ivato</th>
+              <th style="width: 8%; text-align: center;">Quantità</th>
+              <th style="width: 12%; text-align: right;">Prezzo Imp.</th>
+              <th style="width: 9%; text-align: center;">Sconto %</th>
+              <th style="width: 7%; text-align: center;">IVA %</th>
+              <th style="width: 13%; text-align: right;">Tot. Imponibile</th>
+              <th style="width: 13%; text-align: right;">Totale Ivato</th>
             </tr>
           </thead>
           <tbody>
-            ${rowsHtml || '<tr><td colspan="7" style="text-align: center; padding: 16px; color: #64748b;">Nessun articolo presente</td></tr>'}
+            ${rowsHtml || '<tr><td colspan="8" style="text-align: center; padding: 16px; color: #64748b;">Nessun articolo presente</td></tr>'}
           </tbody>
         </table>
 
@@ -615,65 +707,12 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData): string {
 }
 
 /**
- * Directly renders and downloads a crisp A4 PDF document
+ * Universal print method: builds iframe and triggers print with browser print window fallback
  */
-export async function downloadOrderPdf(orderOrData: any, client?: any): Promise<boolean> {
+export async function printOrderDocument(orderOrData: any, client?: any, companyHeader?: CompanyHeaderData): Promise<void> {
   const printable = buildPrintableFromOrder(orderOrData, client);
-  const html = buildOrderDocumentHtml(printable);
-
-  try {
-    // Create an off-screen render container
-    const container = document.createElement('div');
-    container.style.position = 'fixed';
-    container.style.left = '-9999px';
-    container.style.top = '0';
-    container.style.width = '794px'; // Standard A4 width in px at 96 DPI
-    container.style.backgroundColor = '#ffffff';
-    container.style.zIndex = '-999';
-    container.innerHTML = html;
-    document.body.appendChild(container);
-
-    // Wait for fonts/layout to settle
-    await new Promise((r) => setTimeout(r, 100));
-
-    const canvas = await html2canvas(container, {
-      scale: 2,
-      useCORS: true,
-      logging: false,
-      backgroundColor: '#ffffff'
-    });
-
-    document.body.removeChild(container);
-
-    const imgData = canvas.toDataURL('image/png');
-    const pdf = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4'
-    });
-
-    const pdfWidth = pdf.internal.pageSize.getWidth();
-    const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
-
-    pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
-    
-    // Clean safe filename
-    const safeOrderNum = String(printable.orderNumber || 'bozza').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const safeClient = String(printable.clientName || 'cliente').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 20);
-    pdf.save(`Ordine_${safeOrderNum}_${safeClient}.pdf`);
-    return true;
-  } catch (err) {
-    console.error('downloadOrderPdf failed:', err);
-    return false;
-  }
-}
-
-/**
- * Universal print method: builds iframe, triggers print, and gracefully falls back to PDF if blocked
- */
-export async function printOrderDocument(orderOrData: any, client?: any): Promise<void> {
-  const printable = buildPrintableFromOrder(orderOrData, client);
-  const html = buildOrderDocumentHtml(printable);
+  const header = companyHeader || await fetchCompanyHeaderData();
+  const html = buildOrderDocumentHtml(printable, header);
 
   let printSuccess = false;
 
@@ -722,7 +761,7 @@ export async function printOrderDocument(orderOrData: any, client?: any): Promis
     return;
   }
 
-  // Fallback 1: Window open
+  // Fallback: Window open for direct print
   try {
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
     const blobUrl = URL.createObjectURL(blob);
@@ -732,11 +771,16 @@ export async function printOrderDocument(orderOrData: any, client?: any): Promis
       setTimeout(() => {
         try { win.print(); } catch {}
       }, 500);
-      return;
     }
-  } catch {}
+  } catch (winErr) {
+    console.warn('Print window open error:', winErr);
+  }
+}
 
-  // Fallback 2: Automatic PDF download so the user ALWAYS gets their printed/printable order!
-  console.log('Falling back to high-res PDF generation and download...');
-  await downloadOrderPdf(printable);
+/**
+ * Stub / No-op function preserved for code safety without UI impact
+ */
+export async function downloadOrderPdf(orderOrData?: any, client?: any): Promise<boolean> {
+  // Retained for backward compatibility
+  return true;
 }

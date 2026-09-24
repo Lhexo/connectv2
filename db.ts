@@ -1365,6 +1365,16 @@ export async function initDatabase(): Promise<void> {
   try { await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_synced BOOLEAN DEFAULT false, ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP`); } catch (e) {
     console.error('[PostgreSQL Engine ERROR] orders is_synced alter error:', e);
   }
+  try { 
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_cost NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS cost_amount NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS cost_description TEXT, ADD COLUMN IF NOT EXISTS cost_vat_code TEXT`); 
+  } catch (e) {
+    console.error('[PostgreSQL Engine ERROR] orders shipping columns alter error:', e);
+  }
+  try { 
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS discounts TEXT, ADD COLUMN IF NOT EXISTS discount NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS discount_perc NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS total NUMERIC(12,4) DEFAULT 0.0`); 
+  } catch (e) {
+    console.error('[PostgreSQL Engine ERROR] order_items discounts alter error:', e);
+  }
 
   try {
     // Clean and deduplicate products before unique index creation
@@ -1522,6 +1532,30 @@ export async function initDatabase(): Promise<void> {
         company_logo TEXT DEFAULT ''
       );
     `);
+
+    // Ensure all columns exist in case table was created with older schema
+    const chColumns = [
+      "company_name TEXT DEFAULT 'Connect Beauty S.r.l.'",
+      "company_address TEXT DEFAULT 'Via Armando Diaz 162'",
+      "company_postcode TEXT DEFAULT '35010'",
+      "company_city TEXT DEFAULT 'Vigonza'",
+      "company_province TEXT DEFAULT 'PD'",
+      "company_country TEXT DEFAULT 'Italia'",
+      "company_vat_code TEXT DEFAULT '00165987261'",
+      "company_fiscal_code TEXT DEFAULT '00165987261'",
+      "company_tel TEXT DEFAULT '049/1234567'",
+      "company_fax TEXT DEFAULT '049/1234568'",
+      "company_email TEXT DEFAULT 'info@connect-beauty.it'",
+      "company_pec TEXT DEFAULT 'connectbeauty@pec.it'",
+      "company_website TEXT DEFAULT 'www.connect-beauty.it'",
+      "company_logo TEXT DEFAULT ''"
+    ];
+
+    for (const col of chColumns) {
+      const colName = col.split(' ')[0];
+      await queryExec(`ALTER TABLE company_header ADD COLUMN IF NOT EXISTS ${col};`).catch(() => {});
+    }
+
     const existingCH = await queryGet('SELECT id FROM company_header WHERE id = 1');
     if (!existingCH) {
       await queryRun(`
@@ -1811,18 +1845,40 @@ export async function createOrderInPostgres(orderData: {
     description: string;
     qty: number;
     price: number;
-    vat_code: string;
-    um: string;
+    vat_code?: string;
+    um?: string;
+    discounts?: string;
+    discount?: number;
+    discount_perc?: number;
+    total?: number;
   }>;
   status: string;
 }): Promise<{ orderId: number; formattedNumber: string }> {
   const { client_id, agent_id, date, payment_name, payment_bank, notes, items, status } = orderData;
 
   return await withTransaction(async (pgClient) => {
-    // 1. Calculate total
+    // 1. Calculate total with discount percentage support
     let total = 0;
     for (const item of items) {
-      total += (Number(item.qty) || 0) * (Number(item.price) || 0);
+      const qty = Number(item.qty) || 1;
+      const price = Number(item.price) || 0;
+      let discPerc = 0;
+      if (item.discount_perc !== undefined && item.discount_perc !== null && Number(item.discount_perc) > 0) {
+        discPerc = Number(item.discount_perc);
+      } else if (item.discount !== undefined && item.discount !== null && Number(item.discount) > 0) {
+        discPerc = Number(item.discount);
+      } else if (item.discounts && String(item.discounts).trim()) {
+        const parsed = parseFloat(String(item.discounts).replace('%', '').trim());
+        if (!isNaN(parsed) && parsed > 0) discPerc = parsed;
+      }
+
+      let lineTotal = 0;
+      if (item.total !== undefined && item.total !== null && Number(item.total) !== 0) {
+        lineTotal = Number(item.total);
+      } else {
+        lineTotal = discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price);
+      }
+      total += lineTotal;
     }
 
     // 2. Insert order in PostgreSQL
@@ -1861,24 +1917,44 @@ export async function createOrderInPostgres(orderData: {
 
     // 3. Insert items in PostgreSQL & update stock
     for (const item of items) {
+      const qty = Number(item.qty) || 1;
+      const price = Number(item.price) || 0;
+      let discPerc = 0;
+      if (item.discount_perc !== undefined && item.discount_perc !== null && Number(item.discount_perc) > 0) {
+        discPerc = Number(item.discount_perc);
+      } else if (item.discount !== undefined && item.discount !== null && Number(item.discount) > 0) {
+        discPerc = Number(item.discount);
+      } else if (item.discounts && String(item.discounts).trim()) {
+        const parsed = parseFloat(String(item.discounts).replace('%', '').trim());
+        if (!isNaN(parsed) && parsed > 0) discPerc = parsed;
+      }
+      const discountsStr = item.discounts || (discPerc > 0 ? `${discPerc}%` : '');
+      const lineTotal = item.total !== undefined && item.total !== null && Number(item.total) !== 0
+        ? Number(item.total)
+        : (discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price));
+
       await pgClient.query(
-        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um, discounts, discount, discount_perc, total)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
         [
           orderId,
           item.product_code,
           item.description,
-          Number(item.qty) || 1,
-          Number(item.price) || 0,
+          qty,
+          price,
           item.vat_code || '22',
-          item.um || 'pz'
+          item.um || 'pz',
+          discountsStr || null,
+          discPerc || 0,
+          discPerc || 0,
+          lineTotal
         ]
       );
 
       if (status !== 'Bozza') {
         await pgClient.query(
           'UPDATE products SET stock = GREATEST(0, stock - $1) WHERE code = $2',
-          [Number(item.qty) || 0, item.product_code]
+          [qty, item.product_code]
         );
       }
     }
@@ -1918,8 +1994,12 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
     description: string;
     qty: number;
     price: number;
-    vat_code: string;
-    um: string;
+    vat_code?: string;
+    um?: string;
+    discounts?: string;
+    discount?: number;
+    discount_perc?: number;
+    total?: number;
   }>;
   status: string;
 }): Promise<void> {
@@ -1928,7 +2008,25 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
   await withTransaction(async (pgClient) => {
     let total = 0;
     for (const item of items) {
-      total += (Number(item.qty) || 0) * (Number(item.price) || 0);
+      const qty = Number(item.qty) || 1;
+      const price = Number(item.price) || 0;
+      let discPerc = 0;
+      if (item.discount_perc !== undefined && item.discount_perc !== null && Number(item.discount_perc) > 0) {
+        discPerc = Number(item.discount_perc);
+      } else if (item.discount !== undefined && item.discount !== null && Number(item.discount) > 0) {
+        discPerc = Number(item.discount);
+      } else if (item.discounts && String(item.discounts).trim()) {
+        const parsed = parseFloat(String(item.discounts).replace('%', '').trim());
+        if (!isNaN(parsed) && parsed > 0) discPerc = parsed;
+      }
+
+      let lineTotal = 0;
+      if (item.total !== undefined && item.total !== null && Number(item.total) !== 0) {
+        lineTotal = Number(item.total);
+      } else {
+        lineTotal = discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price);
+      }
+      total += lineTotal;
     }
 
     // 1. Update order in PostgreSQL
@@ -1940,10 +2038,26 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
     // 2. Replace items in PostgreSQL
     await pgClient.query('DELETE FROM order_items WHERE order_id = $1', [orderId]);
     for (const item of items) {
+      const qty = Number(item.qty) || 1;
+      const price = Number(item.price) || 0;
+      let discPerc = 0;
+      if (item.discount_perc !== undefined && item.discount_perc !== null && Number(item.discount_perc) > 0) {
+        discPerc = Number(item.discount_perc);
+      } else if (item.discount !== undefined && item.discount !== null && Number(item.discount) > 0) {
+        discPerc = Number(item.discount);
+      } else if (item.discounts && String(item.discounts).trim()) {
+        const parsed = parseFloat(String(item.discounts).replace('%', '').trim());
+        if (!isNaN(parsed) && parsed > 0) discPerc = parsed;
+      }
+      const discountsStr = item.discounts || (discPerc > 0 ? `${discPerc}%` : '');
+      const lineTotal = item.total !== undefined && item.total !== null && Number(item.total) !== 0
+        ? Number(item.total)
+        : (discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price));
+
       await pgClient.query(
-        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [orderId, item.product_code, item.description, Number(item.qty) || 1, Number(item.price) || 0, item.vat_code || '22', item.um || 'pz']
+        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um, discounts, discount, discount_perc, total)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [orderId, item.product_code, item.description, qty, price, item.vat_code || '22', item.um || 'pz', discountsStr || null, discPerc || 0, discPerc || 0, lineTotal]
       );
     }
 
