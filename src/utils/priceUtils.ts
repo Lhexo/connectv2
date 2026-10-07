@@ -89,7 +89,8 @@ export function calculateLineTotals(
   qty: number | string,
   netUnitPrice: number | string,
   vatRate: number | string = 22,
-  discountPercOrDiscounts?: number | string | null
+  discountPercOrDiscounts?: number | string | null,
+  customTotalTaxable?: number | null
 ): LineTotals {
   const cleanQty = typeof qty === 'number' ? qty : parseFloat(String(qty)) || 0;
   const cleanNet = typeof netUnitPrice === 'number' ? netUnitPrice : parseFloat(String(netUnitPrice)) || 0;
@@ -100,19 +101,26 @@ export function calculateLineTotals(
   const unitVat = Math.round(cleanNet * (rate / 100) * 100) / 100;
   const unitGross = Math.round((cleanNet + unitVat) * 100) / 100;
 
-  // Imponibile totale riga: (prezzo_netto * quantità) * (1 - (sconto_percentuale / 100))
+  // Imponibile totale riga:
+  // Se è stato inserito direttamente un valore nel campo TOTALE RIGA IMPONIBILE, si usa quel valore esatto.
+  // Altrimenti: (prezzo_netto * quantità) * (1 - (sconto_percentuale / 100))
+  let totalTaxable: number;
   const rawLineTaxable = cleanQty * cleanNet;
-  const discountMultiplier = Math.max(0, 1 - (discountPerc / 100));
-  const totalTaxable = cleanNet < 0 
-    ? Math.round(rawLineTaxable * 100) / 100 
-    : Math.max(0, Math.round(rawLineTaxable * discountMultiplier * 100) / 100);
-  const discountAmount = cleanNet < 0 
-    ? 0 
-    : Math.max(0, Math.round((rawLineTaxable - totalTaxable) * 100) / 100);
 
-  const totalVat = cleanNet < 0 
-    ? 0 
-    : Math.max(0, Math.round(totalTaxable * (rate / 100) * 100) / 100);
+  if (customTotalTaxable !== undefined && customTotalTaxable !== null && !isNaN(Number(customTotalTaxable))) {
+    totalTaxable = Math.round(Number(customTotalTaxable) * 100) / 100;
+  } else {
+    const discountMultiplier = Math.max(0, 1 - (discountPerc / 100));
+    totalTaxable = Math.round(rawLineTaxable * discountMultiplier * 100) / 100;
+  }
+
+  // Sconto valore monetario: differenza tra lordo teorico e imponibile netto scontato
+  const discountAmount = cleanNet > 0 && totalTaxable < rawLineTaxable
+    ? Math.max(0, Math.round((rawLineTaxable - totalTaxable) * 100) / 100)
+    : 0;
+
+  // IVA calcolata su imponibile riga (supporta correttamente anche importi negativi)
+  const totalVat = Math.round(totalTaxable * (rate / 100) * 100) / 100;
   const totalGross = Math.round((totalTaxable + totalVat) * 100) / 100;
 
   return {
@@ -130,15 +138,17 @@ export function calculateLineTotals(
 
 /**
  * Calculates aggregate order totals across an array of cart/order items.
- * Performs accurate per-item VAT calculations:
- * - Totale Imponibile: sum of all line taxable amounts (scontati)
- * - Totale IVA: sum of line VAT (line total taxable * vatRate / 100) for each item to prevent rounding discrepancies
- * - Totale Ordine (Ivato): Totale Imponibile + Totale IVA
+ * Procedura fiscale corretta:
+ * 1. Valuta per ciascuna riga l'imponibile effettivo (quantità, sconti % ed eventuali valori manuali diretti).
+ * 2. Esegue la somma algebrica tra tutte le righe (inclusi valori negativi: sconti, detrazioni, storni).
+ * 3. E SOLO DOPO calcola l'IVA sulle somme aggregate degli imponibili per aliquota.
+ * 4. Totale Ordine (Ivato) = Totale Imponibile + Totale IVA.
  */
 export interface OrderTotals {
   totalTaxable: number;
   totalVat: number;
   totalGross: number;
+  vatBreakdown?: Record<number, { taxable: number; vat: number }>;
 }
 
 export function calculateOrderTotals(
@@ -155,14 +165,18 @@ export function calculateOrderTotals(
     discount_perc?: number | string | null;
     discount?: number | string | null;
     discounts?: string | number | null;
+    custom_taxable_total?: number | null;
+    taxable_total?: number | null;
+    taxableTotal?: number | null;
+    line_total?: number | null;
+    total?: number | null;
   }>
 ): OrderTotals {
-  let sumTaxable = 0;
-  let sumVat = 0;
+  // Raggruppa gli imponibili per ciascuna aliquota IVA per applicare l'imposta solo dopo aver sommato tutte le righe
+  const rateTaxableMap: Record<number, number> = {};
 
   items.forEach(item => {
     const qty = Number(item.qty !== undefined ? item.qty : (item.quantity !== undefined ? item.quantity : 1)) || 0;
-    // Always use net taxable price, ignoring gross fields
     const price = Number(
       item.price !== undefined 
         ? item.price 
@@ -190,14 +204,43 @@ export function calculateOrderTotals(
             : item.discount)
     );
 
-    const rawTaxable = qty * price;
-    const lineTaxable = price < 0 
-      ? Math.round(rawTaxable * 100) / 100
-      : Math.max(0, Math.round(rawTaxable * (1 - (disc / 100)) * 100) / 100);
-    const lineVat = price < 0 ? 0 : Math.max(0, Math.round(lineTaxable * (vatRate / 100) * 100) / 100);
+    // Valuta eventuale override manuale per il totale riga imponibile
+    const customTotal = item.custom_taxable_total !== undefined && item.custom_taxable_total !== null
+      ? Number(item.custom_taxable_total)
+      : (item.taxable_total !== undefined && item.taxable_total !== null
+          ? Number(item.taxable_total)
+          : (item.taxableTotal !== undefined && item.taxableTotal !== null
+              ? Number(item.taxableTotal)
+              : null));
 
-    sumTaxable += lineTaxable;
-    sumVat += lineVat;
+    let lineTaxable: number;
+    if (customTotal !== null && !isNaN(customTotal)) {
+      lineTaxable = Math.round(customTotal * 100) / 100;
+    } else {
+      const rawTaxable = qty * price;
+      const discountMultiplier = Math.max(0, 1 - (disc / 100));
+      lineTaxable = Math.round(rawTaxable * discountMultiplier * 100) / 100;
+    }
+
+    if (!rateTaxableMap[vatRate]) {
+      rateTaxableMap[vatRate] = 0;
+    }
+    rateTaxableMap[vatRate] += lineTaxable;
+  });
+
+  let sumTaxable = 0;
+  let sumVat = 0;
+  const vatBreakdown: Record<number, { taxable: number; vat: number }> = {};
+
+  // Solo dopo aver sommato gli imponibili di tutte le righe si calcola l'IVA
+  Object.keys(rateTaxableMap).forEach(rateKey => {
+    const rate = Number(rateKey);
+    const taxableForRate = Math.round(rateTaxableMap[rate] * 100) / 100;
+    const vatForRate = Math.round(taxableForRate * (rate / 100) * 100) / 100;
+
+    sumTaxable += taxableForRate;
+    sumVat += vatForRate;
+    vatBreakdown[rate] = { taxable: taxableForRate, vat: vatForRate };
   });
 
   const totalTaxable = Math.round(sumTaxable * 100) / 100;
@@ -207,7 +250,8 @@ export function calculateOrderTotals(
   return {
     totalTaxable,
     totalVat,
-    totalGross
+    totalGross,
+    vatBreakdown
   };
 }
 

@@ -17,6 +17,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Client, User } from '../types';
 import { apiClient } from '../lib/api';
+import { cn } from '../lib/utils';
 
 interface EasyfattClientModalProps {
   isOpen: boolean;
@@ -164,6 +165,12 @@ export const EasyfattClientModal: React.FC<EasyfattClientModalProps> = ({
     if (!formData.name?.trim()) {
       setError('La Ragione Sociale / Nome cliente è un campo obbligatorio.');
       setActiveTab('anagrafica');
+      return;
+    }
+
+    if (!formData.payment_bank?.trim()) {
+      setError('La Banca di Appoggio / Coordinate IBAN è un campo obbligatorio per l\'anagrafica Easyfatt XML.');
+      setActiveTab('commerciale');
       return;
     }
 
@@ -317,7 +324,7 @@ export const EasyfattClientModal: React.FC<EasyfattClientModalProps> = ({
             }`}
           >
             <CreditCard size={14} />
-            <span>4. Listino & Pagamento</span>
+            <span>4. Listino & Pagamento <span className="text-rose-500 font-black">*</span></span>
           </button>
         </div>
 
@@ -807,18 +814,31 @@ export const EasyfattClientModal: React.FC<EasyfattClientModalProps> = ({
                 </div>
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <label className="text-xs font-bold text-gray-700 flex items-center justify-between">
-                  <span>Banca di Appoggio / Coordinate IBAN</span>
+                  <span className="flex items-center gap-1.5">
+                    <span>Banca di Appoggio / Coordinate IBAN</span>
+                    <span className="text-rose-500 font-black">*</span>
+                    <span className="text-[9px] font-black uppercase tracking-wider text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded">
+                      Obbligatorio
+                    </span>
+                  </span>
                   <span className="text-[10px] text-gray-400 font-mono">&lt;PaymentBank&gt;</span>
                 </label>
                 <input
+                  required
                   type="text"
                   value={formData.payment_bank || ''}
                   onChange={e => handleChange('payment_bank', e.target.value)}
                   placeholder="Es. Intesa Sanpaolo - IBAN IT83 H062 2562 9610 7404 2366 76W"
-                  className="w-full bg-gray-50 border border-gray-200 rounded-xl p-2.5 text-sm font-mono focus:ring-2 focus:ring-[#5A5A40]/20 focus:border-[#5A5A40] transition-all"
+                  className={cn(
+                    "w-full bg-gray-50 border rounded-xl p-2.5 text-sm font-mono focus:ring-2 focus:ring-[#5A5A40]/20 focus:border-[#5A5A40] transition-all",
+                    !formData.payment_bank?.trim() && error ? "border-rose-400 bg-rose-50/20" : "border-gray-200"
+                  )}
                 />
+                <p className="text-[11px] text-gray-500 font-medium">
+                  Specificare la denominazione della banca e/o il codice IBAN per la generazione dei documenti Easyfatt XML.
+                </p>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

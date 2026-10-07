@@ -1432,9 +1432,10 @@ export async function initDatabase(): Promise<void> {
     'net_size_x NUMERIC(12,4) DEFAULT 0.0', 'net_size_y NUMERIC(12,4) DEFAULT 0.0', 'net_size_z NUMERIC(12,4) DEFAULT 0.0',
     'packing_size_x NUMERIC(12,4) DEFAULT 0.0', 'packing_size_y NUMERIC(12,4) DEFAULT 0.0', 'packing_size_z NUMERIC(12,4) DEFAULT 0.0',
     'custom_field1 TEXT', 'custom_field2 TEXT', 'custom_field3 TEXT', 'custom_field4 TEXT',
+    'custom_field_1 TEXT', 'custom_field_2 TEXT', 'custom_field_3 TEXT', 'custom_field_4 TEXT',
     'online_promo TEXT', 'online_warranty TEXT', 'online_category_image TEXT', 'online_notes TEXT',
     'online_customized BOOLEAN DEFAULT FALSE',
-    'classe_provvigione TEXT',
+    'classe_provvigione TEXT', 'updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
     'net_price_1 NUMERIC(12,4) DEFAULT 0.0', 'net_price_2 NUMERIC(12,4) DEFAULT 0.0', 'net_price_3 NUMERIC(12,4) DEFAULT 0.0',
     'net_price_4 NUMERIC(12,4) DEFAULT 0.0', 'net_price_5 NUMERIC(12,4) DEFAULT 0.0', 'net_price_6 NUMERIC(12,4) DEFAULT 0.0',
     'net_price_7 NUMERIC(12,4) DEFAULT 0.0', 'net_price_8 NUMERIC(12,4) DEFAULT 0.0', 'net_price_9 NUMERIC(12,4) DEFAULT 0.0',
@@ -1448,6 +1449,14 @@ export async function initDatabase(): Promise<void> {
     const productAddCols = productCols.map(c => `ADD COLUMN IF NOT EXISTS ${c}`).join(', ');
     await pool.query(`ALTER TABLE products ${productAddCols}`);
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS classe_provvigione TEXT`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS custom_field_1 TEXT`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS custom_field_2 TEXT`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS custom_field_3 TEXT`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS custom_field_4 TEXT`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+    try { await pool.query(`ALTER TABLE products ALTER COLUMN description DROP NOT NULL`); } catch (e) {}
+    try { await pool.query(`ALTER TABLE products ALTER COLUMN description SET DEFAULT ''`); } catch (e) {}
+    try { await pool.query(`ALTER TABLE products ALTER COLUMN price SET DEFAULT 0.0`); } catch (e) {}
   } catch (e) {
     console.error('[PostgreSQL Engine ERROR] productCols alter table error:', e);
   }
@@ -2002,8 +2011,9 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
     total?: number;
   }>;
   status: string;
+  number?: string;
 }): Promise<void> {
-  const { client_id, date, payment_name, payment_bank, notes, items, status } = orderData;
+  const { client_id, date, payment_name, payment_bank, notes, items, status, number } = orderData;
 
   await withTransaction(async (pgClient) => {
     let total = 0;
@@ -2030,10 +2040,17 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
     }
 
     // 1. Update order in PostgreSQL
-    await pgClient.query(
-      `UPDATE orders SET client_id = $1, date = $2, payment_name = $3, payment_bank = $4, notes = $5, total = $6, status = $7 WHERE id = $8`,
-      [client_id, date, payment_name || 'Bonifico bancario', payment_bank || '', notes || '', total, status || 'Nuovo', orderId]
-    );
+    if (number !== undefined && String(number).trim() !== '') {
+      await pgClient.query(
+        `UPDATE orders SET client_id = $1, date = $2, payment_name = $3, payment_bank = $4, notes = $5, total = $6, status = $7, number = $8 WHERE id = $9`,
+        [client_id, date, payment_name || 'Bonifico bancario', payment_bank || '', notes || '', total, status || 'Nuovo', String(number).trim(), orderId]
+      );
+    } else {
+      await pgClient.query(
+        `UPDATE orders SET client_id = $1, date = $2, payment_name = $3, payment_bank = $4, notes = $5, total = $6, status = $7 WHERE id = $8`,
+        [client_id, date, payment_name || 'Bonifico bancario', payment_bank || '', notes || '', total, status || 'Nuovo', orderId]
+      );
+    }
 
     // 2. Replace items in PostgreSQL
     await pgClient.query('DELETE FROM order_items WHERE order_id = $1', [orderId]);
@@ -2085,6 +2102,23 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
  */
 export async function deleteOrderInPostgres(orderId: number): Promise<void> {
   await withTransaction(async (pgClient) => {
+    try {
+      const orderRes = await pgClient.query('SELECT status FROM orders WHERE id = $1', [orderId]);
+      if (orderRes.rows.length > 0 && orderRes.rows[0].status !== 'Bozza') {
+        const itemsRes = await pgClient.query('SELECT product_code, qty FROM order_items WHERE order_id = $1', [orderId]);
+        for (const item of itemsRes.rows) {
+          await pgClient.query('UPDATE products SET stock = stock + $1 WHERE code = $2', [Number(item.qty) || 0, item.product_code]);
+        }
+      }
+    } catch (e) {
+      console.warn(`[deleteOrderInPostgres] Stock restore warning for order ${orderId}:`, e);
+    }
+
+    try {
+      await pgClient.query('DELETE FROM order_payments WHERE order_id = $1', [orderId]);
+    } catch (e) {
+      // Ignore if table does not exist
+    }
     await pgClient.query('DELETE FROM order_items WHERE order_id = $1', [orderId]);
     await pgClient.query('DELETE FROM orders WHERE id = $1', [orderId]);
   }, 'DeleteOrderPostgres');

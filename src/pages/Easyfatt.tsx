@@ -50,7 +50,8 @@ import {
   XCircle,
   ZoomIn,
   Truck,
-  ChevronRight
+  ChevronRight,
+  Hash
 } from 'lucide-react';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -58,12 +59,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import GirovisiteSection from '../components/GirovisiteSection';
 import ClientSalesHistory from '../components/ClientSalesHistory';
-import { printOrderDocument, copyOrderToClipboard, setCachedCompanyHeader } from '../utils/printAndCopyOrder';
+import { printOrderDocument, copyOrderToClipboard, setCachedCompanyHeader, downloadOrderPdf } from '../utils/printAndCopyOrder';
 import EditableAmountInput from '../components/EditableAmountInput';
 import { useTablePagination } from '../hooks/useTablePagination';
 import { DataTablePagination } from '../components/DataTablePagination';
 import { TableSortHeader } from '../components/TableSortHeader';
 import { calculateTaxable, calculateLineTotals, calculateOrderTotals, formatEuro } from '../utils/priceUtils';
+import { computeComprehensiveStats, computePaymentDeadlines } from '../utils/statsUtils';
 
 interface Product {
   id: number;
@@ -336,6 +338,13 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState(false);
 
+  // States for Order Numbering Edit & Bulk Deletion (Admin tools)
+  const [orderToEditNumber, setOrderToEditNumber] = useState<Order | null>(null);
+  const [newOrderNumberInput, setNewOrderNumberInput] = useState('');
+  const [isSavingOrderNumber, setIsSavingOrderNumber] = useState(false);
+  const [isBulkDeleteModalOpen, setIsBulkDeleteModalOpen] = useState(false);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+
   // States for XML Order Import (Danea Easyfatt Historical Orders)
   const [isOrdersXmlModalOpen, setIsOrdersXmlModalOpen] = useState(false);
   const [isImportingOrdersXml, setIsImportingOrdersXml] = useState(false);
@@ -458,206 +467,21 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   // --- STATS SYSTEM COMPUTATIONS ---
   const stats = React.useMemo(() => {
-    // 1. Filter orders based on user selected time range, status, and agent
-    let filteredOrders = [...orders];
-
-    if (statsStatusFilter === 'completed') {
-      filteredOrders = filteredOrders.filter(o => o.status === 'Esportato' || o.status === 'Confermato' || o.status === 'Inviato');
-    } else if (statsStatusFilter === 'draft') {
-      filteredOrders = filteredOrders.filter(o => o.status === 'Bozza');
-    }
-
-    if (statsAgentFilter !== 'all') {
-      filteredOrders = filteredOrders.filter(o => o.agent_name === statsAgentFilter);
-    }
-
-    if (selectedMonthFilter !== 'ALL') {
-      filteredOrders = filteredOrders.filter(o => o.date && o.date.startsWith(selectedMonthFilter));
-    }
-
-    const now = new Date();
-    if (statsTimeRange === 'year') {
-      const currentYear = now.getFullYear();
-      filteredOrders = filteredOrders.filter(o => {
-        const d = new Date(o.date);
-        return !isNaN(d.getTime()) && d.getFullYear() === currentYear;
-      });
-    } else if (statsTimeRange === 'month') {
-      const monthPrefix = now.toISOString().substring(0, 7);
-      filteredOrders = filteredOrders.filter(o => o.date && o.date.startsWith(monthPrefix));
-    } else if (statsTimeRange === '30days') {
-      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      filteredOrders = filteredOrders.filter(o => {
-        const d = new Date(o.date);
-        return !isNaN(d.getTime()) && d >= thirtyDaysAgo;
-      });
-    }
-
-    // 2. Orders / Sales stats
-    const totalSales = filteredOrders.reduce((sum, o) => sum + Number(o.total || 0), 0);
-    const draftSales = filteredOrders.filter(o => o.status === 'Bozza').reduce((sum, o) => sum + Number(o.total || 0), 0);
-    const transmittedSales = filteredOrders.filter(o => o.status !== 'Bozza').reduce((sum, o) => sum + Number(o.total || 0), 0);
-    const ordersCount = filteredOrders.length;
-    const completedOrdersCount = filteredOrders.filter(o => o.status !== 'Bozza').length;
-    const draftOrdersCount = filteredOrders.filter(o => o.status === 'Bozza').length;
-    const aov = ordersCount > 0 ? totalSales / ordersCount : 0;
-
-    // Total quantity of items sold
-    let totalQuantitySold = 0;
-    filteredOrders.forEach(o => {
-      if (o.items) {
-        o.items.forEach(item => {
-          totalQuantitySold += Number(item.qty || 0);
-        });
-      }
+    const rawStats = computeComprehensiveStats({
+      orders,
+      clients,
+      products,
+      user,
+      selectedAgentFilter: isUserAdmin ? statsAgentFilter : (user?.name || 'my'),
+      timeRangeFilter: statsTimeRange,
+      orderStatusFilter: statsStatusFilter === 'completed' ? 'confirm' : (statsStatusFilter === 'draft' ? 'draft' : 'all'),
+      customMonthFilter: selectedMonthFilter,
+      paymentMethods
     });
 
-    // Active clients
-    const activeClientIds = new Set(filteredOrders.map(o => o.client_id));
-    const activeClientsCount = activeClientIds.size;
-    const avgRevenuePerClient = activeClientsCount > 0 ? totalSales / activeClientsCount : 0;
-
-    // 3. Client aggregates (Top spent clients)
-    const clientAggregates: Record<number, { id: number; name: string; city: string; spent: number; ordersCount: number; orderCount: number }> = {};
-    filteredOrders.forEach(o => {
-      if (!clientAggregates[o.client_id]) {
-        clientAggregates[o.client_id] = {
-          id: o.client_id,
-          name: o.client_name || 'N/D',
-          city: '',
-          spent: 0,
-          ordersCount: 0,
-          orderCount: 0
-        };
-        const cl = clients.find(c => c.id === o.client_id);
-        if (cl) {
-          clientAggregates[o.client_id].city = cl.city || '';
-        }
-      }
-      clientAggregates[o.client_id].spent += Number(o.total || 0);
-      clientAggregates[o.client_id].ordersCount += 1;
-      clientAggregates[o.client_id].orderCount += 1;
-    });
-
-    const topSpentClients = Object.values(clientAggregates)
-      .sort((a, b) => b.spent - a.spent)
-      .slice(0, 10);
-
-    // Geographic distribution (by City)
-    const cityAggregates: Record<string, { city: string; spent: number; ordersCount: number }> = {};
-    Object.values(clientAggregates).forEach(ca => {
-      const cityKey = ca.city || 'Non Specificata';
-      if (!cityAggregates[cityKey]) {
-        cityAggregates[cityKey] = { city: cityKey, spent: 0, ordersCount: 0 };
-      }
-      cityAggregates[cityKey].spent += ca.spent;
-      cityAggregates[cityKey].ordersCount += ca.ordersCount;
-    });
-    const topCities = Object.values(cityAggregates)
-      .sort((a, b) => b.spent - a.spent)
-      .slice(0, 6);
-
-    const cityBreakdown = Object.values(cityAggregates)
-      .map(ca => ({
-        city: ca.city,
-        revenue: ca.spent,
-        count: ca.ordersCount
-      }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 6);
-
-    // 4. Product & Category aggregates
-    const productSalesAggregates: Record<string, { code: string; description: string; qty: number; revenue: number; category: string; stock: number }> = {};
-    const categorySalesAggregates: Record<string, { category: string; qty: number; revenue: number }> = {};
-
-    filteredOrders.forEach(o => {
-      if (o.items) {
-        o.items.forEach(item => {
-          const prod = products.find(p => p.code === item.product_code);
-          const cat = prod?.category || 'Senza Categoria';
-          const stock = prod ? Number(prod.stock) : 0;
-
-          if (!productSalesAggregates[item.product_code]) {
-            productSalesAggregates[item.product_code] = {
-              code: item.product_code,
-              description: item.description || prod?.description || '',
-              qty: 0,
-              revenue: 0,
-              category: cat,
-              stock
-            };
-          }
-          productSalesAggregates[item.product_code].qty += Number(item.qty || 0);
-          productSalesAggregates[item.product_code].revenue += Number(item.qty || 0) * Number(item.price || 0);
-
-          if (!categorySalesAggregates[cat]) {
-            categorySalesAggregates[cat] = { category: cat, qty: 0, revenue: 0 };
-          }
-          categorySalesAggregates[cat].qty += Number(item.qty || 0);
-          categorySalesAggregates[cat].revenue += Number(item.qty || 0) * Number(item.price || 0);
-        });
-      }
-    });
-
-    const topProducts = Object.values(productSalesAggregates)
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, 10);
-
-    const totalCatRevenue = Object.values(categorySalesAggregates).reduce((sum, cat) => sum + cat.revenue, 0) || 1;
-    const categoryBreakdown = Object.values(categorySalesAggregates)
-      .map(cat => ({
-        ...cat,
-        percentage: Math.round((cat.revenue / totalCatRevenue) * 100)
-      }))
-      .sort((a, b) => b.revenue - a.revenue);
-
-    // 5. Payment Methods Breakdown
-    const paymentAggregates: Record<string, { name: string; count: number; total: number }> = {};
-    filteredOrders.forEach(o => {
-      const pmName = o.payment_name || 'Non specificato';
-      if (!paymentAggregates[pmName]) {
-        paymentAggregates[pmName] = { name: pmName, count: 0, total: 0 };
-      }
-      paymentAggregates[pmName].count += 1;
-      paymentAggregates[pmName].total += Number(o.total || 0);
-    });
-    const totalPaymentVol = Object.values(paymentAggregates).reduce((sum, pm) => sum + pm.total, 0) || 1;
-    const paymentBreakdown = Object.values(paymentAggregates)
-      .map(pm => ({
-        ...pm,
-        volume: pm.total,
-        percentage: Math.round((pm.total / totalPaymentVol) * 100)
-      }))
-      .sort((a, b) => b.volume - a.volume);
-
-    // 6. Agent Performance Breakdown
-    const agentAggregates: Record<string, { name: string; count: number; total: number; aov: number }> = {};
-    filteredOrders.forEach(o => {
-      const agName = o.agent_name || 'Diretto / Sede';
-      if (!agentAggregates[agName]) {
-        agentAggregates[agName] = { name: agName, count: 0, total: 0, aov: 0 };
-      }
-      agentAggregates[agName].count += 1;
-      agentAggregates[agName].total += Number(o.total || 0);
-    });
-    Object.values(agentAggregates).forEach(ag => {
-      ag.aov = ag.count > 0 ? ag.total / ag.count : 0;
-    });
-    const agentBreakdown = Object.values(agentAggregates).sort((a, b) => b.total - a.total);
-
-    // 7. Products inventory stats
-    const totalProductsCount = products.length;
-    const outOfStockCount = products.filter(p => Number(p.stock) <= 0).length;
-    const lowStockCount = products.filter(p => {
-      const stock = Number(p.stock);
-      const minStock = Number(p.min_stock ?? 5);
-      return stock > 0 && stock <= minStock;
-    }).length;
-    const alertProducts = products.filter(p => Number(p.stock) <= Number(p.min_stock ?? 5)).slice(0, 6);
-
-    // 8. Orders trend over dates (last 10 unique dates)
+    // Orders trend over dates (last 10 unique dates)
     const ordersByDate: Record<string, { date: string; total: number; count: number }> = {};
-    filteredOrders.slice().reverse().forEach(o => {
+    rawStats.filteredOrders.slice().reverse().forEach(o => {
       const d = o.date;
       if (!ordersByDate[d]) {
         ordersByDate[d] = { date: d, total: 0, count: 0 };
@@ -667,37 +491,14 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     });
     const orderTrend = Object.values(ordersByDate).slice(-10);
 
-    // Unique list of all agents in orders for filter dropdown
-    const availableAgents = Array.from(new Set(orders.map(o => o.agent_name).filter(Boolean))) as string[];
+    const alertProducts = products.filter(p => Number(p.stock) <= Number(p.min_stock ?? 5)).slice(0, 6);
 
     return {
-      filteredOrders,
-      totalSales,
-      draftSales,
-      transmittedSales,
-      ordersCount,
-      completedOrdersCount,
-      draftOrdersCount,
-      draftsCount: draftOrdersCount,
-      aov,
-      totalQuantitySold,
-      activeClientsCount,
-      avgRevenuePerClient,
-      topSpentClients,
-      topCities,
-      cityBreakdown,
-      topProducts,
-      categoryBreakdown,
-      paymentBreakdown,
-      agentBreakdown,
-      totalProductsCount,
-      outOfStockCount,
-      lowStockCount,
-      alertProducts,
+      ...rawStats,
       orderTrend,
-      availableAgents
+      alertProducts
     };
-  }, [orders, clients, products, statsTimeRange, statsStatusFilter, statsAgentFilter, selectedMonthFilter]);
+  }, [orders, clients, products, user, isUserAdmin, statsTimeRange, statsStatusFilter, statsAgentFilter, selectedMonthFilter, paymentMethods]);
 
   const displayOrders = React.useMemo(() => {
     let result = orders;
@@ -710,7 +511,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     return result;
   }, [orders, statsAgentFilter, selectedMonthFilter]);
 
-  const calculateOrderInstallments = (order: Order) => {
+  const calculateOrderInstallments = (order: any) => {
     const pm = paymentMethods.find(p => p.name === order.payment_name);
     let customOffsets: number[] | null = null;
     if (pm && pm.custom_offsets) {
@@ -1217,173 +1018,22 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const downloadOrderPDF = async (order: Order) => {
     showStatus(`Generazione PDF in corso per l'ordine #${order.number || order.id}...`, 'info');
     
-    const client = clients.find(c => c.id === order.client_id);
-    const clientMeta = client ? parseClientNotes(client.notes).daneaData : {};
-
-    const subtotal = order.items?.reduce((sum, item) => sum + (item.qty * item.price), 0) || order.total;
-    const pricesTaxIncluded = pricesIncludeVat;
-    const netTotal = pricesTaxIncluded ? subtotal / 1.22 : subtotal;
-    const vatTotal = pricesTaxIncluded ? subtotal - netTotal : subtotal * (Number(defaultVat || 22) / 100);
-    const grandTotal = pricesTaxIncluded ? subtotal : netTotal + vatTotal;
-
-    const container = document.createElement('div');
-    container.style.position = 'fixed';
-    container.style.left = '-9999px';
-    container.style.top = '0';
-    container.style.width = '794px';
-    container.style.backgroundColor = '#ffffff';
-    container.style.color = '#111827';
-    container.style.fontFamily = 'Helvetica, Arial, sans-serif';
-    container.style.boxSizing = 'border-box';
-
-    container.innerHTML = `
-      <div style="width: 100%; max-width: 714px; margin: 0 auto; background: #ffffff; padding: 24px; box-sizing: border-box; color: #111827; font-size: 11px; line-height: 1.4;">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #5A5A40; padding-bottom: 16px; margin-bottom: 20px;">
-          <div style="max-width: 55%;">
-            ${companyHeader.company_logo ? `<img src="${companyHeader.company_logo}" style="max-height: 60px; max-width: 200px; object-fit: contain; margin-bottom: 10px; display: block;" />` : ''}
-            <div style="font-size: 16px; font-weight: 800; color: #111827; margin-bottom: 4px; font-family: Georgia, serif;">${companyHeader.company_name || 'Connect Beauty S.r.l.'}</div>
-            <div style="font-size: 10px; color: #4B5563; line-height: 1.4;">
-              ${companyHeader.company_address ? `${companyHeader.company_address}<br/>` : ''}
-              ${companyHeader.company_postcode || companyHeader.company_city ? `${companyHeader.company_postcode} ${companyHeader.company_city} (${companyHeader.company_province}) - ${companyHeader.company_country}<br/>` : ''}
-              ${companyHeader.company_vat_code ? `<strong>P.IVA:</strong> ${companyHeader.company_vat_code} ` : ''}
-              ${companyHeader.company_fiscal_code ? ` | <strong>C.F.:</strong> ${companyHeader.company_fiscal_code}` : ''}<br/>
-              ${companyHeader.company_tel ? `<strong>Tel:</strong> ${companyHeader.company_tel} ` : ''}
-              ${companyHeader.company_email ? ` | <strong>Email:</strong> ${companyHeader.company_email}` : ''}<br/>
-              ${companyHeader.company_pec ? `<strong>PEC:</strong> ${companyHeader.company_pec} ` : ''}
-              ${companyHeader.company_website ? ` | <strong>Web:</strong> ${companyHeader.company_website}` : ''}
-            </div>
-          </div>
-
-          <div style="text-align: right; background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 12px; padding: 14px; width: 220px;">
-            <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #5A5A40;">Conferma d'Ordine</div>
-            <div style="font-size: 20px; font-weight: 900; color: #111827; margin: 2px 0;">N° ${String(order.number || order.id).padStart(4, '0')}</div>
-            <div style="font-size: 10px; color: #4B5563;">Data: <strong>${new Date(order.date).toLocaleDateString('it-IT')}</strong></div>
-            <div style="font-size: 10px; color: #6B7280; margin-top: 2px;">Stato: <span style="font-weight: 800; color: #5A5A40;">${order.status}</span></div>
-          </div>
-        </div>
-
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;">
-          <div style="background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;">
-            <div style="font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #6B7280; margin-bottom: 4px; border-bottom: 1px solid #E5E7EB; padding-bottom: 2px;">Spettabile Cliente</div>
-            <div style="font-size: 12px; font-weight: 800; color: #111827;">${order.client_name}</div>
-            <div style="font-size: 10px; color: #4B5563; margin-top: 2px; line-height: 1.4;">
-              ${clientMeta['Indirizzo'] || ''}<br/>
-              ${clientMeta['CAP'] || ''} ${clientMeta['Città'] || order.client_city || ''} (${clientMeta['Provincia'] || ''})<br/>
-              ${clientMeta['Partita Iva'] ? `<strong>P.IVA:</strong> ${clientMeta['Partita Iva']}` : ''}
-              ${clientMeta['Codice fiscale'] ? ` | <strong>C.F.:</strong> ${clientMeta['Codice fiscale']}` : ''}<br/>
-              ${clientMeta['Tel'] || order.client_phone ? `<strong>Tel:</strong> ${clientMeta['Tel'] || order.client_phone}` : ''}
-              ${clientMeta['E-mail'] || order.client_email ? ` | <strong>Email:</strong> ${clientMeta['E-mail'] || order.client_email}` : ''}
-            </div>
-          </div>
-
-          <div style="background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;">
-            <div style="font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #6B7280; margin-bottom: 4px; border-bottom: 1px solid #E5E7EB; padding-bottom: 2px;">Condizioni Commerciali</div>
-            <div style="font-size: 10px; color: #4B5563; line-height: 1.5;">
-              <strong>Agente / Referente:</strong> ${order.agent_name || 'Amministratore'}<br/>
-              <strong>Pagamento:</strong> ${order.payment_name || 'Non specificato'}<br/>
-              <strong>Banca d'Appoggio:</strong> ${order.payment_bank || 'N/D'}<br/>
-              <strong>Listino Applicato:</strong> Standard / Netto
-            </div>
-          </div>
-        </div>
-
-        <div style="margin-bottom: 20px;">
-          <table style="width: 100%; border-collapse: collapse; font-size: 10px;">
-            <thead>
-              <tr style="background: #5A5A40; color: #ffffff; text-align: left;">
-                <th style="padding: 6px 8px; font-weight: 800;">Codice</th>
-                <th style="padding: 6px 8px; font-weight: 800;">Descrizione Prodotto</th>
-                <th style="padding: 6px 8px; text-align: center; font-weight: 800;">Q.tà</th>
-                <th style="padding: 6px 8px; text-align: center; font-weight: 800;">U.M.</th>
-                <th style="padding: 6px 8px; text-align: right; font-weight: 800;">Prezzo Unit.</th>
-                <th style="padding: 6px 8px; text-align: center; font-weight: 800;">IVA</th>
-                <th style="padding: 6px 8px; text-align: right; font-weight: 800;">Totale (€)</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${order.items?.map((item, idx) => `
-                <tr style="border-bottom: 1px solid #E5E7EB; background: ${idx % 2 === 0 ? '#ffffff' : '#F9FAFB'};">
-                  <td style="padding: 6px 8px; font-family: monospace; font-weight: bold; color: #374151;">${item.product_code}</td>
-                  <td style="padding: 6px 8px; font-weight: 600; color: #111827;">${item.description}</td>
-                  <td style="padding: 6px 8px; text-align: center; font-weight: bold;">${item.qty}</td>
-                  <td style="padding: 6px 8px; text-align: center; color: #6B7280;">${item.um || 'pz'}</td>
-                  <td style="padding: 6px 8px; text-align: right; font-family: monospace;">€ ${item.price.toFixed(2)}</td>
-                  <td style="padding: 6px 8px; text-align: center; color: #6B7280;">${item.vat_code || '22'}%</td>
-                  <td style="padding: 6px 8px; text-align: right; font-weight: bold; font-family: monospace; color: #111827;">€ ${(item.qty * item.price).toFixed(2)}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-
-        <div style="display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 20px;">
-          <div style="flex: 1;">
-            ${order.notes ? `
-              <div style="background: #FFFBEB; border: 1px solid #FDE68A; padding: 8px; border-radius: 8px; margin-bottom: 8px;">
-                <strong style="color: #92400E; font-size: 9px;">Note Ordine:</strong><br/>
-                <span style="color: #78350F; font-size: 9px;">${order.notes}</span>
-              </div>
-            ` : ''}
-            ${defaultNotes ? `
-              <div style="color: #6B7280; font-size: 9px; line-height: 1.3;">
-                <strong>Note Commerciali:</strong> ${defaultNotes}
-              </div>
-            ` : ''}
-          </div>
-
-          <div style="width: 230px; background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;">
-            <div style="display: flex; justify-content: space-between; padding: 2px 0; font-size: 10px; color: #4B5563;">
-              <span>Totale Imponibile:</span>
-              <span style="font-weight: 700; font-family: monospace;">€ ${netTotal.toFixed(2)}</span>
-            </div>
-            <div style="display: flex; justify-content: space-between; padding: 2px 0; font-size: 10px; color: #4B5563;">
-              <span>Totale IVA (${defaultVat}%):</span>
-              <span style="font-weight: 700; font-family: monospace;">€ ${vatTotal.toFixed(2)}</span>
-            </div>
-            <div style="display: flex; justify-content: space-between; padding: 6px 0 0 0; font-size: 14px; font-weight: 900; color: #5A5A40; border-top: 2px solid #E5E7EB; margin-top: 4px;">
-              <span>TOTALE ORDINE:</span>
-              <span style="font-family: monospace;">€ ${grandTotal.toFixed(2)}</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="border-top: 1px solid #E5E7EB; padding-top: 10px; font-size: 8px; color: #9CA3AF; text-align: center;">
-          ${companyHeader.company_name} - Documento generato digitalmente in data ${new Date().toLocaleDateString('it-IT')}
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(container);
+    const client = clients.find(c => String(c.id) === String(order.client_id)) ||
+                   clients.find(c => order.client_name && c.name.toLowerCase() === order.client_name.toLowerCase()) ||
+                   clients.find(c => Boolean((order as any).client_code) && c.code && c.code === (order as any).client_code);
 
     try {
-      const canvas = await html2canvas(container, {
-        scale: 2,
-        useCORS: true,
-        allowTaint: true,
-        backgroundColor: '#ffffff'
-      });
-
-      const imgData = canvas.toDataURL('image/jpeg', 0.98);
-      const pdf = new jsPDF({
-        orientation: 'portrait',
-        unit: 'mm',
-        format: 'a4'
-      });
-
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
-
-      pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
-      const safeOrderNum = String(order.number || order.id).replace(/\//g, '_');
-      const filename = `Ordine_${safeOrderNum}_${(order.client_name || 'Cliente').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
-      pdf.save(filename);
-      showStatus(`PDF scaricato con successo: ${filename}`, 'success');
+      const ok = await downloadOrderPdf(order, client, companyHeader);
+      if (ok) {
+        showStatus(`PDF dell'ordine #${order.number || order.id} generato e scaricato con successo!`, 'success');
+      } else {
+        showStatus('Generazione tramite finestra di stampa...', 'info');
+        openPrintWindow(order);
+      }
     } catch (err: any) {
       console.error('Errore creazione PDF:', err);
       showStatus('Errore durante la creazione del PDF. Generazione tramite finestra di stampa...', 'error');
       openPrintWindow(order);
-    } finally {
-      document.body.removeChild(container);
     }
   };
 
@@ -2081,10 +1731,11 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     showStatus(`Copia dell'ordine #${order.number || order.id} caricata nel carrello! Puoi aggiungere o modificare articoli dal catalogo.`);
   };
 
-  // Permission helper: agents and capoarea can delete drafts only for their assigned clients; admins can delete any draft
+  // Permission helper: admin can delete ANY order (all statuses without exception); agents/capoarea can delete drafts only for assigned clients
   const canDeleteOrder = (order: Order | null): boolean => {
-    if (!order || order.status !== 'Bozza') return false;
+    if (!order) return false;
     if (isUserAdmin) return true;
+    if (order.status !== 'Bozza') return false;
 
     const role = (user?.role || '').toLowerCase().trim();
     const isAgent = role === 'agent' || role === 'agente';
@@ -2133,29 +1784,30 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     try {
       const res = await fetch(`/api/easyfatt/orders/${orderToDelete.id}`, { method: 'DELETE' });
       if (res.ok) {
-        showStatus(`Bozza d'ordine #${orderToDelete.number || orderToDelete.id} eliminata con successo!`, 'success');
+        showStatus(`Ordine #${orderToDelete.number || orderToDelete.id} eliminato con successo!`, 'success');
         if (selectedOrder && selectedOrder.id === orderToDelete.id) {
           setIsOrderDetailOpen(false);
           setSelectedOrder(null);
         }
         setOrderToDelete(null);
         fetchOrders();
+        fetchAdminOrders();
       } else {
         const data = await res.json().catch(() => ({}));
-        showStatus(data.error || 'Impossibile cancellare la bozza', 'error');
+        showStatus(data.error || 'Impossibile cancellare l\'ordine', 'error');
       }
     } catch (err) {
-      showStatus('Errore durante la cancellazione della bozza', 'error');
+      showStatus('Errore durante la cancellazione dell\'ordine', 'error');
     } finally {
       setIsDeletingOrder(false);
     }
   };
 
   const handleDeleteOrder = async (id: number) => {
-    const targetOrder = orders.find(o => String(o.id) === String(id));
+    const targetOrder = orders.find(o => String(o.id) === String(id)) || adminOrdersData.find(o => String(o.id) === String(id));
     if (targetOrder) {
       if (!canDeleteOrder(targetOrder)) {
-        showStatus('Non hai i permessi per eliminare questa bozza (puoi eliminare solo bozze dei tuoi clienti).', 'error');
+        showStatus('Non hai i permessi per eliminare questo ordine.', 'error');
         return;
       }
       setOrderToDelete(targetOrder);
@@ -2164,14 +1816,73 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     try {
       const res = await fetch(`/api/easyfatt/orders/${id}`, { method: 'DELETE' });
       if (res.ok) {
-        showStatus('Bozza cancellata con successo dal sistema', 'success');
+        showStatus('Ordine cancellato con successo dal sistema', 'success');
         fetchOrders();
+        fetchAdminOrders();
       } else {
         const data = await res.json().catch(() => ({}));
-        showStatus(data.error || 'Impossibile cancellare la bozza', 'error');
+        showStatus(data.error || 'Impossibile cancellare l\'ordine', 'error');
       }
     } catch (err) {
-      showStatus('Errore durante la cancellazione della bozza', 'error');
+      showStatus('Errore durante la cancellazione dell\'ordine', 'error');
+    }
+  };
+
+  const handleOpenEditOrderNumber = (order: Order) => {
+    setOrderToEditNumber(order);
+    setNewOrderNumberInput(String(order.number || order.id || ''));
+  };
+
+  const handleSaveOrderNumber = async () => {
+    if (!orderToEditNumber) return;
+    if (!newOrderNumberInput.trim()) {
+      showStatus('Inserisci un numero d\'ordine valido', 'error');
+      return;
+    }
+    setIsSavingOrderNumber(true);
+    try {
+      const res = await fetch(`/api/easyfatt/orders/${orderToEditNumber.id}/number`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ number: newOrderNumberInput.trim() })
+      });
+      if (res.ok) {
+        showStatus(`Numero ordine #${orderToEditNumber.id} aggiornato a "${newOrderNumberInput.trim()}" con successo!`, 'success');
+        if (selectedOrder && selectedOrder.id === orderToEditNumber.id) {
+          setSelectedOrder({ ...selectedOrder, number: newOrderNumberInput.trim() });
+        }
+        setOrderToEditNumber(null);
+        fetchOrders();
+        fetchAdminOrders();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showStatus(err.error || 'Impossibile aggiornare la numerazione', 'error');
+      }
+    } catch (e: any) {
+      showStatus('Errore durante il salvataggio della numerazione', 'error');
+    } finally {
+      setIsSavingOrderNumber(false);
+    }
+  };
+
+  const handleBulkDeleteOrders = async () => {
+    if (selectedOrderIds.length === 0) return;
+    setIsBulkDeleting(true);
+    try {
+      let successCount = 0;
+      for (const id of selectedOrderIds) {
+        const res = await fetch(`/api/easyfatt/orders/${id}`, { method: 'DELETE' });
+        if (res.ok) successCount++;
+      }
+      showStatus(`${successCount} ordini eliminati definitivamente con successo!`, 'success');
+      setSelectedOrderIds([]);
+      setIsBulkDeleteModalOpen(false);
+      fetchOrders();
+      fetchAdminOrders();
+    } catch (e) {
+      showStatus('Errore durante l\'eliminazione multipla degli ordini', 'error');
+    } finally {
+      setIsBulkDeleting(false);
     }
   };
 
@@ -3751,6 +3462,16 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                     <td className="py-4 px-4 font-mono font-bold text-[#111827]">
                                       <div className="flex items-center gap-1.5 flex-wrap">
                                         <span>#{order.number || order.id}</span>
+                                        {isUserAdmin && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleOpenEditOrderNumber(order)}
+                                            className="p-1 hover:bg-amber-100 text-amber-700 rounded transition-colors cursor-pointer"
+                                            title="Sistemare la numerazione di questo ordine"
+                                          >
+                                            <Hash size={12} />
+                                          </button>
+                                        )}
                                         {Boolean(order.is_imported) && (
                                           <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-purple-100 text-purple-800 border border-purple-200" title="Ordine Storico Importato da XML Easyfatt">
                                             Storico XML
@@ -3830,28 +3551,38 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                           Copia Ordine
                                         </button>
 
-                                        {order.status === 'Bozza' && (
-                                          <>
-                                            <button
-                                              onClick={() => handleTransmitDraft(order.id)}
-                                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
-                                              title="Trasmetti bozza alla Sede"
-                                            >
-                                              <CheckCircle2 size={13} />
-                                              Invia
-                                            </button>
+                                        {isUserAdmin && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleOpenEditOrderNumber(order)}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                                            title="Sistemare la numerazione di questo ordine"
+                                          >
+                                            <Hash size={13} />
+                                            N. Ordine
+                                          </button>
+                                        )}
 
-                                            {canDeleteOrder(order) && (
-                                              <button
-                                                onClick={() => setOrderToDelete(order)}
-                                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
-                                                title="Cancella totalmente questa bozza dal sistema"
-                                              >
-                                                <Trash2 size={13} />
-                                                Cancella
-                                              </button>
-                                            )}
-                                          </>
+                                        {order.status === 'Bozza' && (
+                                          <button
+                                            onClick={() => handleTransmitDraft(order.id)}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                                            title="Trasmetti bozza alla Sede"
+                                          >
+                                            <CheckCircle2 size={13} />
+                                            Invia
+                                          </button>
+                                        )}
+
+                                        {canDeleteOrder(order) && (
+                                          <button
+                                            onClick={() => setOrderToDelete(order)}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                                            title="Elimina questo ordine dal sistema"
+                                          >
+                                            <Trash2 size={13} />
+                                            Cancella
+                                          </button>
                                         )}
                                       </div>
                                     </td>
@@ -5875,6 +5606,20 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <Download size={14} />
                       Esporta Selezionati XML ({selectedOrderIds.length})
                     </button>
+
+                    <button
+                      onClick={() => setIsBulkDeleteModalOpen(true)}
+                      disabled={selectedOrderIds.length === 0}
+                      className={cn(
+                        "flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold transition-all active:scale-95 border cursor-pointer",
+                        selectedOrderIds.length > 0
+                          ? "border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800"
+                          : "bg-[#F3F4F6] text-[#9CA3AF] border-transparent cursor-not-allowed"
+                      )}
+                    >
+                      <Trash2 size={14} />
+                      Elimina Selezionati ({selectedOrderIds.length})
+                    </button>
                     
                     {/* Bulk reset / state correction tool */}
                     <button
@@ -6093,6 +5838,16 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                               <td className="py-4 px-4 font-mono font-bold text-[#111827]">
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   <span>#{order.number || order.id}</span>
+                                  {isUserAdmin && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenEditOrderNumber(order)}
+                                      className="p-1 hover:bg-amber-100 text-amber-700 rounded transition-colors cursor-pointer"
+                                      title="Sistemare la numerazione di questo ordine"
+                                    >
+                                      <Hash size={12} />
+                                    </button>
+                                  )}
                                   {Boolean(order.is_imported) && (
                                     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-purple-100 text-purple-800 border border-purple-200" title="Ordine Storico Importato da XML Easyfatt">
                                       Storico XML
@@ -6157,8 +5912,24 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                   className="p-1.5 hover:bg-gray-100 text-gray-700 rounded-lg transition-colors inline-block cursor-pointer"
                                   title="Copia riepilogo negli appunti"
                                 >
+                                  <FileText size={15} />
+                                </button>
+                                <button
+                                  onClick={() => handleCopyOrder(order)}
+                                  className="p-1.5 hover:bg-indigo-50 text-indigo-700 rounded-lg transition-colors inline-block cursor-pointer"
+                                  title="Copia e duplica ordine nel carrello"
+                                >
                                   <Copy size={15} />
                                 </button>
+                                {isUserAdmin && (
+                                  <button
+                                    onClick={() => handleOpenEditOrderNumber(order)}
+                                    className="p-1.5 hover:bg-amber-50 text-amber-700 rounded-lg transition-colors inline-block cursor-pointer"
+                                    title="Sistemare la numerazione di questo ordine"
+                                  >
+                                    <Hash size={15} />
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => handleEditOrder(order)}
                                   disabled={order.status !== 'Bozza'}
@@ -6174,24 +5945,23 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                 </button>
 
                                 {order.status === 'Bozza' && (
-                                  <>
-                                    <button
-                                      onClick={() => handleTransmitDraft(order.id)}
-                                      className="p-1.5 hover:bg-emerald-50 text-emerald-600 rounded-lg transition-colors inline-block cursor-pointer"
-                                      title="Trasmetti bozza alla Sede"
-                                    >
-                                      <CheckCircle2 size={15} />
-                                    </button>
-                                    {canDeleteOrder(order) && (
-                                      <button
-                                        onClick={() => setOrderToDelete(order)}
-                                        className="p-1.5 hover:bg-rose-50 text-rose-500 rounded-lg transition-colors inline-block cursor-pointer"
-                                        title="Cancella totalmente questa bozza dal sistema"
-                                      >
-                                        <Trash2 size={15} />
-                                      </button>
-                                    )}
-                                  </>
+                                  <button
+                                    onClick={() => handleTransmitDraft(order.id)}
+                                    className="p-1.5 hover:bg-emerald-50 text-emerald-600 rounded-lg transition-colors inline-block cursor-pointer"
+                                    title="Trasmetti bozza alla Sede"
+                                  >
+                                    <CheckCircle2 size={15} />
+                                  </button>
+                                )}
+
+                                {canDeleteOrder(order) && (
+                                  <button
+                                    onClick={() => setOrderToDelete(order)}
+                                    className="p-1.5 hover:bg-rose-50 text-rose-500 rounded-lg transition-colors inline-block cursor-pointer"
+                                    title="Elimina definitivamente questo ordine dal sistema"
+                                  >
+                                    <Trash2 size={15} />
+                                  </button>
                                 )}
                               </td>
                             </tr>
@@ -7691,9 +7461,30 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                         className="flex items-center gap-1.5 px-3.5 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95 border border-gray-200"
                         title="Copia testo del riepilogo d'ordine negli appunti"
                       >
-                        <Copy size={14} />
+                        <FileText size={14} />
                         Copia Testo
                       </button>
+                      <button
+                        onClick={() => {
+                          handleCopyOrder(selectedOrder);
+                          setIsOrderDetailOpen(false);
+                        }}
+                        className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95 border border-indigo-200"
+                        title="Carica e duplica questo ordine nel carrello"
+                      >
+                        <Copy size={14} />
+                        Duplica Ordine
+                      </button>
+                      {isUserAdmin && (
+                        <button
+                          onClick={() => handleOpenEditOrderNumber(selectedOrder)}
+                          className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95 border border-amber-200"
+                          title="Sistemare la numerazione di questo ordine"
+                        >
+                          <Hash size={14} />
+                          N. Ordine
+                        </button>
+                      )}
                       <button
                         onClick={() => {
                           window.open(`/api/easyfatt/export-orders?ids=${selectedOrder.id}`, '_blank');
@@ -7705,6 +7496,18 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                         <Download size={14} />
                         Scarica XML
                       </button>
+                      {canDeleteOrder(selectedOrder) && (
+                        <button
+                          onClick={() => {
+                            setOrderToDelete(selectedOrder);
+                          }}
+                          className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl font-bold text-xs transition-all shadow-xs cursor-pointer active:scale-95 border border-rose-200"
+                          title="Elimina questo ordine dal sistema"
+                        >
+                          <Trash2 size={14} />
+                          Elimina
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -9234,6 +9037,253 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
           </div>
         )}
       </AnimatePresence>
+    
+      {/* MODAL: DELETE ORDER CONFIRMATION */}
+      <AnimatePresence>
+        {orderToDelete && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !isDeletingOrder && setOrderToDelete(null)}
+              className="absolute inset-0 bg-[#111827]/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-gray-100 overflow-hidden z-20 p-6 space-y-5"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                  <AlertTriangle size={24} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base font-serif font-black text-gray-900">
+                    Elimina Ordine #{orderToDelete.number || orderToDelete.id}
+                  </h3>
+                  <p className="text-xs text-gray-500 leading-relaxed">
+                    Sei sicuro di voler eliminare definitivamente questo ordine? Questa operazione è irreversibile e rimuoverà l'ordine e tutte le relative righe.
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-gray-50 rounded-2xl p-4 border border-gray-100 text-xs space-y-1.5 font-medium">
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Cliente:</span>
+                  <span className="font-bold text-gray-800">{orderToDelete.client_name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Data:</span>
+                  <span className="font-mono font-bold text-gray-700">{orderToDelete.date}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Stato:</span>
+                  <span className="font-bold text-gray-800">{orderToDelete.status}</span>
+                </div>
+                <div className="flex justify-between pt-1 border-t border-gray-200">
+                  <span className="text-gray-500 font-bold">Totale:</span>
+                  <span className="font-mono font-black text-rose-600 text-sm">€ {(Number(orderToDelete.total) || 0).toFixed(2)}</span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setOrderToDelete(null)}
+                  disabled={isDeletingOrder}
+                  className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                >
+                  Annulla
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeleteOrder}
+                  disabled={isDeletingOrder}
+                  className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
+                >
+                  {isDeletingOrder ? (
+                    <>
+                      <RefreshCw size={13} className="animate-spin" />
+                      <span>Eliminazione...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 size={13} />
+                      <span>Elimina Definitivo</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL: EDIT ORDER NUMBERING (ADMIN ONLY) */}
+      <AnimatePresence>
+        {orderToEditNumber && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !isSavingOrderNumber && setOrderToEditNumber(null)}
+              className="absolute inset-0 bg-[#111827]/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-gray-100 overflow-hidden z-20 p-6 space-y-5"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-700 shrink-0">
+                  <Hash size={24} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base font-serif font-black text-gray-900">
+                    Sistemazione Numerazione Ordine
+                  </h3>
+                  <p className="text-xs text-gray-500 leading-relaxed">
+                    Modifica il numero identificativo di questo ordine (per Easyfatt, stampe e tracciati).
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="bg-gray-50 rounded-2xl p-3.5 border border-gray-100 text-xs space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">ID di Sistema:</span>
+                    <span className="font-mono font-bold text-gray-700">#{orderToEditNumber.id}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Cliente:</span>
+                    <span className="font-bold text-gray-800 truncate max-w-[200px]">{orderToEditNumber.client_name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Numero Attuale:</span>
+                    <span className="font-mono font-bold text-[#5A5A40]">{orderToEditNumber.number || orderToEditNumber.id}</span>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-700 block">Nuovo Numero Ordine</label>
+                  <div className="relative">
+                    <Hash size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      value={newOrderNumberInput}
+                      onChange={(e) => setNewOrderNumberInput(e.target.value)}
+                      placeholder="Es. 45, 102/b, 2026-001..."
+                      className="w-full pl-9 pr-3.5 py-2.5 bg-white border border-gray-200 rounded-xl text-xs font-mono font-bold text-gray-900 outline-none focus:ring-2 focus:ring-[#5A5A40] focus:border-transparent transition-all"
+                      autoFocus
+                    />
+                  </div>
+                  <p className="text-[10px] text-gray-400">
+                    Puoi inserire sia numeri interi (es. <code className="font-bold">42</code>) che codici alfanumerici (es. <code className="font-bold">2026-042/B</code>).
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setOrderToEditNumber(null)}
+                  disabled={isSavingOrderNumber}
+                  className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                >
+                  Annulla
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveOrderNumber}
+                  disabled={isSavingOrderNumber || !newOrderNumberInput.trim()}
+                  className="px-5 py-2 bg-[#5A5A40] hover:bg-[#4E4E37] text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer active:scale-95 disabled:opacity-40"
+                >
+                  {isSavingOrderNumber ? (
+                    <>
+                      <RefreshCw size={13} className="animate-spin" />
+                      <span>Salvataggio...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save size={13} />
+                      <span>Salva Numero</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL: BULK DELETE ORDERS (ADMIN ONLY) */}
+      <AnimatePresence>
+        {isBulkDeleteModalOpen && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !isBulkDeleting && setIsBulkDeleteModalOpen(false)}
+              className="absolute inset-0 bg-[#111827]/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-gray-100 overflow-hidden z-20 p-6 space-y-5"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                  <Trash2 size={24} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base font-serif font-black text-gray-900">
+                    Elimina {selectedOrderIds.length} Ordini Selezionati
+                  </h3>
+                  <p className="text-xs text-gray-500 leading-relaxed">
+                    Sei sicuro di voler eliminare definitivamente tutti gli <span className="font-bold text-rose-600">{selectedOrderIds.length}</span> ordini selezionati? Questa operazione cancellerà gli ordini e le relative righe dal database.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsBulkDeleteModalOpen(false)}
+                  disabled={isBulkDeleting}
+                  className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                >
+                  Annulla
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBulkDeleteOrders}
+                  disabled={isBulkDeleting}
+                  className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
+                >
+                  {isBulkDeleting ? (
+                    <>
+                      <RefreshCw size={13} className="animate-spin" />
+                      <span>Eliminazione in corso...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 size={13} />
+                      <span>Elimina Tutti ({selectedOrderIds.length})</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
     </div>
   );
 }

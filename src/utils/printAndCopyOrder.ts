@@ -1,5 +1,7 @@
 // Utility to reliably copy and print order summaries, optimized for iframe environments
 import { calculateTaxable, calculateLineTotals, calculateOrderTotals, parseVatRate } from './priceUtils';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
 
 export interface PrintableOrderData {
   orderNumber?: string | number;
@@ -194,8 +196,14 @@ export function buildPrintableFromOrder(order: any, client?: any): PrintableOrde
     const discountPerc = it.discount_perc ?? it.discount ?? it.discountPerc;
     const discounts = it.discounts ?? (discountPerc ? `${discountPerc}%` : '');
 
-    // Apply calculateTaxable & calculateLineTotals al volo with discount support
-    const lineTotals = calculateLineTotals(qty, price, vatRate, discountPerc || discounts);
+    const customTaxable = it.custom_taxable_total !== undefined && it.custom_taxable_total !== null
+      ? Number(it.custom_taxable_total)
+      : (it.taxable_total !== undefined && it.taxable_total !== null
+          ? Number(it.taxable_total)
+          : (it.taxableTotal !== undefined && it.taxableTotal !== null ? Number(it.taxableTotal) : null));
+
+    // Apply calculateLineTotals with discount and custom taxable support
+    const lineTotals = calculateLineTotals(qty, price, vatRate, discountPerc || discounts, customTaxable);
     const itemTotal = it.total !== undefined && it.total !== null ? Number(it.total) : lineTotals.totalGross;
     const um = String(it.um || it.Um || 'pz').trim();
 
@@ -206,7 +214,7 @@ export function buildPrintableFromOrder(order: any, client?: any): PrintableOrde
       price,
       taxablePrice: it.taxablePrice !== undefined ? Number(it.taxablePrice) : lineTotals.unitTaxable,
       vatRate: lineTotals.vatRate,
-      taxableTotal: it.taxableTotal !== undefined ? Number(it.taxableTotal) : lineTotals.totalTaxable,
+      taxableTotal: lineTotals.totalTaxable,
       total: itemTotal,
       um,
       discounts: discounts || (lineTotals.discountPerc ? `${lineTotals.discountPerc}%` : ''),
@@ -219,12 +227,13 @@ export function buildPrintableFromOrder(order: any, client?: any): PrintableOrde
     price: it.price,
     vatRate: it.vatRate,
     discount_perc: it.discountPerc,
-    discounts: it.discounts
+    discounts: it.discounts,
+    custom_taxable_total: it.taxableTotal
   })));
 
-  const total = Number(order.total ?? order.Total) || orderTotals.totalGross;
-  const taxableTotal = order.taxableTotal !== undefined ? Number(order.taxableTotal) : orderTotals.totalTaxable;
-  const vatTotal = order.vatTotal !== undefined ? Number(order.vatTotal) : orderTotals.totalVat;
+  const total = items.length > 0 ? orderTotals.totalGross : (Number(order.total ?? order.Total) || 0);
+  const taxableTotal = items.length > 0 ? orderTotals.totalTaxable : (order.taxableTotal !== undefined ? Number(order.taxableTotal) : 0);
+  const vatTotal = items.length > 0 ? orderTotals.totalVat : (order.vatTotal !== undefined ? Number(order.vatTotal) : 0);
 
   return {
     orderNumber,
@@ -304,10 +313,11 @@ export function formatOrderPlainText(orderOrData: any, client?: any): string {
       const codePart = item.code ? `[${item.code}] ` : '';
       const umPart = item.um ? ` ${item.um}` : ' pz';
       const discPart = item.discounts ? ` | Sconto: ${item.discounts}` : (item.discountPerc ? ` | Sconto: ${item.discountPerc}%` : '');
+      const isNeg = rowTaxable < 0;
 
       lines.push(`${index + 1}. ${codePart}${item.description}`);
       lines.push(`   Quantità: ${item.qty}${umPart} | Imp. Unit: € ${unitTaxable.toFixed(2)} (IVA ${vatRate}%)${discPart}`);
-      lines.push(`   Totale Riga Imp: € ${rowTaxable.toFixed(2)}`);
+      lines.push(`   Totale Riga Imp: ${isNeg ? `-€ ${Math.abs(rowTaxable).toFixed(2)}` : `€ ${rowTaxable.toFixed(2)}`}`);
     });
   } else {
     lines.push('(Nessun articolo registrato)');
@@ -315,10 +325,13 @@ export function formatOrderPlainText(orderOrData: any, client?: any): string {
 
   lines.push('----------------------------------------');
   if (order.taxableTotal !== undefined && order.vatTotal !== undefined) {
-    lines.push(`Totale Imponibile: € ${Number(order.taxableTotal).toFixed(2)}`);
-    lines.push(`Totale IVA:        € ${Number(order.vatTotal).toFixed(2)}`);
+    const isTaxNeg = Number(order.taxableTotal) < 0;
+    const isVatNeg = Number(order.vatTotal) < 0;
+    lines.push(`Totale Imponibile: ${isTaxNeg ? `-€ ${Math.abs(Number(order.taxableTotal)).toFixed(2)}` : `€ ${Number(order.taxableTotal).toFixed(2)}`}`);
+    lines.push(`Totale IVA:        ${isVatNeg ? `-€ ${Math.abs(Number(order.vatTotal)).toFixed(2)}` : `€ ${Number(order.vatTotal).toFixed(2)}`}`);
   }
-  lines.push(`TOTALE ORDINE (Ivato): € ${Number(order.total || 0).toFixed(2)}`);
+  const isTotNeg = Number(order.total || 0) < 0;
+  lines.push(`TOTALE ORDINE (Ivato): ${isTotNeg ? `-€ ${Math.abs(Number(order.total || 0)).toFixed(2)}` : `€ ${Number(order.total || 0).toFixed(2)}`}`);
   lines.push('========================================');
   lines.push('Connect Beauty S.r.l. - Via dell\'Innovazione 12, Milano - ordini@connectbeauty.it');
 
@@ -451,26 +464,28 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData, companyHea
   };
 
   const rowsHtml = printable.items.map((it: any, idx) => {
-    const unitTaxable = it.taxablePrice !== undefined ? it.taxablePrice : calculateTaxable(it.price, it.vatRate || 22);
-    const rowTaxable = it.taxableTotal !== undefined ? it.taxableTotal : Math.round(Number(it.qty || 0) * unitTaxable * 100) / 100;
-    const rowGross = it.total !== undefined ? it.total : (Number(it.qty || 0) * Number(it.price || 0));
     const vatRate = it.vatRate !== undefined ? it.vatRate : 22;
+    const lineTotals = calculateLineTotals(it.qty, it.price, vatRate, it.discountPerc || it.discounts, it.taxableTotal);
+    const unitTaxable = it.taxablePrice !== undefined ? it.taxablePrice : lineTotals.unitTaxable;
+    const rowTaxable = it.taxableTotal !== undefined ? it.taxableTotal : lineTotals.totalTaxable;
+    const rowGross = it.total !== undefined ? it.total : lineTotals.totalGross;
 
     const discountDisplay = it.discounts || (it.discountPerc ? `${it.discountPerc}%` : '-');
     const hasDiscount = it.discounts || (it.discountPerc && Number(it.discountPerc) > 0);
+    const isNegRow = rowTaxable < 0;
 
     return `
-      <tr style="border-bottom: 1px solid #e2e8f0; ${idx % 2 === 1 ? 'background-color: #f8fafc;' : ''}">
-        <td style="padding: 9px 8px; font-family: monospace; font-size: 11px; color: #475569;">${it.code || '-'}</td>
-        <td style="padding: 9px 8px; font-size: 12px; font-weight: 500; color: #0f172a;">
-          ${it.description}
+      <tr style="border-bottom: 1px solid #e2e8f0; ${idx % 2 === 1 ? 'background-color: #f8fafc;' : ''} ${isNegRow ? 'background-color: #fff1f2;' : ''}">
+        <td style="padding: 9px 8px; font-family: monospace; font-size: 11px; color: ${isNegRow ? '#be123c' : '#475569'};">${it.code || '-'}</td>
+        <td style="padding: 9px 8px; font-size: 12px; font-weight: 500; color: ${isNegRow ? '#9f1239' : '#0f172a'};">
+          ${it.description} ${isNegRow ? '<span style="font-size: 10px; color: #e11d48; font-weight: 700; margin-left: 4px;">(Detrazione / Storno)</span>' : ''}
         </td>
         <td style="padding: 9px 8px; text-align: center; font-size: 12px; color: #334155;">${it.qty} ${it.um || 'pz'}</td>
-        <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: #334155;">€ ${unitTaxable.toFixed(2)}</td>
+        <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: #334155;">${unitTaxable < 0 ? `-€ ${Math.abs(unitTaxable).toFixed(2)}` : `€ ${unitTaxable.toFixed(2)}`}</td>
         <td style="padding: 9px 8px; text-align: center; font-size: 11px; ${hasDiscount ? 'font-weight: 700; color: #b91c1c;' : 'color: #64748b;'}">${discountDisplay}</td>
         <td style="padding: 9px 8px; text-align: center; font-size: 11px; color: #64748b;">${vatRate}%</td>
-        <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: #334155;">€ ${rowTaxable.toFixed(2)}</td>
-        <td style="padding: 9px 8px; text-align: right; font-weight: 700; font-size: 12px; font-family: monospace; color: #0f172a;">€ ${rowGross.toFixed(2)}</td>
+        <td style="padding: 9px 8px; text-align: right; font-size: 12px; font-family: monospace; color: ${isNegRow ? '#be123c; font-weight: 700;' : '#334155;'}">${rowTaxable < 0 ? `-€ ${Math.abs(rowTaxable).toFixed(2)}` : `€ ${rowTaxable.toFixed(2)}`}</td>
+        <td style="padding: 9px 8px; text-align: right; font-weight: 700; font-size: 12px; font-family: monospace; color: ${isNegRow ? '#be123c;' : '#0f172a;'}">${rowGross < 0 ? `-€ ${Math.abs(rowGross).toFixed(2)}` : `€ ${rowGross.toFixed(2)}`}</td>
       </tr>
     `;
   }).join('');
@@ -675,15 +690,15 @@ export function buildOrderDocumentHtml(printable: PrintableOrderData, companyHea
           <table class="totals-table">
             <tr>
               <td style="color: #64748b; font-size: 12px;">Totale Imponibile:</td>
-              <td style="text-align: right; font-weight: 600; font-family: monospace;">€ ${printable.taxableTotal.toFixed(2)}</td>
+              <td style="text-align: right; font-weight: 600; font-family: monospace; ${Number(printable.taxableTotal || 0) < 0 ? 'color: #be123c;' : ''}">${Number(printable.taxableTotal || 0) < 0 ? `-€ ${Math.abs(Number(printable.taxableTotal)).toFixed(2)}` : `€ ${Number(printable.taxableTotal || 0).toFixed(2)}`}</td>
             </tr>
             <tr>
               <td style="color: #64748b; font-size: 12px;">Totale IVA:</td>
-              <td style="text-align: right; font-weight: 600; font-family: monospace;">€ ${printable.vatTotal.toFixed(2)}</td>
+              <td style="text-align: right; font-weight: 600; font-family: monospace; ${Number(printable.vatTotal || 0) < 0 ? 'color: #be123c;' : ''}">${Number(printable.vatTotal || 0) < 0 ? `-€ ${Math.abs(Number(printable.vatTotal)).toFixed(2)}` : `€ ${Number(printable.vatTotal || 0).toFixed(2)}`}</td>
             </tr>
             <tr class="grand-total">
               <td>TOTALE ORDINE (Ivato):</td>
-              <td style="text-align: right; color: #0f172a; font-family: monospace;">€ ${printable.total.toFixed(2)}</td>
+              <td style="text-align: right; font-family: monospace; ${Number(printable.total || 0) < 0 ? 'color: #be123c;' : 'color: #0f172a;'}">${Number(printable.total || 0) < 0 ? `-€ ${Math.abs(Number(printable.total)).toFixed(2)}` : `€ ${Number(printable.total || 0).toFixed(2)}`}</td>
             </tr>
           </table>
         </div>
@@ -778,9 +793,78 @@ export async function printOrderDocument(orderOrData: any, client?: any, company
 }
 
 /**
- * Stub / No-op function preserved for code safety without UI impact
+ * Downloads a high-definition PDF document of the order with automatic pagination
  */
-export async function downloadOrderPdf(orderOrData?: any, client?: any): Promise<boolean> {
-  // Retained for backward compatibility
-  return true;
+export async function downloadOrderPdf(orderOrData?: any, client?: any, companyHeader?: CompanyHeaderData): Promise<boolean> {
+  try {
+    const printable = buildPrintableFromOrder(orderOrData, client);
+    const header = companyHeader || await fetchCompanyHeaderData();
+    const html = buildOrderDocumentHtml(printable, header);
+
+    const container = document.createElement('div');
+    container.style.position = 'fixed';
+    container.style.left = '-9999px';
+    container.style.top = '0';
+    container.style.width = '794px'; // Standard A4 width in px at 96 DPI
+    container.style.backgroundColor = '#ffffff';
+    container.style.color = '#0f172a';
+    container.style.boxSizing = 'border-box';
+    container.innerHTML = html;
+
+    document.body.appendChild(container);
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const canvas = await html2canvas(container, {
+      scale: 2,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: '#ffffff'
+    });
+
+    if (document.body.contains(container)) {
+      document.body.removeChild(container);
+    }
+
+    const imgData = canvas.toDataURL('image/jpeg', 0.98);
+    const pdf = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const pdfPageHeight = pdf.internal.pageSize.getHeight();
+    const totalPdfHeight = (canvas.height * pdfWidth) / canvas.width;
+
+    if (totalPdfHeight <= pdfPageHeight) {
+      pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, totalPdfHeight);
+    } else {
+      let remainingHeight = totalPdfHeight;
+      let positionY = 0;
+      while (remainingHeight > 0) {
+        pdf.addImage(imgData, 'JPEG', 0, positionY, pdfWidth, totalPdfHeight);
+        remainingHeight -= pdfPageHeight;
+        if (remainingHeight > 0) {
+          pdf.addPage();
+          positionY -= pdfPageHeight;
+        }
+      }
+    }
+
+    const safeNumber = String(printable.orderNumber || 'Bozza').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeClient = String(printable.clientName || 'Cliente').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `Ordine_${safeNumber}_${safeClient}.pdf`;
+
+    pdf.save(filename);
+    return true;
+  } catch (err) {
+    console.error('downloadOrderPdf error:', err);
+    try {
+      await printOrderDocument(orderOrData, client, companyHeader);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }

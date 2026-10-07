@@ -4000,7 +4000,7 @@ app.post('/api/easyfatt/orders', authMiddleware, async (req: any, res) => {
 // 6b. Update order (edit drafts or existing orders)
 app.put('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params;
-  const { client_id, date, notes, payment_name, payment_bank, items, status } = req.body;
+  const { client_id, date, notes, payment_name, payment_bank, items, status, number } = req.body;
   if (!client_id || !items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'Cliente e articoli sono obbligatori' });
   }
@@ -4009,7 +4009,7 @@ app.put('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res) => {
     return res.status(403).json({ error: 'Non hai i permessi per modificare questo ordine' });
   }
 
-  // Ensure client exists in SQLite
+  // Ensure client exists in PostgreSQL
   const validClientId = await ensureClientInPostgres(client_id);
   if (!validClientId) {
     return res.status(400).json({ error: `Cliente non valido o non trovato (ID: ${client_id}). Seleziona un cliente esistente.` });
@@ -4025,10 +4025,41 @@ app.put('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res) => {
       payment_bank: payment_bank || '',
       notes: notes || '',
       items,
-      status: orderStatus
+      status: orderStatus,
+      number: isUserAdmin(req.user) ? number : undefined
     });
 
     res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6b-2. Administrator specific: update order number directly
+app.patch('/api/easyfatt/orders/:id/number', authMiddleware, async (req: any, res) => {
+  const { id } = req.params;
+  const { number } = req.body;
+
+  if (!isUserAdmin(req.user)) {
+    return res.status(403).json({ error: 'Solo gli amministratori possono modificare la numerazione degli ordini' });
+  }
+
+  if (number === undefined || number === null || String(number).trim() === '') {
+    return res.status(400).json({ error: 'Numero ordine obbligatorio' });
+  }
+
+  const cleanNumber = String(number).trim();
+
+  try {
+    await withTransaction(async (pgClient) => {
+      const orderRes = await pgClient.query('SELECT id, number FROM orders WHERE id = $1', [id]);
+      if (orderRes.rows.length === 0) {
+        throw new Error('Ordine non trovato');
+      }
+      await pgClient.query('UPDATE orders SET number = $1 WHERE id = $2', [cleanNumber, id]);
+    }, 'UpdateOrderNumber');
+
+    res.json({ success: true, number: cleanNumber });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -4096,7 +4127,7 @@ app.patch('/api/easyfatt/orders/:id/status', authMiddleware, async (req: any, re
   }
 });
 
-// 7. Delete order
+// 7. Delete order (Administrators can delete any order; non-admins can only delete drafts)
 app.delete('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res: any) => {
   const { id } = req.params;
   try {
@@ -4107,8 +4138,8 @@ app.delete('/api/easyfatt/orders/:id', authMiddleware, async (req: any, res: any
     if (!order) {
       return res.status(404).json({ error: 'Ordine non trovato' });
     }
-    if (order.status !== 'Bozza') {
-      return res.status(400).json({ error: 'Solo le bozze possono essere eliminate' });
+    if (!isUserAdmin(req.user) && order.status !== 'Bozza') {
+      return res.status(400).json({ error: 'Solo gli amministratori possono eliminare ordini già confermati' });
     }
     await deleteOrderInPostgres(Number(id));
     res.json({ success: true });
@@ -7205,325 +7236,297 @@ app.post('/api/products/import-excel', authMiddleware, upload.single('file'), as
   return handleExcelProductsImportLogic(req, res);
 });
 
+// Helper per sanitizzazione numeri con formato italiano (es. "1.250,50" -> 1250.50, stringhe vuote -> null)
+function sanitizeItalianNumber(val: any): number | null {
+  if (val === undefined || val === null) return null;
+  if (typeof val === 'number') {
+    return isNaN(val) ? null : val;
+  }
+  let str = String(val).trim();
+  if (str === '') return null;
+  // Rimozione simboli di valuta e spazi
+  str = str.replace(/[€$\s]/g, '');
+  if (!str) return null;
+
+  // Gestione formato numerico italiano (migliaia con punto, decimali con virgola)
+  if (str.includes('.') && str.includes(',')) {
+    const lastDot = str.lastIndexOf('.');
+    const lastComma = str.lastIndexOf(',');
+    if (lastComma > lastDot) {
+      // Formato italiano: 1.250,50 -> 1250.50
+      str = str.replace(/\./g, '').replace(',', '.');
+    } else {
+      // Formato standard con virgola separatore migliaia: 1,250.50 -> 1250.50
+      str = str.replace(/,/g, '');
+    }
+  } else if (str.includes(',')) {
+    // Solo virgola decimale: 1250,50 -> 1250.50
+    str = str.replace(',', '.');
+  }
+
+  const num = parseFloat(str);
+  return isNaN(num) ? null : num;
+}
+
+// Helper per sanitizzazione stringhe (spazi trim e stringhe vuote convertite in null)
+function sanitizeString(val: any): string | null {
+  if (val === undefined || val === null) return null;
+  const str = String(val).trim();
+  return str.length > 0 ? str : null;
+}
+
+interface ProductEnrichmentItem {
+  code: string;
+  classe_provvigione: string | null;
+  custom_field_1: string | null;
+  custom_field_2: string | null;
+  custom_field_3: string | null;
+  custom_field_4: string | null;
+  supplier_code: string | null;
+  supplier_name: string | null;
+  supplier_product_code: string | null;
+  supplier_net_price: number | null;
+  supplier_notes: string | null;
+}
+
 async function handleExcelProductsImportLogic(req: any, res: any) {
   if (!req.file) {
     return res.status(400).json({ error: 'Nessun file Excel (.xlsx / .xls) caricato' });
   }
 
+  const tempFilePath = req.file.path;
+
   try {
-    const workbook = XLSX.readFile(req.file.path);
+    const workbook = XLSX.readFile(tempFilePath);
     const sheetName = workbook.SheetNames[0];
     if (!sheetName) {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
       return res.status(400).json({ error: 'File Excel vuoto o foglio non valido' });
     }
 
     const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' }) as any[];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' }) as Record<string, any>[];
 
     if (!rows || rows.length === 0) {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
       return res.status(400).json({ error: 'Nessuna riga di dati trovata nel file Excel' });
     }
 
-    // Introspezione Schema (PostgreSQL Nativo)
-    const tableInfo = await queryAll<{ name: string; type: string }>(
-      `SELECT column_name AS name, data_type AS type 
-       FROM information_schema.columns 
-       WHERE table_name = 'products'`
-    );
-    const existingColumns = new Set<string>(tableInfo.map(col => col.name.toLowerCase()));
-
-    // Map known standard header variants to products table columns
-    const knownMappings: Record<string, string> = {
-      'cod.': 'code',
-      'code': 'code',
-      'codice': 'code',
-      'codice articolo': 'code',
-      'cod. articolo': 'code',
-      'descrizione': 'description',
-      'description': 'description',
-      'nome': 'description',
-      'descrizione html': 'description_html',
-      'descriptionhtml': 'description_html',
-      'prezzo netto 1': 'net_price_1',
-      'netprice1': 'net_price_1',
-      'prezzo ivato 1': 'gross_price_1',
-      'grossprice1': 'gross_price_1',
-      'prezzo netto 2': 'net_price_2',
-      'netprice2': 'net_price_2',
-      'prezzo ivato 2': 'gross_price_2',
-      'grossprice2': 'gross_price_2',
-      'prezzo netto 3': 'net_price_3',
-      'netprice3': 'net_price_3',
-      'prezzo ivato 3': 'gross_price_3',
-      'grossprice3': 'gross_price_3',
-      'prezzo netto 4': 'net_price_4',
-      'netprice4': 'net_price_4',
-      'prezzo ivato 4': 'gross_price_4',
-      'grossprice4': 'gross_price_4',
-      'prezzo netto 5': 'net_price_5',
-      'netprice5': 'net_price_5',
-      'prezzo ivato 5': 'gross_price_5',
-      'grossprice5': 'gross_price_5',
-      'prezzo netto 6': 'net_price_6',
-      'netprice6': 'net_price_6',
-      'prezzo ivato 6': 'gross_price_6',
-      'grossprice6': 'gross_price_6',
-      'prezzo netto 7': 'net_price_7',
-      'netprice7': 'net_price_7',
-      'prezzo ivato 7': 'gross_price_7',
-      'grossprice7': 'gross_price_7',
-      'prezzo netto 8': 'net_price_8',
-      'netprice8': 'net_price_8',
-      'prezzo ivato 8': 'gross_price_8',
-      'grossprice8': 'gross_price_8',
-      'prezzo netto 9': 'net_price_9',
-      'netprice9': 'net_price_9',
-      'prezzo ivato 9': 'gross_price_9',
-      'grossprice9': 'gross_price_9',
-      'prezzo': 'price',
-      'price': 'price',
-      'cod. iva': 'vat_code',
-      'aliquota iva': 'vat_code',
-      'iva': 'vat_code',
-      'vat': 'vat_code',
-      'um': 'um',
-      'u.m.': 'um',
-      'unità': 'um',
-      'giacenza': 'stock',
-      'disponibile': 'stock',
-      'quantità': 'stock',
-      'stock': 'stock',
-      'availableqty': 'stock',
-      'cod. a barre': 'barcode',
-      'barcode': 'barcode',
-      'categoria': 'category',
-      'category': 'category',
-      'sottocategoria': 'subcategory',
-      'subcategory': 'subcategory',
-      'produttore': 'producer_name',
-      'marca': 'producer_name',
-      'producername': 'producer_name',
-      'link': 'link',
-      'note': 'notes',
-      'notes': 'notes',
-      'foto': 'image_file_name',
-      'immagine': 'image_file_name',
-      'imagefilename': 'image_file_name',
-      'campo libero 1': 'custom_field1',
-      'customfield1': 'custom_field1',
-      'extra 1': 'custom_field1',
-      'campo libero 2': 'custom_field2',
-      'customfield2': 'custom_field2',
-      'extra 2': 'custom_field2',
-      'campo libero 3': 'custom_field3',
-      'customfield3': 'custom_field3',
-      'extra 3': 'custom_field3',
-      'campo libero 4': 'custom_field4',
-      'customfield4': 'custom_field4',
-      'extra 4': 'custom_field4',
-      'cod. fornitore': 'supplier_code',
-      'suppliercode': 'supplier_code',
-      'fornitore': 'supplier_name',
-      'suppliername': 'supplier_name',
-      'cod. art. fornitore': 'supplier_product_code',
-      'supplierproductcode': 'supplier_product_code',
-      'prezzo acq. netto': 'supplier_net_price',
-      'suppliernetprice': 'supplier_net_price',
-      'prezzo acq. ivato': 'supplier_gross_price',
-      'suppliergrossprice': 'supplier_gross_price',
-      'note fornitore': 'supplier_notes',
-      'suppliernotes': 'supplier_notes',
-      'ubicazione': 'warehouse_location',
-      'warehouselocation': 'warehouse_location',
-      'scorta min.': 'min_stock',
-      'minstock': 'min_stock',
-      'qtà in arrivo': 'ordered_qty',
-      'orderedqty': 'ordered_qty',
-      'garanzia': 'online_warranty',
-      'promozione': 'online_promo',
-      'note online': 'online_notes',
-      'classe provvigione': 'classe_provvigione',
-      'classe_provvigione': 'classe_provvigione',
-      'classeprovvigione': 'classe_provvigione',
-      'commission_class': 'classe_provvigione',
-      'commissionclass': 'classe_provvigione',
-      'provvigione': 'classe_provvigione',
-      'classe provv.': 'classe_provvigione',
-      'cl. provv.': 'classe_provvigione',
-      'cl.provv.': 'classe_provvigione'
+    // Helper per trovare il valore della colonna ignorando maiuscole/minuscole e variazioni di intestazione
+    const getRowValue = (row: Record<string, any>, matchers: string[]): any => {
+      for (const [key, val] of Object.entries(row)) {
+        const cleanKey = key.trim().toLowerCase();
+        for (const matcher of matchers) {
+          if (cleanKey === matcher.toLowerCase()) {
+            return val;
+          }
+        }
+      }
+      return undefined;
     };
 
-    // Determine column mapping for headers in the uploaded XLSX
-    const sampleRow = rows[0] || {};
-    const excelHeaders = Object.keys(sampleRow);
-    const newColumnsCreated: string[] = [];
-    const headerToColMap: Record<string, string> = {};
-
-    for (const rawHeader of excelHeaders) {
-      const cleanHeader = String(rawHeader).trim();
-      if (!cleanHeader) continue;
-
-      const lowerHeader = cleanHeader.toLowerCase();
-
-      if (knownMappings[lowerHeader]) {
-        headerToColMap[rawHeader] = knownMappings[lowerHeader];
-      } else if (existingColumns.has(lowerHeader)) {
-        headerToColMap[rawHeader] = lowerHeader;
-      } else {
-        // Create sanitized column name for new field
-        let sanitizedCol = cleanHeader
-          .toLowerCase()
-          .replace(/[^a-z0-9_]/g, '_')
-          .replace(/_+/g, '_')
-          .replace(/^_+|_+$/g, '');
-
-        if (!sanitizedCol || /^\d/.test(sanitizedCol)) {
-          sanitizedCol = `col_${sanitizedCol}`;
-        }
-
-        headerToColMap[rawHeader] = sanitizedCol;
-
-        // If this column doesn't exist in `products`, add it dynamically!
-        if (!existingColumns.has(sanitizedCol)) {
-          try {
-            await queryExec(`ALTER TABLE products ADD COLUMN IF NOT EXISTS "${sanitizedCol}" TEXT DEFAULT ''`);
-            existingColumns.add(sanitizedCol);
-            newColumnsCreated.push(cleanHeader);
-            console.log(`[DYNAMIC SCHEMA] Created column '${sanitizedCol}' in SQLite products table.`);
-          } catch (alterErr: any) {
-            console.error(`Failed to alter SQLite table products for column '${sanitizedCol}':`, alterErr?.message || alterErr);
-          }
-
-          try {
-            pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS "${sanitizedCol}" TEXT DEFAULT ''`).catch(() => {});
-          } catch (pgAlterErr) {}
-        }
-      }
-    }
-
-    let insertedCount = 0;
-    let updatedCount = 0;
+    const enrichedRecords: ProductEnrichmentItem[] = [];
     let ignoredCount = 0;
 
-    // Product match via async queryGet
-
     for (const row of rows) {
-      // Extract product code
-      let rawCode = '';
-      for (const [header, colName] of Object.entries(headerToColMap)) {
-        if (colName === 'code' && row[header] !== undefined && row[header] !== null) {
-          rawCode = String(row[header]).trim();
-          break;
-        }
-      }
+      // 1. Cod. ➔ code (Chiave primaria, obbligatoria)
+      const rawCode = getRowValue(row, [
+        'cod.', 'cod', 'codice', 'code', 'codice articolo', 'cod. articolo', 'cod articolo', 'art.', 'articolo'
+      ]);
+      const code = sanitizeString(rawCode);
 
-      if (!rawCode) {
-        for (const k of Object.keys(row)) {
-          if ((k.toLowerCase().includes('cod') || k.toLowerCase().includes('code')) && row[k]) {
-            rawCode = String(row[k]).trim();
-            break;
-          }
-        }
-      }
-
-      if (!rawCode) {
+      if (!code) {
         ignoredCount++;
         continue;
       }
 
-      const match = await queryGet('SELECT * FROM products WHERE code = ?', [rawCode]) as any;
+      // 2. Classe provvigione ➔ classe_provvigione
+      const rawClasse = getRowValue(row, [
+        'classe provvigione', 'classe_provvigione', 'classe provv.', 'cl. provv.', 'cl.provv.', 'provvigione', 'classeprovvigione', 'commission class', 'commission_class'
+      ]);
+      const classe_provvigione = sanitizeString(rawClasse);
 
-      let netPrice1Val: number | null = null;
-      let grossPrice1Val: number | null = null;
-      const dataObj: Record<string, any> = { code: rawCode };
+      // 3. Libero 1 ... Libero 4 ➔ custom_field_1 ... custom_field_4 (e custom_field1..4)
+      const rawLibero1 = getRowValue(row, [
+        'libero 1', 'libero1', 'campo libero 1', 'campolibero1', 'custom_field_1', 'custom_field1', 'customfield1', 'extra 1', 'extra1'
+      ]);
+      const custom_field_1 = sanitizeString(rawLibero1);
 
-      for (const [header, colName] of Object.entries(headerToColMap)) {
-        const val = row[header];
-        if (val === undefined) continue;
+      const rawLibero2 = getRowValue(row, [
+        'libero 2', 'libero2', 'campo libero 2', 'campolibero2', 'custom_field_2', 'custom_field2', 'customfield2', 'extra 2', 'extra2'
+      ]);
+      const custom_field_2 = sanitizeString(rawLibero2);
 
-        const strVal = String(val).trim();
+      const rawLibero3 = getRowValue(row, [
+        'libero 3', 'libero3', 'campo libero 3', 'campolibero3', 'custom_field_3', 'custom_field3', 'customfield3', 'extra 3', 'extra3'
+      ]);
+      const custom_field_3 = sanitizeString(rawLibero3);
 
-        if (colName === 'net_price_1') {
-          const num = Number(strVal.replace(',', '.'));
-          if (!isNaN(num)) netPrice1Val = num;
-        } else if (colName === 'gross_price_1') {
-          const num = Number(strVal.replace(',', '.'));
-          if (!isNaN(num)) grossPrice1Val = num;
-        }
+      const rawLibero4 = getRowValue(row, [
+        'libero 4', 'libero4', 'campo libero 4', 'campolibero4', 'custom_field_4', 'custom_field4', 'customfield4', 'extra 4', 'extra4'
+      ]);
+      const custom_field_4 = sanitizeString(rawLibero4);
 
-        dataObj[colName] = strVal;
-      }
+      // 4. Cod. fornitore ➔ supplier_code
+      const rawSupplierCode = getRowValue(row, [
+        'cod. fornitore', 'cod fornitore', 'codice fornitore', 'cod. forn.', 'cod forn', 'supplier_code', 'supplier code', 'suppliercode'
+      ]);
+      const supplier_code = sanitizeString(rawSupplierCode);
 
-      if (netPrice1Val !== null || grossPrice1Val !== null) {
-        dataObj['price'] = netPrice1Val ?? grossPrice1Val ?? 0;
-      }
+      // 5. Fornitore ➔ supplier_name
+      const rawSupplierName = getRowValue(row, [
+        'fornitore', 'nome fornitore', 'fornitore nome', 'supplier_name', 'supplier name', 'suppliername', 'supplier'
+      ]);
+      const supplier_name = sanitizeString(rawSupplierName);
 
-      if (match && match.id) {
-        const productId = match.id;
-        const updateFields: string[] = [];
-        const updateValues: any[] = [];
+      // 6. Cod. prod. forn. ➔ supplier_product_code
+      const rawSupplierProductCode = getRowValue(row, [
+        'cod. prod. forn.', 'cod prod forn', 'cod. prod. fornitore', 'cod prod fornitore', 'cod. art. fornitore', 'cod art fornitore', 'codice articolo fornitore', 'cod. art. forn.', 'cod art forn', 'supplier_product_code', 'supplier product code', 'supplierproductcode'
+      ]);
+      const supplier_product_code = sanitizeString(rawSupplierProductCode);
 
-        for (const [colName, val] of Object.entries(dataObj)) {
-          if (colName === 'code') continue;
-          updateFields.push(`"${colName}" = ?`);
-          updateValues.push(val);
-        }
+      // 7. Prezzo forn. ➔ supplier_net_price
+      const rawSupplierNetPrice = getRowValue(row, [
+        'prezzo forn.', 'prezzo forn', 'prezzo fornitore', 'prezzo acq. netto', 'prezzo acq netto', 'prezzo acquisto netto', 'prezzo acq.', 'prezzo acq', 'prezzo acquisto', 'supplier_net_price', 'supplier net price', 'suppliernetprice'
+      ]);
+      const supplier_net_price = sanitizeItalianNumber(rawSupplierNetPrice);
 
-        if (updateFields.length > 0) {
-          updateValues.push(productId);
-          const updateSql = `UPDATE products SET ${updateFields.join(', ')} WHERE id = ?`;
-          await queryRun(updateSql, updateValues);
-          updatedCount++;
-        }
-      } else {
-        // Insert new product
-        const cols = Object.keys(dataObj);
-        const placeholders = cols.map(() => '?').join(', ');
-        const vals = Object.values(dataObj);
-        const insertSql = `INSERT INTO products (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`;
-        try {
-          await queryRun(insertSql, vals);
-          insertedCount++;
-        } catch (insErr: any) {
-          console.warn('[Excel Import] Insert product warning:', insErr.message);
-        }
-      }
+      // 8. Note fornitura ➔ supplier_notes
+      const rawSupplierNotes = getRowValue(row, [
+        'note fornitura', 'note fornitore', 'note forn.', 'note forn', 'note fornitura/acquisto', 'supplier_notes', 'supplier notes', 'suppliernotes'
+      ]);
+      const supplier_notes = sanitizeString(rawSupplierNotes);
 
-      // Sync to PostgreSQL
-      try {
-        const pgCols = Object.keys(dataObj).filter(c => c !== 'id');
-        const pgSetClauses = pgCols.map((c, idx) => `"${c}" = $${idx + 1}`).join(', ');
-        const pgVals = pgCols.map(c => dataObj[c]);
-        
-        await pool.query(`
-          INSERT INTO products (${pgCols.map(c => `"${c}"`).join(', ')})
-          VALUES (${pgCols.map((_, i) => `$${i + 1}`).join(', ')})
-          ON CONFLICT (code) DO UPDATE SET
-            ${pgSetClauses}
-        `, pgVals).catch(() => {});
-      } catch (pgErr) {}
+      enrichedRecords.push({
+        code,
+        classe_provvigione,
+        custom_field_1,
+        custom_field_2,
+        custom_field_3,
+        custom_field_4,
+        supplier_code,
+        supplier_name,
+        supplier_product_code,
+        supplier_net_price,
+        supplier_notes
+      });
     }
 
-    // Cleanup uploaded file
-    try { fs.unlinkSync(req.file.path); } catch (e) {}
+    if (enrichedRecords.length === 0) {
+      return res.status(400).json({ error: 'Nessun prodotto valido con codice identificativo trovato nel file Excel' });
+    }
+
+    // 3. Batch UPSERT in blocchi da 100 record con logica non distruttiva COALESCE(NULLIF(products.colonna, ''), EXCLUDED.colonna)
+    const BATCH_SIZE = 100;
+    let processedCount = 0;
+
+    for (let i = 0; i < enrichedRecords.length; i += BATCH_SIZE) {
+      const batch = enrichedRecords.slice(i, i + BATCH_SIZE);
+      const valueClauses: string[] = [];
+      const queryParams: any[] = [];
+      let paramIdx = 1;
+
+      for (const item of batch) {
+        const pStart = paramIdx;
+        queryParams.push(
+          item.code,                  // $1
+          item.classe_provvigione,    // $2
+          item.custom_field_1,        // $3
+          item.custom_field_2,        // $4
+          item.custom_field_3,        // $5
+          item.custom_field_4,        // $6
+          item.custom_field_1,        // $7 (custom_field1)
+          item.custom_field_2,        // $8 (custom_field2)
+          item.custom_field_3,        // $9 (custom_field3)
+          item.custom_field_4,        // $10 (custom_field4)
+          item.supplier_code,         // $11
+          item.supplier_name,         // $12
+          item.supplier_product_code, // $13
+          item.supplier_net_price,    // $14
+          item.supplier_notes         // $15
+        );
+        paramIdx += 15;
+
+        valueClauses.push(`(
+          $${pStart}, $${pStart + 1}, $${pStart + 2}, $${pStart + 3}, $${pStart + 4}, $${pStart + 5},
+          $${pStart + 6}, $${pStart + 7}, $${pStart + 8}, $${pStart + 9}, $${pStart + 10}, $${pStart + 11},
+          $${pStart + 12}, $${pStart + 13}, $${pStart + 14}
+        )`);
+      }
+
+      const batchUpsertSql = `
+        INSERT INTO products (
+          code, classe_provvigione, custom_field_1, custom_field_2, custom_field_3, custom_field_4,
+          custom_field1, custom_field2, custom_field3, custom_field4,
+          supplier_code, supplier_name, supplier_product_code, supplier_net_price, supplier_notes
+        )
+        VALUES ${valueClauses.join(', ')}
+        ON CONFLICT (code) DO UPDATE SET
+          classe_provvigione = COALESCE(NULLIF(products.classe_provvigione, ''), EXCLUDED.classe_provvigione),
+          custom_field_1 = COALESCE(NULLIF(products.custom_field_1, ''), EXCLUDED.custom_field_1),
+          custom_field_2 = COALESCE(NULLIF(products.custom_field_2, ''), EXCLUDED.custom_field_2),
+          custom_field_3 = COALESCE(NULLIF(products.custom_field_3, ''), EXCLUDED.custom_field_3),
+          custom_field_4 = COALESCE(NULLIF(products.custom_field_4, ''), EXCLUDED.custom_field_4),
+          custom_field1 = COALESCE(NULLIF(products.custom_field1, ''), EXCLUDED.custom_field1),
+          custom_field2 = COALESCE(NULLIF(products.custom_field2, ''), EXCLUDED.custom_field2),
+          custom_field3 = COALESCE(NULLIF(products.custom_field3, ''), EXCLUDED.custom_field3),
+          custom_field4 = COALESCE(NULLIF(products.custom_field4, ''), EXCLUDED.custom_field4),
+          supplier_code = COALESCE(NULLIF(products.supplier_code, ''), EXCLUDED.supplier_code),
+          supplier_name = COALESCE(NULLIF(products.supplier_name, ''), EXCLUDED.supplier_name),
+          supplier_product_code = COALESCE(NULLIF(products.supplier_product_code, ''), EXCLUDED.supplier_product_code),
+          supplier_net_price = COALESCE(products.supplier_net_price, EXCLUDED.supplier_net_price),
+          supplier_notes = COALESCE(NULLIF(products.supplier_notes, ''), EXCLUDED.supplier_notes),
+          updated_at = NOW();
+      `;
+
+      await pool.query(batchUpsertSql, queryParams);
+
+      // Sincronizzazione non distruttiva SQLite locale (per ambienti di sviluppo offline)
+      for (const item of batch) {
+        try {
+          await queryRun(`
+            INSERT INTO products (
+              code, description, price, classe_provvigione, custom_field1, custom_field2, custom_field3, custom_field4,
+              supplier_code, supplier_name, supplier_product_code, supplier_net_price, supplier_notes
+            )
+            VALUES (?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code) DO UPDATE SET
+              classe_provvigione = COALESCE(NULLIF(products.classe_provvigione, ''), excluded.classe_provvigione),
+              custom_field1 = COALESCE(NULLIF(products.custom_field1, ''), excluded.custom_field1),
+              custom_field2 = COALESCE(NULLIF(products.custom_field2, ''), excluded.custom_field2),
+              custom_field3 = COALESCE(NULLIF(products.custom_field3, ''), excluded.custom_field3),
+              custom_field4 = COALESCE(NULLIF(products.custom_field4, ''), excluded.custom_field4),
+              supplier_code = COALESCE(NULLIF(products.supplier_code, ''), excluded.supplier_code),
+              supplier_name = COALESCE(NULLIF(products.supplier_name, ''), excluded.supplier_name),
+              supplier_product_code = COALESCE(NULLIF(products.supplier_product_code, ''), excluded.supplier_product_code),
+              supplier_net_price = COALESCE(products.supplier_net_price, excluded.supplier_net_price),
+              supplier_notes = COALESCE(NULLIF(products.supplier_notes, ''), excluded.supplier_notes)
+          `, [
+            item.code, item.code, item.classe_provvigione, item.custom_field_1, item.custom_field_2, item.custom_field_3, item.custom_field_4,
+            item.supplier_code, item.supplier_name, item.supplier_product_code, item.supplier_net_price, item.supplier_notes
+          ]);
+        } catch (sqErr) {}
+      }
+
+      processedCount += batch.length;
+    }
 
     return res.json({
       success: true,
-      imported: insertedCount,
-      updated: updatedCount,
+      updated: processedCount,
+      enriched: processedCount,
       ignored: ignoredCount,
-      total: rows.length,
-      newColumnsCreated
+      total: rows.length
     });
 
   } catch (err: any) {
     console.error('Error in handleExcelProductsImportLogic:', err);
-    if (req.file && req.file.path) {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    return res.status(500).json({ error: err.message || 'Errore durante l\'arricchimento del catalogo da file Excel' });
+  } finally {
+    // Eliminazione garantita del file temporaneo caricato
+    if (tempFilePath) {
+      try {
+        fs.unlinkSync(tempFilePath);
+      } catch (e) {}
     }
-    return res.status(500).json({ error: err.message || 'Errore durante l\'importazione del file Excel' });
   }
 }
 

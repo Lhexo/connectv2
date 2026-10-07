@@ -38,6 +38,7 @@ interface OrderItemDraft {
   um: string;
   discount_perc?: number | string;
   discounts?: string;
+  custom_taxable_total?: number | null;
 }
 
 export default function CreateOrder({ user, currentUser }: { user?: any; currentUser?: any }) {
@@ -329,7 +330,8 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
             vat_code: product.vat_code || '22',
             um: product.um || 'pz',
             discount_perc: 0,
-            discounts: ''
+            discounts: '',
+            custom_taxable_total: null
           }
         ];
       }
@@ -342,7 +344,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
       return;
     }
     setCartItems(prev => prev.map(item => 
-      item.product_code === productCode ? { ...item, qty: newQty } : item
+      item.product_code === productCode ? { ...item, qty: newQty, custom_taxable_total: null } : item
     ));
   };
 
@@ -359,7 +361,8 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
         next[index] = { 
           ...next[index], 
           discount_perc: discountVal, 
-          discounts: discountVal ? String(discountVal) : '' 
+          discounts: discountVal ? String(discountVal) : '',
+          custom_taxable_total: null
         };
         return next;
       }
@@ -369,7 +372,8 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
           return { 
             ...item, 
             discount_perc: discountVal, 
-            discounts: discountVal ? String(discountVal) : '' 
+            discounts: discountVal ? String(discountVal) : '',
+            custom_taxable_total: null
           };
         }
         return item;
@@ -382,11 +386,11 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
     setCartItems(prev => {
       if (typeof index === 'number' && index >= 0 && index < prev.length) {
         const next = [...prev];
-        next[index] = { ...next[index], price: cleanPrice };
+        next[index] = { ...next[index], price: cleanPrice, custom_taxable_total: null };
         return next;
       }
       return prev.map(item => 
-        item.product_code === productCode ? { ...item, price: cleanPrice } : item
+        item.product_code === productCode ? { ...item, price: cleanPrice, custom_taxable_total: null } : item
       );
     });
   };
@@ -399,9 +403,15 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
         const qty = next[index].qty || 1;
         const discountPerc = parseDiscountPerc(next[index].discount_perc ?? next[index].discounts);
         const discountMultiplier = Math.max(0.0001, 1 - (discountPerc / 100));
-        // cleanTotal = (price * qty) * (1 - discount/100) => price = cleanTotal / (qty * discountMultiplier)
-        const computedUnitPrice = Math.round((cleanTotal / (qty * discountMultiplier)) * 100) / 100;
-        next[index] = { ...next[index], price: computedUnitPrice };
+        // Keep unit price consistent for display while storing exact custom total
+        const computedUnitPrice = qty !== 0 
+          ? Math.round((cleanTotal / (qty * discountMultiplier)) * 100) / 100 
+          : 0;
+        next[index] = { 
+          ...next[index], 
+          price: computedUnitPrice,
+          custom_taxable_total: cleanTotal
+        };
         return next;
       }
       return prev.map(item => {
@@ -409,22 +419,29 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
           const qty = item.qty || 1;
           const discountPerc = parseDiscountPerc(item.discount_perc ?? item.discounts);
           const discountMultiplier = Math.max(0.0001, 1 - (discountPerc / 100));
-          const computedUnitPrice = Math.round((cleanTotal / (qty * discountMultiplier)) * 100) / 100;
-          return { ...item, price: computedUnitPrice };
+          const computedUnitPrice = qty !== 0 
+            ? Math.round((cleanTotal / (qty * discountMultiplier)) * 100) / 100 
+            : 0;
+          return { 
+            ...item, 
+            price: computedUnitPrice,
+            custom_taxable_total: cleanTotal
+          };
         }
         return item;
       });
     });
   };
 
-  // Cart Calculations
+  // Cart Calculations: evaluates each row, sums all taxable amounts (including negatives), then calculates VAT
   const orderTotals = useMemo(() => {
     return calculateOrderTotals(cartItems.map(item => ({
       qty: item.qty,
       price: item.price,
       vatRate: item.vat_code || 22,
       discount_perc: item.discount_perc,
-      discounts: item.discounts
+      discounts: item.discounts,
+      custom_taxable_total: item.custom_taxable_total
     })));
   }, [cartItems]);
 
@@ -440,15 +457,21 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
 
   const totalDiscountAmount = useMemo(() => {
     return cartItems.reduce((acc, item) => {
-      const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts);
+      const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts, item.custom_taxable_total);
       return acc + line.discountAmount;
     }, 0);
   }, [cartItems]);
 
   const discountTotal = useMemo(() => {
     return cartItems
-      .filter(item => item.price < 0)
-      .reduce((acc, item) => acc + (item.qty * Math.abs(item.price)), 0);
+      .filter(item => {
+        const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts, item.custom_taxable_total);
+        return line.totalTaxable < 0;
+      })
+      .reduce((acc, item) => {
+        const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts, item.custom_taxable_total);
+        return acc + Math.abs(line.totalTaxable);
+      }, 0);
   }, [cartItems]);
 
   const totalItemsCount = useMemo(() => {
@@ -475,7 +498,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
       paymentBank: selectedClient?.payment_bank || '',
       notes: notes || '',
       items: cartItems.map(item => {
-        const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts);
+        const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts, item.custom_taxable_total);
         return {
           code: item.product_code,
           description: item.description,
@@ -547,10 +570,13 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
         status: status,
         items: cartItems.map(item => {
           const discountVal = item.discount_perc !== undefined && item.discount_perc !== null ? item.discount_perc : (item.discounts || 0);
+          const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts, item.custom_taxable_total);
           return {
             ...item,
             discount_perc: discountVal,
-            discounts: item.discounts || (discountVal ? `${discountVal}%` : '')
+            discounts: item.discounts || (discountVal ? `${discountVal}%` : ''),
+            total: line.totalTaxable,
+            taxable_total: line.totalTaxable
           };
         })
       };
@@ -1176,7 +1202,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                     </div>
                   ) : (
                     cartItems.map((item, idx) => {
-                      const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts);
+                      const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts, item.custom_taxable_total);
                       return (
                         <div
                           key={item.product_code + idx}
@@ -1354,25 +1380,37 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                     </div>
                   </div>
 
-                  {/* Quick Copy & Print Actions */}
-                  <div className="flex gap-2 pt-1">
+                  {/* Quick Copy, Print & Download PDF Actions */}
+                  <div className="grid grid-cols-3 gap-2 pt-1">
                     <button
                       type="button"
                       onClick={() => handleCopySummary()}
                       disabled={cartItems.length === 0}
-                      className="flex-1 py-2 px-3 bg-white hover:bg-gray-100 disabled:opacity-50 border border-gray-200 text-gray-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      className="py-2 px-2 bg-white hover:bg-gray-100 disabled:opacity-50 border border-gray-200 text-gray-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      title="Copia testo ordine negli appunti"
                     >
                       <Copy size={13} />
-                      <span>Copia Riepilogo</span>
+                      <span className="truncate">Copia</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => handlePrintOrder()}
                       disabled={cartItems.length === 0}
-                      className="flex-1 py-2 px-3 bg-white hover:bg-gray-100 disabled:opacity-50 border border-gray-200 text-gray-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      className="py-2 px-2 bg-white hover:bg-gray-100 disabled:opacity-50 border border-gray-200 text-gray-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      title="Stampa documento ordine"
                     >
                       <Printer size={13} />
-                      <span>Stampa Anteprima</span>
+                      <span className="truncate">Stampa</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadPdf()}
+                      disabled={cartItems.length === 0}
+                      className="py-2 px-2 bg-[#5A5A40]/10 hover:bg-[#5A5A40]/20 disabled:opacity-50 border border-[#5A5A40]/30 text-[#5A5A40] rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      title="Scarica documento in formato PDF"
+                    >
+                      <Download size={13} />
+                      <span className="truncate">PDF</span>
                     </button>
                   </div>
 
@@ -1549,8 +1587,8 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 </div>
               </div>
 
-              {/* Azioni Riepilogo Ordine: Copia e Stampa */}
-              <div className="grid grid-cols-2 gap-2 pt-1">
+              {/* Azioni Riepilogo Ordine: Copia, Stampa e Scarica PDF */}
+              <div className="grid grid-cols-3 gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => handleCopySummary()}
@@ -1568,6 +1606,15 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 >
                   <Printer size={15} className="text-blue-700" />
                   <span className="truncate">Stampa</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadPdf()}
+                  className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200/80 text-emerald-900 py-2.5 px-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-98 shadow-2xs cursor-pointer"
+                  title="Scarica documento in formato PDF"
+                >
+                  <Download size={15} className="text-emerald-700" />
+                  <span className="truncate">Scarica PDF</span>
                 </button>
               </div>
 
