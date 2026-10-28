@@ -16,14 +16,26 @@ import {
   Sparkles,
   RefreshCw,
   ShoppingBag,
-  Info,
-  DollarSign,
+  Layers,
+  Filter,
+  ArrowUpDown,
   Tag
 } from 'lucide-react';
+import { 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  Tooltip, 
+  ResponsiveContainer, 
+  CartesianGrid, 
+  Cell 
+} from 'recharts';
 import { cn } from '../lib/utils';
 import { format, parseISO, differenceInDays, addDays, isValid } from 'date-fns';
 import { it } from 'date-fns/locale';
 import ConfirmModal from './ConfirmModal';
+import SectionPagination from './SectionPagination';
 
 function safeParseDate(dateStr: string | Date | null | undefined): Date | null {
   if (!dateStr) return null;
@@ -97,7 +109,7 @@ function safeFormatDate(d: string | Date | null | undefined, fmt = 'dd/MM/yyyy')
   }
 }
 
-interface SalesHistoryItem {
+export interface SalesHistoryItem {
   id: number;
   client_id: number;
   type?: string;
@@ -113,6 +125,7 @@ interface SalesHistoryItem {
   category: string;
   created_at?: string;
   is_imported?: boolean;
+  in_catalog?: boolean;
 }
 
 interface ClientSalesHistoryProps {
@@ -130,6 +143,27 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [expandedDocs, setExpandedDocs] = useState<Record<string, boolean>>({});
   const [showConfirmClear, setShowConfirmClear] = useState(false);
+
+  // Time breakdown controls: YEAR or MONTH
+  const [timeBreakdownMode, setTimeBreakdownMode] = useState<'YEAR' | 'MONTH'>('YEAR');
+  const [selectedBreakdownYear, setSelectedBreakdownYear] = useState<string>('ALL');
+
+  // Pagination states (10 items per page limit)
+  const [monthlyPage, setMonthlyPage] = useState(1);
+  const [categoriesPage, setCategoriesPage] = useState(1);
+  const [predictionsPage, setPredictionsPage] = useState(1);
+  const [productsPage, setProductsPage] = useState(1);
+  const [documentsPage, setDocumentsPage] = useState(1);
+
+  // Auto-reset pagination on filters/view changes
+  useEffect(() => {
+    setProductsPage(1);
+    setDocumentsPage(1);
+  }, [searchTerm, selectedCategory]);
+
+  useEffect(() => {
+    setMonthlyPage(1);
+  }, [selectedBreakdownYear, timeBreakdownMode]);
 
   const hasImportedItems = useMemo(() => {
     return items.some(item => item.is_imported === true || (item.is_imported === undefined && item.category !== 'Ordini App'));
@@ -177,7 +211,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       if (res.ok && data.success) {
         setUploadMessage({
           type: 'success',
-          text: `Importazione completata con successo: ${data.importedCount} righe di vendita registrate!`,
+          text: `Importazione completata con successo: ${data.importedCount || data.count || 'tutte le'} righe registrate nello storico cliente!`,
         });
         fetchSalesHistory();
       } else {
@@ -193,7 +227,6 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       });
     } finally {
       setUploading(false);
-      // reset file input
       e.target.value = '';
     }
   };
@@ -223,17 +256,17 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
   const categories = useMemo(() => {
     const set = new Set<string>();
     items.forEach(item => {
-      if (item.category) set.add(item.category);
+      if (item.category && item.category !== 'Documenti') set.add(item.category);
     });
     return Array.from(set).sort();
   }, [items]);
 
-  // Product items (excluding date/document placeholder rows)
+  // Product items (excluding empty placeholder rows)
   const productItems = useMemo(() => {
     return items.filter(item => item.type !== 'document');
   }, [items]);
 
-  // Filtered items
+  // Filtered items by category & search term
   const filteredItems = useMemo(() => {
     return productItems.filter(item => {
       const matchesCategory = selectedCategory === 'ALL' || item.category === selectedCategory;
@@ -244,17 +277,6 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       return matchesCategory && matchesSearch;
     });
   }, [productItems, selectedCategory, searchTerm]);
-
-  // Unique Document Dates sorted ascending for frequency calculations
-  const uniqueDocDates = useMemo(() => {
-    const dates = Array.from(new Set(items.map(i => i.document_date).filter((d): d is string => Boolean(d && d.trim())))).sort((a, b) => {
-      const da = safeParseDate(a);
-      const db = safeParseDate(b);
-      if (da && db) return da.getTime() - db.getTime();
-      return a.localeCompare(b);
-    });
-    return dates;
-  }, [items]);
 
   // Unique Documents grouped
   const documentsGrouped = useMemo(() => {
@@ -267,7 +289,6 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
     }> = {};
 
     filteredItems.forEach(item => {
-      // Skip items that do not have explicit document metadata
       if (!item.document_number && !item.document_date) return;
 
       const key = `${item.document_number || 'ND'}_${item.document_date || ''}`;
@@ -292,12 +313,9 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
     });
   }, [filteredItems]);
 
-  // KPI calculations (strictly excluding imported XLSX items for LTV, Ticket Medio, and Reorder Status)
+  // Unified KPI calculations: includes ALL items (CRM orders + historical imported docs)
   const kpis = useMemo(() => {
-    // Strictly filter items that represent actual CRM App orders (excluding ALL XLSX imported products)
-    const crmOrderItems = items.filter(item => !item.is_imported);
-
-    if (crmOrderItems.length === 0) {
+    if (items.length === 0) {
       return {
         ltv: 0,
         avgReorderDays: 0,
@@ -309,12 +327,12 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       };
     }
 
-    // LTV (Fatturato Storico) calculated ONLY from real CRM orders
-    const ltv = crmOrderItems.reduce((sum, item) => sum + (Number(item.total_amount) || 0), 0);
+    // Comprehensive LTV (Fatturato Storico Totale)
+    const ltv = items.reduce((sum, item) => sum + (Number(item.total_amount) || 0), 0);
 
-    // Real document order dates from CRM orders
-    const crmDocDates = Array.from(new Set(
-      crmOrderItems.map(i => i.document_date).filter((d): d is string => Boolean(d && d.trim()))
+    // All distinct document dates sorted chronologically
+    const allDocDates = Array.from(new Set(
+      items.map(i => i.document_date).filter((d): d is string => Boolean(d && d.trim()))
     )).sort((a, b) => {
       const da = safeParseDate(a);
       const db = safeParseDate(b);
@@ -322,13 +340,13 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       return a.localeCompare(b);
     });
 
-    // Calculate avg reorder days using crmDocDates
-    let avgReorderDays = 30; // default assumption
-    if (crmDocDates.length > 1) {
+    // Calculate avg reorder days using allDocDates
+    let avgReorderDays = 30; // default benchmark
+    if (allDocDates.length > 1) {
       let totalGaps = 0;
       let validGapsCount = 0;
-      for (let i = 1; i < crmDocDates.length; i++) {
-        const gap = Math.abs(safeDiffDays(crmDocDates[i], crmDocDates[i - 1]));
+      for (let i = 1; i < allDocDates.length; i++) {
+        const gap = Math.abs(safeDiffDays(allDocDates[i], allDocDates[i - 1]));
         if (gap > 0) {
           totalGaps += gap;
           validGapsCount++;
@@ -339,9 +357,9 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       }
     }
 
-    // Extract unique orders from crmOrderItems
+    // Count unique orders/documents
     const uniqueOrdersSet = new Set<string>();
-    crmOrderItems.forEach((item, idx) => {
+    items.forEach((item, idx) => {
       if (item.document_number) {
         uniqueOrdersSet.add(`${item.document_number}_${item.document_date || ''}`);
       } else if (item.document_date) {
@@ -353,8 +371,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
 
     const totalOrders = uniqueOrdersSet.size;
     const avgTicket = totalOrders > 0 ? ltv / totalOrders : 0;
-
-    const lastOrderDate = crmDocDates.length > 0 ? crmDocDates[crmDocDates.length - 1] : null;
+    const lastOrderDate = allDocDates.length > 0 ? allDocDates[allDocDates.length - 1] : null;
 
     let reorderStatus: 'TARGET' | 'ATTESA' | 'CHURN' | 'N/A' = 'N/A';
     let reorderDaysDiff = 0;
@@ -382,7 +399,140 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
     };
   }, [items]);
 
-  // Top Purchased Products Grouping (Includes ALL products, both imported XLSX and CRM App orders)
+  // Available Years in dataset
+  const availableYears = useMemo(() => {
+    const yearsSet = new Set<string>();
+    items.forEach(item => {
+      if (item.document_date) {
+        const d = safeParseDate(item.document_date);
+        if (d) yearsSet.add(String(d.getFullYear()));
+        else {
+          const match = item.document_date.match(/(\d{4})/);
+          if (match) yearsSet.add(match[1]);
+        }
+      }
+    });
+    return Array.from(yearsSet).sort().reverse();
+  }, [items]);
+
+  // YEARLY BREAKDOWN OF TURNOVER
+  const yearlyBreakdown = useMemo(() => {
+    const map: Record<string, { year: string; revenue: number; orderKeys: Set<string> }> = {};
+
+    items.forEach((item, idx) => {
+      let yr = 'Non definito';
+      if (item.document_date) {
+        const d = safeParseDate(item.document_date);
+        if (d) yr = String(d.getFullYear());
+        else {
+          const m = item.document_date.match(/(\d{4})/);
+          if (m) yr = m[1];
+        }
+      }
+
+      if (!map[yr]) {
+        map[yr] = { year: yr, revenue: 0, orderKeys: new Set<string>() };
+      }
+
+      map[yr].revenue += Number(item.total_amount) || 0;
+      const key = item.document_number 
+        ? `${item.document_number}_${item.document_date || ''}` 
+        : (item.document_date || `ROW_${item.id || idx}`);
+      map[yr].orderKeys.add(key);
+    });
+
+    const totalLtv = kpis.ltv || 1;
+    return Object.values(map)
+      .map(entry => ({
+        year: entry.year,
+        revenue: entry.revenue,
+        ordersCount: entry.orderKeys.size,
+        percentage: Math.min(100, Math.round((entry.revenue / totalLtv) * 100)),
+        avgTicket: entry.orderKeys.size > 0 ? entry.revenue / entry.orderKeys.size : 0
+      }))
+      .sort((a, b) => b.year.localeCompare(a.year));
+  }, [items, kpis.ltv]);
+
+  // MONTHLY BREAKDOWN OF TURNOVER
+  const monthlyBreakdown = useMemo(() => {
+    const map: Record<string, { key: string; label: string; year: string; revenue: number; orderKeys: Set<string> }> = {};
+
+    items.forEach((item, idx) => {
+      if (!item.document_date) return;
+      const d = safeParseDate(item.document_date);
+      if (!d) return;
+
+      const yr = String(d.getFullYear());
+      if (selectedBreakdownYear !== 'ALL' && yr !== selectedBreakdownYear) return;
+
+      const monthNum = String(d.getMonth() + 1).padStart(2, '0');
+      const key = `${yr}-${monthNum}`;
+      
+      const monthNames = [
+        'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
+        'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'
+      ];
+      const label = `${monthNames[d.getMonth()]} ${yr}`;
+
+      if (!map[key]) {
+        map[key] = { key, label, year: yr, revenue: 0, orderKeys: new Set<string>() };
+      }
+
+      map[key].revenue += Number(item.total_amount) || 0;
+      const orderKey = item.document_number 
+        ? `${item.document_number}_${item.document_date || ''}` 
+        : (item.document_date || `ROW_${item.id || idx}`);
+      map[key].orderKeys.add(orderKey);
+    });
+
+    const totalFilteredRevenue = Object.values(map).reduce((sum, e) => sum + e.revenue, 0) || 1;
+
+    return Object.values(map)
+      .map(entry => ({
+        key: entry.key,
+        label: entry.label,
+        year: entry.year,
+        revenue: entry.revenue,
+        ordersCount: entry.orderKeys.size,
+        percentage: Math.min(100, Math.round((entry.revenue / totalFilteredRevenue) * 100)),
+        avgTicket: entry.orderKeys.size > 0 ? entry.revenue / entry.orderKeys.size : 0
+      }))
+      .sort((a, b) => b.key.localeCompare(a.key));
+  }, [items, selectedBreakdownYear]);
+
+  // STATISTICA PER CATEGORIA PRODOTTO
+  const categoryStats = useMemo(() => {
+    const map: Record<string, { category: string; totalRevenue: number; totalQty: number; itemsCount: number; colorIndex: number }> = {};
+    let colorCounter = 0;
+
+    productItems.forEach(item => {
+      const cat = item.category?.trim() || 'Altro / Non catalogato';
+
+      if (!map[cat]) {
+        map[cat] = {
+          category: cat,
+          totalRevenue: 0,
+          totalQty: 0,
+          itemsCount: 0,
+          colorIndex: colorCounter++ % 6
+        };
+      }
+
+      map[cat].totalRevenue += Number(item.total_amount) || 0;
+      map[cat].totalQty += Number(item.quantity) || 0;
+      map[cat].itemsCount += 1;
+    });
+
+    const totalLtv = kpis.ltv || 1;
+    return Object.values(map)
+      .map(cat => ({
+        ...cat,
+        percentage: Math.min(100, Math.round((cat.totalRevenue / totalLtv) * 100))
+      }))
+      .sort((a, b) => b.totalRevenue - a.totalRevenue);
+  }, [productItems, kpis.ltv]);
+
+  // Top Purchased Products Grouping (Includes ALL items with in_catalog status)
   const topProducts = useMemo(() => {
     const map: Record<string, {
       code: string;
@@ -393,6 +543,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       lastDate: string;
       purchaseCount: number;
       um: string;
+      inCatalog: boolean;
     }> = {};
 
     productItems.forEach(item => {
@@ -408,7 +559,8 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
           totalValue: 0,
           lastDate: item.document_date || '',
           purchaseCount: 0,
-          um: item.unit_of_measure || 'pz'
+          um: item.unit_of_measure || 'pz',
+          inCatalog: item.in_catalog !== false
         };
       }
 
@@ -417,55 +569,18 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
       map[key].purchaseCount += 1;
       if (item.document_date && item.document_date > map[key].lastDate) {
         map[key].lastDate = item.document_date;
+      }
+      if (item.in_catalog === false) {
+        map[key].inCatalog = false;
       }
     });
 
     return Object.values(map).sort((a, b) => b.totalValue - a.totalValue);
   }, [productItems]);
 
-  // Reorder cycle analysis per top product (strictly calculated on CRM App orders)
+  // Reorder cycle analysis per top product (calculated across all purchases)
   const reorderPredictions = useMemo(() => {
-    const crmProductItems = productItems.filter(item => !item.is_imported);
-
-    const map: Record<string, {
-      code: string;
-      description: string;
-      category: string;
-      totalQty: number;
-      totalValue: number;
-      lastDate: string;
-      purchaseCount: number;
-      um: string;
-    }> = {};
-
-    crmProductItems.forEach(item => {
-      const key = item.product_code || item.product_description;
-      if (!key) return;
-
-      if (!map[key]) {
-        map[key] = {
-          code: item.product_code || 'N/D',
-          description: item.product_description || 'Prodotto Generico',
-          category: item.category || 'Generale',
-          totalQty: 0,
-          totalValue: 0,
-          lastDate: item.document_date || '',
-          purchaseCount: 0,
-          um: item.unit_of_measure || 'pz'
-        };
-      }
-
-      map[key].totalQty += Number(item.quantity) || 0;
-      map[key].totalValue += Number(item.total_amount) || 0;
-      map[key].purchaseCount += 1;
-      if (item.document_date && item.document_date > map[key].lastDate) {
-        map[key].lastDate = item.document_date;
-      }
-    });
-
-    const crmTopProducts = Object.values(map).sort((a, b) => b.totalValue - a.totalValue);
-
-    return crmTopProducts.slice(0, 8).map(prod => {
+    return topProducts.map(prod => {
       if (!prod.lastDate) {
         return {
           ...prod,
@@ -493,11 +608,39 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
         nextEstimatedDate: safeAddDays(prod.lastDate, estimatedCycle)
       };
     });
-  }, [productItems, kpis.avgReorderDays]);
+  }, [topProducts, kpis.avgReorderDays]);
+
+  // 10-Item Pagination Slices for each section
+  const paginatedMonthly = useMemo(() => {
+    const start = (monthlyPage - 1) * 10;
+    return monthlyBreakdown.slice(start, start + 10);
+  }, [monthlyBreakdown, monthlyPage]);
+
+  const paginatedCategories = useMemo(() => {
+    const start = (categoriesPage - 1) * 10;
+    return categoryStats.slice(start, start + 10);
+  }, [categoryStats, categoriesPage]);
+
+  const paginatedPredictions = useMemo(() => {
+    const start = (predictionsPage - 1) * 10;
+    return reorderPredictions.slice(start, start + 10);
+  }, [reorderPredictions, predictionsPage]);
+
+  const paginatedProducts = useMemo(() => {
+    const start = (productsPage - 1) * 10;
+    return topProducts.slice(start, start + 10);
+  }, [topProducts, productsPage]);
+
+  const paginatedDocuments = useMemo(() => {
+    const start = (documentsPage - 1) * 10;
+    return documentsGrouped.slice(start, start + 10);
+  }, [documentsGrouped, documentsPage]);
 
   const toggleDocExpand = (docKey: string) => {
     setExpandedDocs(prev => ({ ...prev, [docKey]: !prev[docKey] }));
   };
+
+  const CATEGORY_COLORS = ['#5A5A40', '#10B981', '#3B82F6', '#F59E0B', '#8B5CF6', '#EC4899'];
 
   if (loading) {
     return (
@@ -518,7 +661,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
             Statistiche & Storico Acquisti
           </h2>
           <p className="text-xs text-gray-500 mt-1">
-            Analisi dettagliata delle abitudini di acquisto, riordini frequenti e storico consumi di <strong className="text-gray-800">{clientName}</strong>.
+            Analisi unificata dei consumi, ripartizione temporale, categorie merceologiche e storico documenti di <strong className="text-gray-800">{clientName}</strong>.
           </p>
         </div>
 
@@ -575,10 +718,10 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
             <FileSpreadsheet size={32} />
           </div>
           <div className="max-w-md mx-auto space-y-2">
-            <h3 className="text-lg font-serif font-bold text-gray-900">Nessuno storico acquisti importato</h3>
+            <h3 className="text-lg font-serif font-bold text-gray-900">Nessuno storico acquisti presente</h3>
             <p className="text-xs text-gray-500 leading-relaxed">
-              Non sono ancora presenti dati sullo storico acquisti o sui prodotti consumati da questo cliente.
-              {isAdmin && " Puoi caricare un file Excel con l'elenco dei documenti e delle righe vendute tramite il pulsante 'Importa XLSX Storico' in alto."}
+              Non sono ancora presenti ordini registrati o documenti storici per questo cliente.
+              {isAdmin && " È possibile caricare un file Excel con l'elenco dei documenti e delle righe vendute tramite il pulsante 'Importa XLSX Storico' in alto."}
             </p>
           </div>
           {isAdmin && (
@@ -591,12 +734,12 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
         </div>
       ) : (
         <>
-          {/* 1. KPI SUMMARY CARDS */}
+          {/* 1. KPI SUMMARY CARDS (UNIFIED) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
             {/* KPI 1: LTV */}
             <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm space-y-2">
               <div className="flex items-center justify-between text-gray-400">
-                <span className="text-[10px] font-black uppercase tracking-wider text-gray-500">LTV (Fatturato Storico)</span>
+                <span className="text-[10px] font-black uppercase tracking-wider text-gray-500">Fatturato Complessivo (LTV)</span>
                 <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
                   <TrendingUp size={18} />
                 </div>
@@ -605,7 +748,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                 € {kpis.ltv.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </p>
               <p className="text-[11px] text-gray-500 font-medium">
-                Calcolato su {kpis.totalOrders} {kpis.totalOrders === 1 ? 'ordine App' : 'ordini App'} (esclusi dati XLSX)
+                Volume su {kpis.totalOrders} {kpis.totalOrders === 1 ? 'ordine / doc' : 'ordini / doc complessivi'}
               </p>
             </div>
 
@@ -621,7 +764,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                 Ogni {kpis.avgReorderDays} {kpis.avgReorderDays === 1 ? 'giorno' : 'giorni'}
               </p>
               <p className="text-[11px] text-gray-500 font-medium">
-                Intervallo medio stimato tra ordini App
+                Intervallo stimato tra acquisti consecutivi
               </p>
             </div>
 
@@ -654,20 +797,20 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                   {kpis.reorderStatus === 'TARGET' && 'In Target'}
                   {kpis.reorderStatus === 'ATTESA' && 'In Attesa'}
                   {kpis.reorderStatus === 'CHURN' && 'In Ritardo (Rischio Churn)'}
-                  {kpis.reorderStatus === 'N/A' && 'Senza Ordini App'}
+                  {kpis.reorderStatus === 'N/A' && 'Senza Storico'}
                 </span>
               </div>
               <p className="text-[11px] text-gray-500 font-medium">
                 {kpis.lastOrderDate 
-                  ? `Ultimo ordine App ${kpis.reorderDaysDiff} giorni fa (${safeFormatDate(kpis.lastOrderDate)})`
-                  : 'Nessun ordine registrato dall\'App'}
+                  ? `Ultimo acquisto ${kpis.reorderDaysDiff} giorni fa (${safeFormatDate(kpis.lastOrderDate)})`
+                  : 'Nessuna data di acquisto registrata'}
               </p>
             </div>
 
             {/* KPI 4: TICKET MEDIO */}
             <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm space-y-2">
               <div className="flex items-center justify-between text-gray-400">
-                <span className="text-[10px] font-black uppercase tracking-wider text-gray-500">Ticket Medio</span>
+                <span className="text-[10px] font-black uppercase tracking-wider text-gray-500">Ticket Medio Spesa</span>
                 <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
                   <ShoppingBag size={18} />
                 </div>
@@ -676,12 +819,301 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                 € {kpis.avgTicket.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </p>
               <p className="text-[11px] text-gray-500 font-medium">
-                Valore medio speso per ordine App
+                Spesa media per documento d'ordine
               </p>
             </div>
           </div>
 
-          {/* 2. CICLO DI RIORDINO & PREVISIONE ACQUISTO (CROSS-SELLING) */}
+          {/* 2. ANDAMENTO TEMPORALE FATTURATO: SELETTORE ANNO / MESE */}
+          <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4">
+              <div>
+                <h3 className="text-lg font-serif font-bold text-gray-900 flex items-center gap-2">
+                  <Calendar size={20} className="text-[#5A5A40]" />
+                  Fatturato Storico per Periodo
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Visualizzazione dell'andamento vendite suddiviso per {timeBreakdownMode === 'YEAR' ? 'Anno solare' : 'Mese'}.
+                </p>
+              </div>
+
+              {/* TOGGLE ANNO / MESE + YEAR FILTER */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center p-1 bg-gray-100 rounded-xl border border-gray-200/80">
+                  <button
+                    type="button"
+                    onClick={() => setTimeBreakdownMode('YEAR')}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                      timeBreakdownMode === 'YEAR'
+                        ? "bg-white text-gray-900 shadow-xs"
+                        : "text-gray-500 hover:text-gray-800"
+                    )}
+                  >
+                    Per Anno
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTimeBreakdownMode('MONTH')}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                      timeBreakdownMode === 'MONTH'
+                        ? "bg-white text-gray-900 shadow-xs"
+                        : "text-gray-500 hover:text-gray-800"
+                    )}
+                  >
+                    Per Mese
+                  </button>
+                </div>
+
+                {timeBreakdownMode === 'MONTH' && availableYears.length > 0 && (
+                  <select
+                    value={selectedBreakdownYear || 'ALL'}
+                    onChange={(e) => setSelectedBreakdownYear(e.target.value)}
+                    className="py-1.5 px-3 bg-[#F9FAFB] border border-gray-200 rounded-xl text-xs font-bold text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#5A5A40] cursor-pointer"
+                  >
+                    <option value="ALL">Tutti gli anni ({availableYears.length})</option>
+                    {availableYears.map(yr => (
+                      <option key={yr} value={yr}>Anno {yr}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+
+            {/* BREAKDOWN CHART / BARS */}
+            {timeBreakdownMode === 'YEAR' ? (
+              <div className="space-y-6">
+                {/* Year Chart */}
+                <div className="h-56 w-full pt-2">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={[...yearlyBreakdown].reverse()} margin={{ top: 10, right: 10, left: 0, bottom: 20 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F3F4F6" />
+                      <XAxis dataKey="year" tick={{ fontSize: 11, fill: '#6B7280', fontWeight: 600 }} />
+                      <YAxis tick={{ fontSize: 10, fill: '#9CA3AF' }} tickFormatter={(v) => `€${v >= 1000 ? `${(v/1000).toFixed(0)}k` : v}`} />
+                      <Tooltip 
+                        formatter={(val: any) => [`€ ${Number(val).toLocaleString('it-IT', { minimumFractionDigits: 2 })}`, 'Fatturato']}
+                        labelStyle={{ fontWeight: 'bold', color: '#111827' }}
+                        contentStyle={{ borderRadius: '1rem', border: '1px solid #E5E7EB', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                      />
+                      <Bar dataKey="revenue" fill="#5A5A40" radius={[6, 6, 0, 0]}>
+                        {yearlyBreakdown.map((_, i) => (
+                          <Cell key={i} fill={i === 0 ? '#5A5A40' : '#8A8A6E'} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Yearly Table */}
+                <div className="overflow-x-auto border border-gray-100 rounded-2xl">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-gray-50/80 text-[10px] uppercase font-black tracking-wider text-gray-500 border-b border-gray-100">
+                        <th className="p-3.5">Anno Solare</th>
+                        <th className="p-3.5 text-center">N. Documenti</th>
+                        <th className="p-3.5 text-right">Fatturato Anno</th>
+                        <th className="p-3.5 text-center">% su Fatturato Totale</th>
+                        <th className="p-3.5 text-right">Ticket Medio</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 text-xs">
+                      {yearlyBreakdown.map((row) => (
+                        <tr key={row.year} className="hover:bg-gray-50/60 transition-colors">
+                          <td className="p-3.5 font-bold text-gray-900 flex items-center gap-2">
+                            <Calendar size={14} className="text-[#5A5A40]" />
+                            <span>Anno {row.year}</span>
+                          </td>
+                          <td className="p-3.5 text-center font-bold text-gray-700">
+                            {row.ordersCount} doc
+                          </td>
+                          <td className="p-3.5 text-right font-mono font-black text-gray-900">
+                            € {row.revenue.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </td>
+                          <td className="p-3.5 text-center">
+                            <div className="flex items-center justify-center gap-2">
+                              <div className="w-20 bg-gray-100 h-2 rounded-full overflow-hidden">
+                                <div 
+                                  className="bg-[#5A5A40] h-full rounded-full transition-all duration-500"
+                                  style={{ width: `${row.percentage}%` }}
+                                />
+                              </div>
+                              <span className="font-mono text-xs font-bold text-gray-600">{row.percentage}%</span>
+                            </div>
+                          </td>
+                          <td className="p-3.5 text-right font-mono text-gray-600">
+                            € {row.avgTicket.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* Monthly Chart */}
+                <div className="h-56 w-full pt-2">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={[...monthlyBreakdown].reverse().slice(-12)} margin={{ top: 10, right: 10, left: 0, bottom: 20 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F3F4F6" />
+                      <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#6B7280' }} />
+                      <YAxis tick={{ fontSize: 10, fill: '#9CA3AF' }} tickFormatter={(v) => `€${v >= 1000 ? `${(v/1000).toFixed(0)}k` : v}`} />
+                      <Tooltip 
+                        formatter={(val: any) => [`€ ${Number(val).toLocaleString('it-IT', { minimumFractionDigits: 2 })}`, 'Fatturato Mese']}
+                        labelStyle={{ fontWeight: 'bold', color: '#111827' }}
+                        contentStyle={{ borderRadius: '1rem', border: '1px solid #E5E7EB' }}
+                      />
+                      <Bar dataKey="revenue" fill="#10B981" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Monthly Table */}
+                <div className="overflow-x-auto border border-gray-100 rounded-2xl">
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-gray-50 text-[10px] uppercase font-black tracking-wider text-gray-500 border-b border-gray-100">
+                      <tr>
+                        <th className="p-3.5">Mese di Riferimento</th>
+                        <th className="p-3.5 text-center">N. Ordini</th>
+                        <th className="p-3.5 text-right">Fatturato Mese</th>
+                        <th className="p-3.5 text-center">% Incidenza</th>
+                        <th className="p-3.5 text-right">Ticket Medio</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 text-xs">
+                      {paginatedMonthly.map((row) => (
+                        <tr key={row.key} className="hover:bg-gray-50/60 transition-colors">
+                          <td className="p-3.5 font-bold text-gray-900 flex items-center gap-2">
+                            <Clock size={14} className="text-emerald-700" />
+                            <span>{row.label}</span>
+                          </td>
+                          <td className="p-3.5 text-center font-bold text-gray-700">
+                            {row.ordersCount} doc
+                          </td>
+                          <td className="p-3.5 text-right font-mono font-black text-gray-900">
+                            € {row.revenue.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </td>
+                          <td className="p-3.5 text-center">
+                            <div className="flex items-center justify-center gap-2">
+                              <div className="w-16 bg-gray-100 h-2 rounded-full overflow-hidden">
+                                <div 
+                                  className="bg-emerald-600 h-full rounded-full transition-all duration-500"
+                                  style={{ width: `${row.percentage}%` }}
+                                />
+                              </div>
+                              <span className="font-mono text-xs font-bold text-gray-600">{row.percentage}%</span>
+                            </div>
+                          </td>
+                          <td className="p-3.5 text-right font-mono text-gray-600">
+                            € {row.avgTicket.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <SectionPagination
+                  currentPage={monthlyPage}
+                  totalItems={monthlyBreakdown.length}
+                  pageSize={10}
+                  onPageChange={setMonthlyPage}
+                  itemLabel="mesi"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* 3. STATISTICA PER CATEGORIA PRODOTTO */}
+          <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4">
+              <div>
+                <h3 className="text-lg font-serif font-bold text-gray-900 flex items-center gap-2">
+                  <Layers size={20} className="text-[#5A5A40]" />
+                  Ripartizione Fatturato per Categoria Prodotto
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Analisi delle linee merceologiche acquistate, quote di spesa e volumi cumulati.
+                </p>
+              </div>
+
+              {selectedCategory !== 'ALL' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategory('ALL')}
+                  className="text-xs font-bold text-rose-600 hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  Rimuovi filtro categoria ({selectedCategory})
+                </button>
+              )}
+            </div>
+
+            {/* Category Cards Grid */}
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {paginatedCategories.map((cat, idx) => {
+                  const color = CATEGORY_COLORS[cat.colorIndex % CATEGORY_COLORS.length];
+                  const isSelected = selectedCategory === cat.category;
+
+                  return (
+                    <div
+                      key={cat.category}
+                      onClick={() => setSelectedCategory(isSelected ? 'ALL' : cat.category)}
+                      className={cn(
+                        "p-5 rounded-2xl border transition-all cursor-pointer space-y-3 relative overflow-hidden group",
+                        isSelected 
+                          ? "bg-[#5A5A40]/10 border-[#5A5A40] shadow-sm ring-2 ring-[#5A5A40]/20" 
+                          : "bg-[#F9FAFB] hover:bg-white border-gray-200 hover:border-gray-300"
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span 
+                            className="w-3 h-3 rounded-full shrink-0" 
+                            style={{ backgroundColor: color }}
+                          />
+                          <h4 className="font-bold text-sm text-gray-900 line-clamp-1 group-hover:text-[#5A5A40] transition-colors">
+                            {cat.category}
+                          </h4>
+                        </div>
+                        <span className="text-xs font-mono font-black text-gray-800 bg-white px-2 py-0.5 rounded-lg border border-gray-200 shrink-0">
+                          {cat.percentage}%
+                        </span>
+                      </div>
+
+                      <div>
+                        <span className="text-xl font-serif font-black text-gray-900 block">
+                          € {cat.totalRevenue.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                        <span className="text-[11px] text-gray-500 block mt-0.5">
+                          {cat.totalQty} unità acquistate ({cat.itemsCount} voci storiche)
+                        </span>
+                      </div>
+
+                      {/* Progress Bar */}
+                      <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full rounded-full transition-all duration-500"
+                          style={{ width: `${cat.percentage}%`, backgroundColor: color }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <SectionPagination
+                currentPage={categoriesPage}
+                totalItems={categoryStats.length}
+                pageSize={10}
+                onPageChange={setCategoriesPage}
+                itemLabel="categorie"
+              />
+            </div>
+          </div>
+
+          {/* 4. PREVISIONE RIORDINO & CROSS-SELLING */}
           <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
               <div>
@@ -690,7 +1122,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                   Previsione Riordino & Suggerimenti Prossima Visita
                 </h3>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Algoritmo basato su ordini App per rilevare l'esaurimento scorte prima della visita.
+                  Rilevazione automatica dell'esaurimento scorte e ciclo di riordino per gli articoli più acquistati.
                 </p>
               </div>
               <span className="text-[10px] font-black bg-amber-50 text-amber-800 border border-amber-200 px-3 py-1 rounded-full uppercase tracking-wider self-start sm:self-center">
@@ -699,71 +1131,85 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
             </div>
 
             {reorderPredictions.length === 0 ? (
-              <div className="p-6 bg-amber-50/50 rounded-2xl border border-amber-200/60 text-center space-y-1">
-                <p className="text-xs font-bold text-amber-900">
-                  Nessuna previsione di riordino generata da ordini dell'App.
-                </p>
-                <p className="text-[11px] text-amber-700">
-                  I prodotti importati da file XLSX sono usati esclusivamente per identificare i prodotti più acquistati.
+              <div className="p-6 bg-gray-50 rounded-2xl border border-gray-200 text-center space-y-1">
+                <p className="text-xs font-bold text-gray-700">
+                  Nessun prodotto con storico sufficiente per la stima del riordino.
                 </p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                {reorderPredictions.map((pred, i) => (
-                  <div 
-                    key={i} 
-                    className={cn(
-                      "p-4 rounded-2xl border transition-all space-y-3 relative overflow-hidden",
-                      pred.alertLevel === 'URGENT' ? "bg-rose-50/40 border-rose-200" :
-                      pred.alertLevel === 'DUE' ? "bg-amber-50/40 border-amber-200" : "bg-[#F9FAFB] border-gray-200"
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="text-[9px] font-black font-mono text-gray-400 uppercase tracking-wider block">
-                        {pred.code}
-                      </span>
-                      <span className={cn(
-                        "text-[9px] font-black uppercase px-2 py-0.5 rounded-full border shrink-0",
-                        pred.alertLevel === 'URGENT' ? "bg-rose-100 text-rose-800 border-rose-200" :
-                        pred.alertLevel === 'DUE' ? "bg-amber-100 text-amber-800 border-amber-200" :
-                        pred.alertLevel === 'OK' ? "bg-emerald-100 text-emerald-800 border-emerald-200" :
-                        "bg-gray-100 text-gray-600 border-gray-200"
-                      )}>
-                        {pred.alertLevel === 'URGENT' && 'In Ritardo'}
-                        {pred.alertLevel === 'DUE' && 'Da Riordinare'}
-                        {pred.alertLevel === 'OK' && 'In Regola'}
-                        {pred.alertLevel === 'NO_DATE' && 'Senza Data'}
-                      </span>
-                    </div>
-
-                    <div>
-                      <h4 className="font-bold text-xs text-gray-900 line-clamp-2 leading-tight">
-                        {pred.description}
-                      </h4>
-                      <span className="text-[10px] text-gray-500 block mt-1">
-                        {pred.category} • {pred.totalQty} {pred.um} acquistati
-                      </span>
-                    </div>
-
-                    <div className="pt-2 border-t border-gray-200/60 text-[10px] space-y-1">
-                      <div className="flex justify-between text-gray-600">
-                        <span>Ultimo acquisto:</span>
-                        <strong className="font-mono">{pred.lastDate ? safeFormatDate(pred.lastDate) : 'Senza data'}</strong>
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {paginatedPredictions.map((pred, i) => (
+                    <div 
+                      key={i} 
+                      className={cn(
+                        "p-4 rounded-2xl border transition-all space-y-3 relative overflow-hidden",
+                        pred.alertLevel === 'URGENT' ? "bg-rose-50/40 border-rose-200" :
+                        pred.alertLevel === 'DUE' ? "bg-amber-50/40 border-amber-200" : "bg-[#F9FAFB] border-gray-200"
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[9px] font-black font-mono text-gray-400 uppercase tracking-wider block">
+                            {pred.code}
+                          </span>
+                          {!pred.inCatalog && (
+                            <span className="px-1.5 py-0.2 rounded text-[8px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                              Fuori Cat.
+                            </span>
+                          )}
+                        </div>
+                        <span className={cn(
+                          "text-[9px] font-black uppercase px-2 py-0.5 rounded-full border shrink-0",
+                          pred.alertLevel === 'URGENT' ? "bg-rose-100 text-rose-800 border-rose-200" :
+                          pred.alertLevel === 'DUE' ? "bg-amber-100 text-amber-800 border-amber-200" :
+                          pred.alertLevel === 'OK' ? "bg-emerald-100 text-emerald-800 border-emerald-200" :
+                          "bg-gray-100 text-gray-600 border-gray-200"
+                        )}>
+                          {pred.alertLevel === 'URGENT' && 'In Ritardo'}
+                          {pred.alertLevel === 'DUE' && 'Da Riordinare'}
+                          {pred.alertLevel === 'OK' && 'In Regola'}
+                          {pred.alertLevel === 'NO_DATE' && 'Senza Data'}
+                        </span>
                       </div>
-                      <div className="flex justify-between text-gray-600">
-                        <span>Previsione riordino:</span>
-                        <strong className="font-mono text-[#5A5A40]">
-                          {pred.nextEstimatedDate ? safeFormatDate(pred.nextEstimatedDate) : 'N/D'}
-                        </strong>
+
+                      <div>
+                        <h4 className="font-bold text-xs text-gray-900 line-clamp-2 leading-tight">
+                          {pred.description}
+                        </h4>
+                        <span className="text-[10px] text-gray-500 block mt-1">
+                          {pred.category} • {pred.totalQty} {pred.um} acquistati
+                        </span>
+                      </div>
+
+                      <div className="pt-2 border-t border-gray-200/60 text-[10px] space-y-1">
+                        <div className="flex justify-between text-gray-600">
+                          <span>Ultimo acquisto:</span>
+                          <strong className="font-mono">{pred.lastDate ? safeFormatDate(pred.lastDate) : 'Senza data'}</strong>
+                        </div>
+                        <div className="flex justify-between text-gray-600">
+                          <span>Previsione riordino:</span>
+                          <strong className="font-mono text-[#5A5A40]">
+                            {pred.nextEstimatedDate ? safeFormatDate(pred.nextEstimatedDate) : 'N/D'}
+                          </strong>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
+
+                <SectionPagination
+                  currentPage={predictionsPage}
+                  totalItems={reorderPredictions.length}
+                  pageSize={10}
+                  onPageChange={setPredictionsPage}
+                  itemLabel="previsioni"
+                />
               </div>
             )}
           </div>
 
-          {/* 3. GRIGLIA TOP PRODOTTI ACQUISTATI */}
+          {/* 5. GRIGLIA TOP PRODOTTI ACQUISTATI */}
           <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4">
               <div>
@@ -772,7 +1218,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                   Top Prodotti più Acquistati & Consumi
                 </h3>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Classifica articoli per volume di fatturato e quantità cumulata.
+                  Classifica articoli per volume di fatturato, quantità cumulata e corrispondenza di catalogo.
                 </p>
               </div>
 
@@ -791,9 +1237,9 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
 
                 {categories.length > 0 && (
                   <select
-                    value={selectedCategory}
+                    value={selectedCategory || 'ALL'}
                     onChange={(e) => setSelectedCategory(e.target.value)}
-                    className="py-1.5 px-3 bg-[#F9FAFB] border border-gray-200 rounded-xl text-xs font-bold text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]"
+                    className="py-1.5 px-3 bg-[#F9FAFB] border border-gray-200 rounded-xl text-xs font-bold text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#5A5A40] cursor-pointer"
                   >
                     <option value="ALL">Tutte le Categorie ({categories.length})</option>
                     {categories.map(cat => (
@@ -811,6 +1257,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                     <th className="p-3.5">Codice</th>
                     <th className="p-3.5">Descrizione Prodotto</th>
                     <th className="p-3.5">Categoria</th>
+                    <th className="p-3.5 text-center">Stato Catalogo</th>
                     <th className="p-3.5 text-center">Qtà Totale</th>
                     <th className="p-3.5 text-center">N. Ordini</th>
                     <th className="p-3.5 font-mono">Ultimo Acquisto</th>
@@ -818,7 +1265,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 text-xs">
-                  {topProducts.map((prod, idx) => (
+                  {paginatedProducts.map((prod, idx) => (
                     <tr key={idx} className="hover:bg-gray-50/60 transition-colors">
                       <td className="p-3.5 font-mono font-bold text-[#5A5A40]">{prod.code}</td>
                       <td className="p-3.5 font-bold text-gray-900">{prod.description}</td>
@@ -826,6 +1273,17 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                         <span className="text-[10px] bg-gray-100 text-gray-700 px-2 py-0.5 rounded font-medium border border-gray-200">
                           {prod.category}
                         </span>
+                      </td>
+                      <td className="p-3.5 text-center">
+                        {prod.inCatalog ? (
+                          <span className="text-[9px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full">
+                            A Catalogo
+                          </span>
+                        ) : (
+                          <span className="text-[9px] font-bold bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-full">
+                            Fuori Catalogo
+                          </span>
+                        )}
                       </td>
                       <td className="p-3.5 text-center font-mono font-bold text-gray-800">
                         {prod.totalQty} {prod.um}
@@ -844,9 +1302,17 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                 </tbody>
               </table>
             </div>
+
+            <SectionPagination
+              currentPage={productsPage}
+              totalItems={topProducts.length}
+              pageSize={10}
+              onPageChange={setProductsPage}
+              itemLabel="articoli"
+            />
           </div>
 
-          {/* 4. STORICO DOCUMENTI & DETTAGLIO RIGHE (ACCORDION) */}
+          {/* 6. STORICO DOCUMENTI & DETTAGLIO RIGHE (ACCORDION) */}
           <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm space-y-6">
             <div className="flex items-center justify-between border-b border-gray-100 pb-4">
               <div>
@@ -855,13 +1321,13 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                   Storico Documenti & Fatture Vendita ({documentsGrouped.length})
                 </h3>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Elenco completo dei documenti storici con dettaglio righe e articoli acquistati.
+                  Elenco cronologico completo dei documenti e ordini con dettaglio righe e articoli acquistati.
                 </p>
               </div>
             </div>
 
             <div className="space-y-3">
-              {documentsGrouped.map((doc, idx) => {
+              {paginatedDocuments.map((doc) => {
                 const docKey = `${doc.docNumber}_${doc.docDate}`;
                 const isExpanded = !!expandedDocs[docKey];
 
@@ -908,6 +1374,7 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                               <th className="pb-2">Codice</th>
                               <th className="pb-2">Descrizione Prodotto</th>
                               <th className="pb-2">Categoria</th>
+                              <th className="pb-2 text-center">Stato</th>
                               <th className="pb-2 text-center">Qtà</th>
                               <th className="pb-2 text-right">Prezzo Unit.</th>
                               <th className="pb-2 text-right">Totale Riga</th>
@@ -919,6 +1386,17 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                                 <td className="py-2.5 font-bold text-[#5A5A40]">{row.product_code || 'N/D'}</td>
                                 <td className="py-2.5 font-sans font-medium text-gray-800">{row.product_description}</td>
                                 <td className="py-2.5 font-sans text-gray-500">{row.category || '-'}</td>
+                                <td className="py-2.5 text-center font-sans">
+                                  {row.in_catalog === false ? (
+                                    <span className="text-[8px] font-bold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded">
+                                      Fuori Cat.
+                                    </span>
+                                  ) : (
+                                    <span className="text-[8px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100 px-1.5 py-0.5 rounded">
+                                      Catalogo
+                                    </span>
+                                  )}
+                                </td>
                                 <td className="py-2.5 text-center font-bold text-gray-800">{row.quantity} {row.unit_of_measure || 'pz'}</td>
                                 <td className="py-2.5 text-right text-gray-600">€ {Number(row.unit_price).toFixed(2)}</td>
                                 <td className="py-2.5 text-right font-bold text-gray-900">
@@ -934,6 +1412,14 @@ export default function ClientSalesHistory({ clientId, isAdmin, clientName }: Cl
                 );
               })}
             </div>
+
+            <SectionPagination
+              currentPage={documentsPage}
+              totalItems={documentsGrouped.length}
+              pageSize={10}
+              onPageChange={setDocumentsPage}
+              itemLabel="documenti"
+            />
           </div>
         </>
       )}

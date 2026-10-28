@@ -30,7 +30,12 @@ import {
   ExternalLink,
   HelpCircle,
   Rss,
-  CheckCheck
+  CheckCheck,
+  Download,
+  Share2,
+  Compass,
+  Smartphone,
+  Monitor
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
@@ -71,6 +76,7 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeInviteTab, setActiveInviteTab] = useState<'received' | 'sent'>('received');
+  const [visitTypeFilter, setVisitTypeFilter] = useState<'all' | 'single' | 'joint'>('all');
 
   // Modals State
   const [isNewVisitModalOpen, setIsNewVisitModalOpen] = useState(false);
@@ -105,6 +111,7 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
   const [copiedIcal, setCopiedIcal] = useState<boolean>(false);
   const [showIcalInstructions, setShowIcalInstructions] = useState<boolean>(false);
   const [isRegeneratingIcal, setIsRegeneratingIcal] = useState<boolean>(false);
+  const [activeIcalGuideTab, setActiveIcalGuideTab] = useState<'google' | 'apple' | 'outlook'>('google');
 
   const handleCopyIcalUrl = () => {
     if (!icalUrl) return;
@@ -138,6 +145,188 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
       setIsRegeneratingIcal(false);
     }
   };
+
+  // Helper to test if a visit is a co-visit / affiancamento
+  const isJointVisit = (v: JointVisit): boolean => {
+    if (!v) return false;
+    const currentId = currentUser?.id ? Number(currentUser.id) : null;
+    if (v.is_joint) return true;
+    if (v.guest_agent_id && currentId && Number(v.guest_agent_id) === currentId) return true;
+    if (v.host_agent_id && currentId && Number(v.host_agent_id) !== currentId) return true;
+    if (v.agent_id && currentId && Number(v.agent_id) !== currentId) return true;
+    return false;
+  };
+
+  // Helpers for 1-Click External Calendar Sync
+  const formatIsoDateTime = (dateStr: string, timeSlotStr: string, durationMinutes = 60) => {
+    const cleanDate = dateStr.replace(/-/g, '');
+    let hours = 9;
+    let mins = 0;
+    if (timeSlotStr && timeSlotStr.includes(':')) {
+      const parts = timeSlotStr.split(':');
+      hours = parseInt(parts[0], 10) || 9;
+      mins = parseInt(parts[1], 10) || 0;
+    }
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const start = `${cleanDate}T${pad(hours)}${pad(mins)}00`;
+    const endMinsTotal = hours * 60 + mins + durationMinutes;
+    const endH = Math.floor(endMinsTotal / 60) % 24;
+    const endM = endMinsTotal % 60;
+    const end = `${cleanDate}T${pad(endH)}${pad(endM)}00`;
+    return { start, end, cleanDate, hours, mins };
+  };
+
+  const generateGoogleCalendarUrl = (visit: JointVisit) => {
+    const { start, end } = formatIsoDateTime(visit.visit_date, visit.time_slot || '09:00', 60);
+    const joint = isJointVisit(visit);
+    const title = `${joint ? '👥 [Co-Visita]' : '📍 [Visita]'} ${visit.client_name}`;
+    const fullLoc = [visit.client_address, visit.client_city].filter(Boolean).join(', ');
+    const details = [
+      `Cliente: ${visit.client_name}`,
+      fullLoc ? `Indirizzo: ${fullLoc}` : '',
+      visit.client_contact ? `Referente: ${visit.client_contact}` : '',
+      visit.client_phone ? `Telefono: ${visit.client_phone}` : '',
+      visit.client_email ? `Email: ${visit.client_email}` : '',
+      visit.notes ? `Note Visita: ${visit.notes}` : '',
+      joint ? 'Tipo: Affiancamento con collega' : 'Tipo: Visita Singola'
+    ].filter(Boolean).join('\n');
+
+    const params = new URLSearchParams({
+      action: 'TEMPLATE',
+      text: title,
+      dates: `${start}/${end}`,
+      details: details,
+      location: fullLoc || visit.client_name,
+      ctz: 'Europe/Rome'
+    });
+    return `https://calendar.google.com/calendar/render?${params.toString()}`;
+  };
+
+  const generateOutlookCalendarUrl = (visit: JointVisit) => {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    let hours = 9;
+    let mins = 0;
+    if (visit.time_slot && visit.time_slot.includes(':')) {
+      const parts = visit.time_slot.split(':');
+      hours = parseInt(parts[0], 10) || 9;
+      mins = parseInt(parts[1], 10) || 0;
+    }
+    const startdt = `${visit.visit_date}T${pad(hours)}:${pad(mins)}:00`;
+    const endTotal = hours * 60 + mins + 60;
+    const endH = Math.floor(endTotal / 60) % 24;
+    const endM = endTotal % 60;
+    const enddt = `${visit.visit_date}T${pad(endH)}:${pad(endM)}:00`;
+
+    const joint = isJointVisit(visit);
+    const title = `${joint ? '👥 [Co-Visita]' : '📍 [Visita]'} ${visit.client_name}`;
+    const fullLoc = [visit.client_address, visit.client_city].filter(Boolean).join(', ');
+    const body = [
+      `Cliente: ${visit.client_name}`,
+      fullLoc ? `Indirizzo: ${fullLoc}` : '',
+      visit.client_contact ? `Referente: ${visit.client_contact}` : '',
+      visit.client_phone ? `Telefono: ${visit.client_phone}` : '',
+      visit.notes ? `Note: ${visit.notes}` : '',
+      joint ? 'Affiancamento con collega' : 'Visita Singola'
+    ].filter(Boolean).join('\n');
+
+    const params = new URLSearchParams({
+      path: '/calendar/action/compose',
+      rru: 'addevent',
+      subject: title,
+      startdt: startdt,
+      enddt: enddt,
+      location: fullLoc || visit.client_name,
+      body: body
+    });
+    return `https://outlook.live.com/calendar/0/deeplink/compose?${params.toString()}`;
+  };
+
+  const downloadSingleVisitIcs = (visit: JointVisit) => {
+    const { start, end } = formatIsoDateTime(visit.visit_date, visit.time_slot || '09:00', 60);
+    const joint = isJointVisit(visit);
+    const title = `${joint ? '👥 [Co-Visita]' : '📍 [Visita]'} ${visit.client_name}`;
+    const fullLoc = [visit.client_address, visit.client_city].filter(Boolean).join(', ');
+    const nowIso = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+    const desc = [
+      `Cliente: ${visit.client_name}`,
+      fullLoc ? `Indirizzo: ${fullLoc}` : '',
+      visit.client_contact ? `Referente: ${visit.client_contact}` : '',
+      visit.client_phone ? `Telefono: ${visit.client_phone}` : '',
+      visit.notes ? `Note: ${visit.notes}` : '',
+      joint ? 'Affiancamento con collega' : 'Visita Singola'
+    ].filter(Boolean).join('\\n');
+
+    const icsLines = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Easyfatt App//Girovisite Single Event//IT',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      'BEGIN:VEVENT',
+      `UID:girovisite-single-${visit.id}-${Date.now()}@easyfatt`,
+      `DTSTAMP:${nowIso}`,
+      `DTSTART;TZID=Europe/Rome:${start}`,
+      `DTEND;TZID=Europe/Rome:${end}`,
+      `SUMMARY:${title.replace(/,/g, '\\,')}`,
+      fullLoc ? `LOCATION:${fullLoc.replace(/,/g, '\\,')}` : '',
+      `DESCRIPTION:${desc.replace(/,/g, '\\,')}`,
+      'STATUS:CONFIRMED',
+      'BEGIN:VALARM',
+      'ACTION:DISPLAY',
+      'DESCRIPTION:Promemoria Visita Girovisite',
+      'TRIGGER:-PT15M',
+      'END:VALARM',
+      'END:VEVENT',
+      'END:VCALENDAR'
+    ].filter(Boolean).join('\r\n');
+
+    const blob = new Blob([icsLines], { type: 'text/calendar;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = (visit.client_name || 'visita').toLowerCase().replace(/[^a-z0-9]/g, '_');
+    a.download = `visita_${safeName}_${visit.visit_date}.ics`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+    showToast('File .ics scaricato! Cliccalo per aggiungerlo al tuo calendario.');
+  };
+
+  const downloadFullIcsFeed = async () => {
+    if (!icalUrl) {
+      showToast('Nessun link iCal disponibile.', true);
+      return;
+    }
+    try {
+      const res = await fetch(icalUrl);
+      if (!res.ok) throw new Error('Errore durante il download del feed');
+      const text = await res.text();
+      const blob = new Blob([text], { type: 'text/calendar;charset=utf-8' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `girovisite_agenda_completa.ics`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      showToast('Feed completo scaricato con successo!');
+    } catch (err: any) {
+      console.error('Download iCal error:', err);
+      showToast('Errore durante il download del feed iCal.', true);
+    }
+  };
+
+  // Helper URLs for GPS Navigators
+  const getGoogleMapsUrl = (v: JointVisit) =>
+    `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([v.client_address, v.client_city].filter(Boolean).join(', ') || v.client_name)}`;
+
+  const getWazeUrl = (v: JointVisit) =>
+    `https://waze.com/ul?q=${encodeURIComponent([v.client_address, v.client_city].filter(Boolean).join(', ') || v.client_name)}&navigate=yes`;
+
+  const getAppleMapsUrl = (v: JointVisit) =>
+    `https://maps.apple.com/?q=${encodeURIComponent([v.client_address, v.client_city].filter(Boolean).join(', ') || v.client_name)}`;
 
   const handlePrevMonth = () => {
     if (currentCalMonth === 0) {
@@ -371,7 +560,7 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
     }
   };
 
-  // Filtered Visits
+  // Filtered Visits considering search, date, and visitTypeFilter
   const filteredVisits = visits.filter(v => {
     const matchesQuery = 
       !searchQuery || 
@@ -380,8 +569,18 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
     
     const matchesDate = !selectedDate || v.visit_date === selectedDate;
 
-    return matchesQuery && matchesDate;
+    const joint = isJointVisit(v);
+    const matchesType = 
+      visitTypeFilter === 'all' ? true :
+      visitTypeFilter === 'joint' ? joint :
+      !joint;
+
+    return matchesQuery && matchesDate && matchesType;
   }).sort((a, b) => a.visit_date.localeCompare(b.visit_date));
+
+  const totalVisitsCount = visits.length;
+  const jointVisitsCount = visits.filter(v => isJointVisit(v)).length;
+  const singleVisitsCount = totalVisitsCount - jointVisitsCount;
 
   // Monthly Calendar Grid Calculation
   const calendarDays = React.useMemo(() => {
@@ -496,7 +695,16 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
             </p>
           </div>
 
-          <div className="flex items-center gap-2 self-start md:self-auto">
+          <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+            <button
+              type="button"
+              onClick={() => setShowIcalInstructions(true)}
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200/80 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all shadow-xs hover:shadow-sm active:scale-95 flex items-center gap-1.5"
+              title="Sincronizza con Google Calendar, Apple Calendar o Outlook via Feed iCal"
+            >
+              <Rss size={15} className="text-indigo-600 animate-pulse" />
+              <span>Sincronizza Calendario</span>
+            </button>
             <button
               onClick={fetchData}
               disabled={loading}
@@ -567,6 +775,69 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
                     {filteredVisits.length} {filteredVisits.length === 1 ? 'visita' : 'visite'}
                   </span>
                 </div>
+              </div>
+
+              {/* Type Filter Pills (Tutte / Singole / Affiancamenti) */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVisitTypeFilter('all')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95",
+                    visitTypeFilter === 'all'
+                      ? "bg-[#5A5A40] text-white shadow-xs"
+                      : "bg-white hover:bg-gray-100 text-gray-700 border border-gray-200"
+                  )}
+                >
+                  <Calendar size={13} />
+                  <span>Tutte</span>
+                  <span className={cn(
+                    "text-[10px] px-1.5 py-0.2 rounded-full font-mono",
+                    visitTypeFilter === 'all' ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
+                  )}>
+                    {totalVisitsCount}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVisitTypeFilter('single')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95",
+                    visitTypeFilter === 'single'
+                      ? "bg-[#5A5A40] text-white shadow-xs"
+                      : "bg-white hover:bg-gray-100 text-gray-700 border border-gray-200"
+                  )}
+                >
+                  <MapPin size={13} />
+                  <span>Visite Singole</span>
+                  <span className={cn(
+                    "text-[10px] px-1.5 py-0.2 rounded-full font-mono",
+                    visitTypeFilter === 'single' ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
+                  )}>
+                    {singleVisitsCount}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVisitTypeFilter('joint')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95",
+                    visitTypeFilter === 'joint'
+                      ? "bg-indigo-600 text-white shadow-xs"
+                      : "bg-white hover:bg-gray-100 text-indigo-700 border border-indigo-200"
+                  )}
+                >
+                  <Users size={13} />
+                  <span>Affiancamenti</span>
+                  <span className={cn(
+                    "text-[10px] px-1.5 py-0.2 rounded-full font-mono",
+                    visitTypeFilter === 'joint' ? "bg-white/20 text-white" : "bg-indigo-100 text-indigo-800"
+                  )}>
+                    {jointVisitsCount}
+                  </span>
+                </button>
               </div>
 
               {/* Filters Toolbar */}
@@ -871,16 +1142,75 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
                                     {visit.client_address ? `${visit.client_address}${visit.client_city ? `, ${visit.client_city}` : ''}` : (visit.client_city || 'Indirizzo non specificato')}
                                   </span>
                                 </div>
+                                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                  <a
+                                    href={getGoogleMapsUrl(visit)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-sans text-[11px] font-bold px-2 py-1 rounded-lg transition-all shadow-xs active:scale-95"
+                                    title="Google Maps"
+                                  >
+                                    <Navigation size={11} />
+                                    <span>Google</span>
+                                  </a>
+                                  <a
+                                    href={getWazeUrl(visit)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 bg-cyan-600 hover:bg-cyan-700 text-white font-sans text-[11px] font-bold px-2 py-1 rounded-lg transition-all shadow-xs active:scale-95"
+                                    title="Naviga con Waze"
+                                  >
+                                    <span>Waze</span>
+                                  </a>
+                                  <a
+                                    href={getAppleMapsUrl(visit)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 bg-gray-700 hover:bg-gray-800 text-white font-sans text-[11px] font-bold px-2 py-1 rounded-lg transition-all shadow-xs active:scale-95"
+                                    title="Apple Maps"
+                                  >
+                                    <span>Apple</span>
+                                  </a>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* 1-Click Calendar Actions Bar */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-100 bg-white/70 p-2 rounded-xl text-xs">
+                              <span className="text-[10px] font-black uppercase text-gray-400 flex items-center gap-1">
+                                <Calendar size={11} className="text-[#5A5A40]" />
+                                Aggiungi a Calendario Esterno:
+                              </span>
+                              <div className="flex items-center gap-1.5 flex-wrap">
                                 <a
-                                  href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([visit.client_address, visit.client_city].filter(Boolean).join(', ') || visit.client_name)}`}
+                                  href={generateGoogleCalendarUrl(visit)}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-sans text-[11px] font-bold px-2.5 py-1 rounded-lg transition-all shadow-xs active:scale-95 shrink-0"
-                                  title="Apri le indicazioni stradali su Google Maps"
+                                  className="inline-flex items-center gap-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[10px] font-bold px-2 py-1 rounded-lg transition-all active:scale-95"
+                                  title="Aggiungi questo evento a Google Calendar"
                                 >
-                                  <Navigation size={12} />
-                                  <span>Google Maps</span>
+                                  <ExternalLink size={10} />
+                                  <span>Google Cal</span>
                                 </a>
+                                <a
+                                  href={generateOutlookCalendarUrl(visit)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 text-[10px] font-bold px-2 py-1 rounded-lg transition-all active:scale-95"
+                                  title="Aggiungi a Outlook Web / Office 365"
+                                >
+                                  <ExternalLink size={10} />
+                                  <span>Outlook</span>
+                                </a>
+                                <button
+                                  type="button"
+                                  onClick={() => downloadSingleVisitIcs(visit)}
+                                  className="inline-flex items-center gap-1 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-250 text-[10px] font-bold px-2 py-1 rounded-lg transition-all active:scale-95"
+                                  title="Scarica file evento .ics per iPhone, Mac o Outlook"
+                                >
+                                  <Download size={10} />
+                                  <span>Scarica .ICS</span>
+                                </button>
                               </div>
                             </div>
 
@@ -1519,16 +1849,36 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
                         {readonlyVisit.client_address ? `${readonlyVisit.client_address}${readonlyVisit.client_city ? `, ${readonlyVisit.client_city}` : ''}` : (readonlyVisit.client_city || 'Indirizzo non specificato')}
                       </span>
                     </div>
-                    <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([readonlyVisit.client_address, readonlyVisit.client_city].filter(Boolean).join(', ') || readonlyVisit.client_name)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-sans text-[11px] font-bold px-2.5 py-1 rounded-lg transition-all shadow-xs shrink-0"
-                      title="Apri le indicazioni stradali su Google Maps"
-                    >
-                      <Navigation size={12} />
-                      <span>Google Maps</span>
-                    </a>
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <a
+                        href={getGoogleMapsUrl(readonlyVisit)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-sans text-[10px] font-bold px-2 py-1 rounded-lg transition-all shadow-xs"
+                        title="Apri le indicazioni stradali su Google Maps"
+                      >
+                        <Navigation size={11} />
+                        <span>Google</span>
+                      </a>
+                      <a
+                        href={getWazeUrl(readonlyVisit)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 bg-cyan-600 hover:bg-cyan-700 text-white font-sans text-[10px] font-bold px-2 py-1 rounded-lg transition-all shadow-xs"
+                        title="Apri su Waze"
+                      >
+                        <span>Waze</span>
+                      </a>
+                      <a
+                        href={getAppleMapsUrl(readonlyVisit)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 bg-gray-700 hover:bg-gray-800 text-white font-sans text-[10px] font-bold px-2 py-1 rounded-lg transition-all shadow-xs"
+                        title="Apri su Apple Maps"
+                      >
+                        <span>Apple</span>
+                      </a>
+                    </div>
                   </div>
                 </div>
 
@@ -1574,6 +1924,48 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
                     <p className="whitespace-pre-wrap">{readonlyVisit.notes}</p>
                   </div>
                 )}
+
+                {/* 1-Click External Calendar Sync Box */}
+                <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-black uppercase text-gray-500 flex items-center gap-1">
+                      <Calendar size={12} className="text-[#5A5A40]" />
+                      Aggiungi a Calendario Esterno
+                    </span>
+                    <span className="text-[10px] text-gray-400 font-mono">1-Click</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <a
+                      href={generateGoogleCalendarUrl(readonlyVisit)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[10px] font-bold py-1.5 px-2 rounded-lg transition-all text-center active:scale-95"
+                      title="Aggiungi a Google Calendar"
+                    >
+                      <ExternalLink size={10} />
+                      <span>Google Cal</span>
+                    </a>
+                    <a
+                      href={generateOutlookCalendarUrl(readonlyVisit)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-1 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 text-[10px] font-bold py-1.5 px-2 rounded-lg transition-all text-center active:scale-95"
+                      title="Aggiungi a Outlook Web"
+                    >
+                      <ExternalLink size={10} />
+                      <span>Outlook</span>
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => downloadSingleVisitIcs(readonlyVisit)}
+                      className="inline-flex items-center justify-center gap-1 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-250 text-[10px] font-bold py-1.5 px-2 rounded-lg transition-all text-center active:scale-95"
+                      title="Scarica file evento .ics"
+                    >
+                      <Download size={10} />
+                      <span>File .ICS</span>
+                    </button>
+                  </div>
+                </div>
               </div>
 
               <div className="pt-2 flex justify-between items-center border-t border-gray-100">
@@ -1701,6 +2093,250 @@ export default function GirovisiteSection({ currentUser, onSelectClient }: Girov
                   className="bg-[#5A5A40] hover:bg-[#4A4A30] text-white font-bold text-xs px-4 py-2 rounded-xl uppercase"
                 >
                   Chiudi
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL 5: SINCRONIZZAZIONE CALENDARIO ESTERNO (iCal / Webcal / Google / Apple / Outlook) */}
+      <AnimatePresence>
+        {showIcalInstructions && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowIcalInstructions(false)}
+              className="absolute inset-0 bg-[#111827]/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-[2rem] border border-[#E5E7EB] shadow-2xl p-6 sm:p-8 space-y-6 max-h-[90vh] overflow-y-auto"
+            >
+              {/* Modal Header */}
+              <div className="flex items-start justify-between pb-4 border-b border-gray-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-200/60 text-indigo-700 flex items-center justify-center shadow-xs">
+                    <Rss size={20} className="animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg sm:text-xl font-serif font-black uppercase text-gray-900 tracking-tight flex items-center gap-2">
+                      Sincronizza Calendario Esterno
+                    </h3>
+                    <p className="text-xs text-gray-500">
+                      Iscriviti al feed live su Google Calendar, Apple Calendar (iPhone/Mac) o Outlook
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowIcalInstructions(false)}
+                  className="p-1.5 text-gray-400 hover:text-gray-600 rounded-xl transition-colors hover:bg-gray-100"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Feed URL Box */}
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-black uppercase text-gray-700 flex items-center gap-1.5 tracking-wider">
+                    <Calendar size={14} className="text-[#5A5A40]" />
+                    Il tuo Link Feed iCalendar Privato (RFC 5545)
+                  </label>
+                  <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Feed Attivo
+                  </span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <div className="relative flex-1 min-w-0">
+                    <input
+                      type="text"
+                      readOnly
+                      value={icalUrl || 'Caricamento feed iCal in corso...'}
+                      className="w-full bg-white border border-gray-300 rounded-xl py-2 px-3 text-xs font-mono text-gray-800 select-all focus:outline-none focus:border-[#5A5A40] shadow-2xs truncate"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleCopyIcalUrl}
+                    disabled={!icalUrl}
+                    className={cn(
+                      "px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 shadow-xs active:scale-95",
+                      copiedIcal
+                        ? "bg-emerald-600 text-white"
+                        : "bg-[#5A5A40] hover:bg-[#4A4A30] text-white"
+                    )}
+                  >
+                    {copiedIcal ? <CheckCheck size={14} /> : <Copy size={14} />}
+                    <span>{copiedIcal ? 'Copiato!' : 'Copia Link'}</span>
+                  </button>
+                </div>
+
+                {/* Quick actions for Webcal & Download */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-200/80">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {webcalUrl && (
+                      <a
+                        href={webcalUrl}
+                        className="inline-flex items-center gap-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 text-xs font-bold px-3 py-1.5 rounded-xl transition-all active:scale-95"
+                        title="Iscriviti direttamente tramite protocollo Webcal (supportato da Apple Calendar, iPhone, Mac e Outlook)"
+                      >
+                        <ExternalLink size={13} />
+                        <span>Iscriviti Subito (Apple / Webcal)</span>
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={downloadFullIcsFeed}
+                      disabled={!icalUrl}
+                      className="inline-flex items-center gap-1.5 bg-white hover:bg-gray-100 text-gray-700 border border-gray-250 text-xs font-bold px-3 py-1.5 rounded-xl transition-all active:scale-95 shadow-2xs"
+                      title="Scarica il file completo .ics per importarlo offline"
+                    >
+                      <Download size={13} />
+                      <span>Scarica File .ICS Completo</span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleRegenerateIcalUrl}
+                    disabled={isRegeneratingIcal}
+                    className="text-[11px] text-gray-500 hover:text-rose-600 underline transition-colors ml-auto flex items-center gap-1"
+                  >
+                    <RefreshCw size={11} className={isRegeneratingIcal ? 'animate-spin' : ''} />
+                    <span>Rigenera link di sicurezza</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Step-by-Step Platform Guides */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black uppercase text-gray-900 tracking-wider">
+                    Istruzioni di Configurazione Rapida
+                  </h4>
+                  <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setActiveIcalGuideTab('google')}
+                      className={cn(
+                        "px-2.5 py-1 rounded-lg text-xs font-bold transition-all",
+                        activeIcalGuideTab === 'google' ? "bg-white text-gray-900 shadow-xs" : "text-gray-500 hover:text-gray-800"
+                      )}
+                    >
+                      Google Calendar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveIcalGuideTab('apple')}
+                      className={cn(
+                        "px-2.5 py-1 rounded-lg text-xs font-bold transition-all",
+                        activeIcalGuideTab === 'apple' ? "bg-white text-gray-900 shadow-xs" : "text-gray-500 hover:text-gray-800"
+                      )}
+                    >
+                      Apple (iPhone/Mac)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveIcalGuideTab('outlook')}
+                      className={cn(
+                        "px-2.5 py-1 rounded-lg text-xs font-bold transition-all",
+                        activeIcalGuideTab === 'outlook' ? "bg-white text-gray-900 shadow-xs" : "text-gray-500 hover:text-gray-800"
+                      )}
+                    >
+                      Outlook
+                    </button>
+                  </div>
+                </div>
+
+                {/* Google Calendar Tab Guide */}
+                {activeIcalGuideTab === 'google' && (
+                  <div className="bg-blue-50/50 border border-blue-200/80 rounded-2xl p-4 text-xs text-blue-950 space-y-2.5">
+                    <div className="font-bold text-blue-900 flex items-center gap-1.5 text-sm">
+                      <Monitor size={15} />
+                      <span>Come aggiungere a Google Calendar (PC, Android e iPhone):</span>
+                    </div>
+                    <ol className="list-decimal list-inside space-y-1.5 pl-1 leading-relaxed font-medium">
+                      <li>Apri <strong>Google Calendar</strong> da computer o browser (calendar.google.com).</li>
+                      <li>Nella barra laterale a sinistra, trova la sezione <strong>"Altri calendari"</strong> e clicca sul pulsante <strong>"+"</strong>.</li>
+                      <li>Scegli l'opzione <strong>"Da URL"</strong>.</li>
+                      <li>Incolla il link iCal copiato sopra e clicca su <strong>"Aggiungi calendario"</strong>.</li>
+                    </ol>
+                    <div className="bg-white/80 p-2.5 rounded-xl border border-blue-200 text-[11px] text-blue-900">
+                      💡 <strong>Sincronizzazione Smartphone:</strong> una volta aggiunto da browser, il calendario apparirà automaticamente anche nell'applicazione <strong>Google Calendar</strong> sul tuo telefono Android o iOS!
+                    </div>
+                  </div>
+                )}
+
+                {/* Apple Calendar Tab Guide */}
+                {activeIcalGuideTab === 'apple' && (
+                  <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 text-xs text-gray-900 space-y-2.5">
+                    <div className="font-bold text-gray-900 flex items-center gap-1.5 text-sm">
+                      <Smartphone size={15} />
+                      <span>Come aggiungere ad Apple Calendar (iPhone, iPad e Mac):</span>
+                    </div>
+                    <div className="space-y-2 font-medium">
+                      <p>
+                        📱 <strong>Su iPhone / iPad:</strong>
+                      </p>
+                      <ul className="list-disc list-inside pl-2 space-y-1 text-gray-700">
+                        <li>Fai tap sul pulsante <em>"Iscriviti Subito (Apple / Webcal)"</em> in alto da Safari.</li>
+                        <li>Oppure vai in <em>Impostazioni &gt; Calendario &gt; Account &gt; Aggiungi account &gt; Altro &gt; Aggiungi calendario con sottoscrizione</em>, incolla l'URL e salva.</li>
+                      </ul>
+                      <p className="pt-1">
+                        💻 <strong>Su Mac:</strong>
+                      </p>
+                      <ul className="list-disc list-inside pl-2 space-y-1 text-gray-700">
+                        <li>Apri l'app <strong>Calendario</strong>, clicca su <strong>File</strong> nel menu in alto &gt; <strong>Nuova sottoscrizione calendario...</strong></li>
+                        <li>Incolla l'URL del feed e conferma. Seleziona l'aggiornamento automatico (es. ogni 15 minuti).</li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                {/* Outlook Tab Guide */}
+                {activeIcalGuideTab === 'outlook' && (
+                  <div className="bg-sky-50/50 border border-sky-200/80 rounded-2xl p-4 text-xs text-sky-950 space-y-2.5">
+                    <div className="font-bold text-sky-900 flex items-center gap-1.5 text-sm">
+                      <Monitor size={15} />
+                      <span>Come aggiungere a Microsoft Outlook (Web o Desktop):</span>
+                    </div>
+                    <ol className="list-decimal list-inside space-y-1.5 pl-1 leading-relaxed font-medium">
+                      <li>Accedi a <strong>Outlook Web</strong> (outlook.live.com oppure portal.office.com) e vai nella visualizzazione Calendario.</li>
+                      <li>Nel pannello laterale sinistro, clicca su <strong>"Aggiungi calendario"</strong>.</li>
+                      <li>Seleziona <strong>"Sottoscrivi da Web"</strong>.</li>
+                      <li>Incolla il link del feed copiato sopra, imposta il nome (es. <em>"Girovisite Aziendale"</em>) e premi <strong>"Importa"</strong>.</li>
+                    </ol>
+                  </div>
+                )}
+              </div>
+
+              {/* Security notice & Footer */}
+              <div className="bg-amber-50/70 border border-amber-200/80 p-3 rounded-xl flex items-start gap-2.5 text-xs text-amber-900">
+                <Lock size={15} className="text-amber-700 shrink-0 mt-0.5" />
+                <div className="space-y-0.5 leading-relaxed">
+                  <strong className="block text-[11px] font-black uppercase text-amber-950">Sicurezza e Privacy del Feed:</strong>
+                  <p className="text-[11px] text-amber-800">
+                    Il feed include esclusivamente i tuoi appuntamenti e gli affiancamenti confermati. Ogni evento è configurato con promemoria 15 minuti prima e fuso orario italiano. Non condividere questo link con persone esterne.
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-end border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setShowIcalInstructions(false)}
+                  className="bg-[#5A5A40] hover:bg-[#4A4A30] text-white font-bold text-xs px-5 py-2.5 rounded-xl uppercase transition-all shadow-xs active:scale-95"
+                >
+                  Ho Capito / Chiudi
                 </button>
               </div>
             </motion.div>

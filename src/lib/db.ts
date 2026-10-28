@@ -1115,6 +1115,7 @@ export async function initDatabase(): Promise<void> {
       price REAL NOT NULL DEFAULT 0.0,
       vat_code TEXT DEFAULT '22',
       um TEXT DEFAULT 'pz',
+      stock BOOLEAN DEFAULT true,
       FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
     );
 
@@ -1371,9 +1372,9 @@ export async function initDatabase(): Promise<void> {
     console.error('[PostgreSQL Engine ERROR] orders shipping columns alter error:', e);
   }
   try { 
-    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS discounts TEXT, ADD COLUMN IF NOT EXISTS discount NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS discount_perc NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS total NUMERIC(12,4) DEFAULT 0.0`); 
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS discounts TEXT, ADD COLUMN IF NOT EXISTS discount NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS discount_perc NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS total NUMERIC(12,4) DEFAULT 0.0, ADD COLUMN IF NOT EXISTS stock BOOLEAN DEFAULT true`); 
   } catch (e) {
-    console.error('[PostgreSQL Engine ERROR] order_items discounts alter error:', e);
+    console.error('[PostgreSQL Engine ERROR] order_items discounts/stock alter error:', e);
   }
 
   try {
@@ -1890,7 +1891,29 @@ export async function createOrderInPostgres(orderData: {
       total += lineTotal;
     }
 
-    // 2. Insert order in PostgreSQL
+    // 2. Resolve Payment Method & Bank Coordinates with client fallback
+    let finalPaymentBank = payment_bank ? String(payment_bank).trim() : '';
+    let finalPaymentName = payment_name ? String(payment_name).trim() : '';
+
+    if (!finalPaymentBank || !finalPaymentName || finalPaymentName === 'Bonifico bancario') {
+      try {
+        const clientRes = await pgClient.query('SELECT payment_name, payment_bank, notes FROM clients WHERE id = $1', [client_id]);
+        if (clientRes.rows.length > 0) {
+          const cRow = clientRes.rows[0];
+          if (!finalPaymentBank && cRow.payment_bank && String(cRow.payment_bank).trim()) {
+            finalPaymentBank = String(cRow.payment_bank).trim();
+          }
+          if ((!finalPaymentName || finalPaymentName === 'Bonifico bancario') && cRow.payment_name && String(cRow.payment_name).trim()) {
+            finalPaymentName = String(cRow.payment_name).trim();
+          }
+        }
+      } catch (cErr) {
+        // Non-blocking fallback
+      }
+    }
+    if (!finalPaymentName) finalPaymentName = 'Bonifico bancario';
+
+    // 2b. Insert order in PostgreSQL
     const initialNumber = orderData.number
       ? (String(orderData.number).endsWith('/conn') ? String(orderData.number).trim() : `${String(orderData.number).trim()}/conn`)
       : null;
@@ -1903,8 +1926,8 @@ export async function createOrderInPostgres(orderData: {
         agent_id,
         date || new Date().toISOString().split('T')[0],
         initialNumber,
-        payment_name || 'Bonifico bancario',
-        payment_bank || '',
+        finalPaymentName,
+        finalPaymentBank,
         notes || '',
         total,
         status || 'Nuovo'
@@ -1941,10 +1964,13 @@ export async function createOrderInPostgres(orderData: {
       const lineTotal = item.total !== undefined && item.total !== null && Number(item.total) !== 0
         ? Number(item.total)
         : (discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price));
+      const isStockCommitted = (item as any).stock !== undefined && (item as any).stock !== null
+        ? ((item as any).stock === true || (item as any).stock === 'true' || (item as any).stock === 1)
+        : true;
 
       await pgClient.query(
-        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um, discounts, discount, discount_perc, total)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um, discounts, discount, discount_perc, total, stock)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
         [
           orderId,
           item.product_code,
@@ -1956,7 +1982,8 @@ export async function createOrderInPostgres(orderData: {
           discountsStr || null,
           discPerc || 0,
           discPerc || 0,
-          lineTotal
+          lineTotal,
+          isStockCommitted
         ]
       );
 
@@ -2039,16 +2066,38 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
       total += lineTotal;
     }
 
-    // 1. Update order in PostgreSQL
+    // 1. Resolve payment bank fallback if empty
+    let finalPaymentBank = payment_bank ? String(payment_bank).trim() : '';
+    let finalPaymentName = payment_name ? String(payment_name).trim() : '';
+
+    if (!finalPaymentBank || !finalPaymentName || finalPaymentName === 'Bonifico bancario') {
+      try {
+        const clientRes = await pgClient.query('SELECT payment_name, payment_bank FROM clients WHERE id = $1', [client_id]);
+        if (clientRes.rows.length > 0) {
+          const cRow = clientRes.rows[0];
+          if (!finalPaymentBank && cRow.payment_bank && String(cRow.payment_bank).trim()) {
+            finalPaymentBank = String(cRow.payment_bank).trim();
+          }
+          if ((!finalPaymentName || finalPaymentName === 'Bonifico bancario') && cRow.payment_name && String(cRow.payment_name).trim()) {
+            finalPaymentName = String(cRow.payment_name).trim();
+          }
+        }
+      } catch (cErr) {
+        // Non-blocking fallback
+      }
+    }
+    if (!finalPaymentName) finalPaymentName = 'Bonifico bancario';
+
+    // 1b. Update order in PostgreSQL
     if (number !== undefined && String(number).trim() !== '') {
       await pgClient.query(
         `UPDATE orders SET client_id = $1, date = $2, payment_name = $3, payment_bank = $4, notes = $5, total = $6, status = $7, number = $8 WHERE id = $9`,
-        [client_id, date, payment_name || 'Bonifico bancario', payment_bank || '', notes || '', total, status || 'Nuovo', String(number).trim(), orderId]
+        [client_id, date, finalPaymentName, finalPaymentBank, notes || '', total, status || 'Nuovo', String(number).trim(), orderId]
       );
     } else {
       await pgClient.query(
         `UPDATE orders SET client_id = $1, date = $2, payment_name = $3, payment_bank = $4, notes = $5, total = $6, status = $7 WHERE id = $8`,
-        [client_id, date, payment_name || 'Bonifico bancario', payment_bank || '', notes || '', total, status || 'Nuovo', orderId]
+        [client_id, date, finalPaymentName, finalPaymentBank, notes || '', total, status || 'Nuovo', orderId]
       );
     }
 
@@ -2070,11 +2119,14 @@ export async function updateOrderInPostgres(orderId: number, orderData: {
       const lineTotal = item.total !== undefined && item.total !== null && Number(item.total) !== 0
         ? Number(item.total)
         : (discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price));
+      const isStockCommitted = (item as any).stock !== undefined && (item as any).stock !== null
+        ? ((item as any).stock === true || (item as any).stock === 'true' || (item as any).stock === 1)
+        : true;
 
       await pgClient.query(
-        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um, discounts, discount, discount_perc, total)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [orderId, item.product_code, item.description, qty, price, item.vat_code || '22', item.um || 'pz', discountsStr || null, discPerc || 0, discPerc || 0, lineTotal]
+        `INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um, discounts, discount, discount_perc, total, stock)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [orderId, item.product_code, item.description, qty, price, item.vat_code || '22', item.um || 'pz', discountsStr || null, discPerc || 0, discPerc || 0, lineTotal, isStockCommitted]
       );
     }
 

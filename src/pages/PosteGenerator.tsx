@@ -1969,7 +1969,7 @@ export default function PosteGenerator() {
                   <div>
                     <label className="block text-[11px] font-bold text-[#4B5563] uppercase tracking-wider mb-1">Prodotto *</label>
                     <select 
-                      value={config.productType}
+                      value={config.productType || 'Poste Delivery Business'}
                       onChange={(e) => handleConfigChange('productType', e.target.value)}
                       className="w-full bg-white border border-[#E5E7EB] rounded-xl px-3.5 py-2 text-xs outline-none focus:border-[#5A5A40] text-[#111827] font-medium"
                     >

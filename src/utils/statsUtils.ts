@@ -89,25 +89,48 @@ export const normalizeAgentName = (str?: string | null): string => {
  */
 export const calculateOrderInstallments = (
   order: Order | any,
-  paymentMethods: any[] = []
+  paymentMethods: any[] = [],
+  clientPaymentName?: string
 ): { date: string; amount: number }[] => {
   if (!order) return [];
   const total = Number(order.total) || 0;
-  const paymentName = String(order.payment_name || '').trim();
+  let paymentName = String(order.payment_name || '').trim();
+  
+  // Fallback to client default payment method if order has no payment method specified
+  if (!paymentName && clientPaymentName) {
+    paymentName = String(clientPaymentName).trim();
+  }
+
   const orderDateStr = order.date || new Date().toISOString().split('T')[0];
 
-  // Look for custom config in paymentMethods array if available
-  const pm = paymentMethods.find(p => p.name && p.name.toLowerCase() === paymentName.toLowerCase());
+  // Look for custom config in paymentMethods array if available (case-insensitive & trimmed)
+  const pm = paymentMethods.find(p => p.name && p.name.trim().toLowerCase() === paymentName.toLowerCase());
 
-  let installmentsNum = pm ? (pm.installments || 1) : 1;
-  let offsetDays = pm ? (pm.offset_days || 0) : 0;
-  let fineMese = pm ? (pm.fine_mese === 1 || pm.fine_mese === true) : false;
+  let installmentsNum = pm ? (Number(pm.installments) || 1) : 1;
+  let offsetDays = pm ? (Number(pm.offset_days) || 0) : 0;
+  let fineMese = pm ? (pm.fine_mese === 1 || pm.fine_mese === true || String(pm.fine_mese) === 'true') : false;
   let customOffsets: number[] | null = null;
+
+  if (pm && pm.custom_offsets) {
+    try {
+      if (Array.isArray(pm.custom_offsets)) {
+        customOffsets = pm.custom_offsets.map(Number);
+      } else if (typeof pm.custom_offsets === 'string') {
+        const parsed = JSON.parse(pm.custom_offsets);
+        if (Array.isArray(parsed)) customOffsets = parsed.map(Number);
+        else if (pm.custom_offsets.includes(',')) customOffsets = pm.custom_offsets.split(',').map(s => Number(s.trim()));
+      }
+    } catch {
+      if (typeof pm.custom_offsets === 'string' && pm.custom_offsets.includes(',')) {
+        customOffsets = pm.custom_offsets.split(',').map(s => Number(s.trim()));
+      }
+    }
+  }
 
   // Pattern detection from standard Danea Easyfatt payment strings
   const lowerName = paymentName.toLowerCase();
 
-  if (!pm) {
+  if (!pm || !pm.installments) {
     if (lowerName.includes('f.m.') || lowerName.includes('fine mese') || lowerName.includes('fm')) {
       fineMese = true;
     }
@@ -528,8 +551,7 @@ export const computeComprehensiveStats = (params: StatsCalculationParams) => {
   const clientList = Array.from(clientStatsMap.values());
   const topClients = [...clientList]
     .filter(i => i.totalSpent > 0)
-    .sort((a, b) => b.totalSpent - a.totalSpent)
-    .slice(0, 10);
+    .sort((a, b) => b.totalSpent - a.totalSpent);
 
   const sixtyDaysAgo = new Date();
   sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
@@ -549,8 +571,7 @@ export const computeComprehensiveStats = (params: StatsCalculationParams) => {
       if (!a.lastOrderDate) return 1;
       if (!b.lastOrderDate) return -1;
       return new Date(a.lastOrderDate).getTime() - new Date(b.lastOrderDate).getTime();
-    })
-    .slice(0, 10);
+    });
 
   // Top Products Breakdown in period
   const prodMap: Record<string, ProductStatItem> = {};
@@ -590,8 +611,7 @@ export const computeComprehensiveStats = (params: StatsCalculationParams) => {
   });
 
   const topProducts = Object.values(prodMap)
-    .sort((a, b) => b.qty - a.qty)
-    .slice(0, 10);
+    .sort((a, b) => b.qty - a.qty);
 
   const totalCatRevenue = Object.values(catMap).reduce((s, c) => s + c.revenue, 0) || 1;
   const categoryBreakdown: CategoryStatItem[] = Object.values(catMap)

@@ -66,6 +66,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
   const [selectedClientId, setSelectedClientId] = useState<string>(preselectedClientId || '');
   const [orderDate, setOrderDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [paymentName, setPaymentName] = useState<string>('');
+  const [paymentBank, setPaymentBank] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [cartItems, setCartItems] = useState<OrderItemDraft[]>([]);
 
@@ -114,6 +115,9 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
               if (found.payment_name) {
                 setPaymentName(found.payment_name);
               }
+              if (found.payment_bank) {
+                setPaymentBank(found.payment_bank);
+              }
             }
           }
         }
@@ -158,6 +162,9 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 if (matchedClient.payment_name && !targetOrder.payment_name) {
                   setPaymentName(matchedClient.payment_name);
                 }
+                if (matchedClient.payment_bank && !targetOrder.payment_bank) {
+                  setPaymentBank(matchedClient.payment_bank);
+                }
               } else if (targetOrder.client_id) {
                 setSelectedClientId(String(targetOrder.client_id));
               } else if (preselectedClientId) {
@@ -176,6 +183,9 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
 
               if (targetOrder.payment_name) {
                 setPaymentName(targetOrder.payment_name);
+              }
+              if (targetOrder.payment_bank) {
+                setPaymentBank(targetOrder.payment_bank);
               }
 
               // Map items to cart - support items, rows, products, order_items
@@ -232,11 +242,16 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
     return clients.find(c => String(c.id) === String(selectedClientId)) || null;
   }, [clients, selectedClientId]);
 
-  // When client changes, auto-set payment method if client has one saved
+  // When client changes, auto-set payment method and bank coordinates if client has one saved
   const handleSelectClient = (c: Client) => {
     setSelectedClientId(String(c.id));
     if (c.payment_name) {
       setPaymentName(c.payment_name);
+    }
+    if (c.payment_bank) {
+      setPaymentBank(c.payment_bank);
+    } else {
+      setPaymentBank('');
     }
     setIsClientPickerOpen(false);
     showToast(`Cliente selezionato: ${c.name}`, 'info');
@@ -495,7 +510,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
       clientEmail: selectedClient?.email || '',
       agentName: activeUser?.name || '',
       paymentName: paymentName || 'Bonifico bancario',
-      paymentBank: selectedClient?.payment_bank || '',
+      paymentBank: paymentBank || selectedClient?.payment_bank || '',
       notes: notes || '',
       items: cartItems.map(item => {
         const line = calculateLineTotals(item.qty, item.price, item.vat_code || 22, item.discount_perc ?? item.discounts, item.custom_taxable_total);
@@ -565,7 +580,7 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
         agent_name: activeUser?.name || null,
         date: orderDate || new Date().toISOString().split('T')[0],
         payment_name: paymentName || 'Bonifico bancario',
-        payment_bank: selectedClient?.payment_bank || '',
+        payment_bank: paymentBank || selectedClient?.payment_bank || '',
         notes: notes || '',
         status: status,
         items: cartItems.map(item => {
@@ -576,7 +591,8 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
             discount_perc: discountVal,
             discounts: item.discounts || (discountVal ? `${discountVal}%` : ''),
             total: line.totalTaxable,
-            taxable_total: line.totalTaxable
+            taxable_total: line.totalTaxable,
+            stock: true
           };
         })
       };
@@ -727,9 +743,9 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
         </div>
       </div>
 
-      {/* Order Details Accordion / Settings Bar (Client, Date, Payment, Notes) */}
+      {/* Order Details Accordion / Settings Bar (Client, Date, Payment, Bank/IBAN, Notes) */}
       <div className="bg-white rounded-2xl p-4 sm:p-5 border border-gray-200/80 shadow-xs">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-center">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 items-center">
           {/* Client summary */}
           <div>
             <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider block mb-1">
@@ -777,6 +793,20 @@ export default function CreateOrder({ user, currentUser }: { user?: any; current
                 <option value={paymentName}>{paymentName}</option>
               )}
             </select>
+          </div>
+
+          {/* Bank Coordinates / IBAN */}
+          <div>
+            <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider block mb-1 truncate" title="Banca di Appoggio / Coordinate IBAN">
+              Banca Appoggio / IBAN
+            </label>
+            <input
+              type="text"
+              placeholder="Es. IT60X0542811101000000123456"
+              value={paymentBank}
+              onChange={e => setPaymentBank(e.target.value)}
+              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-mono font-medium text-gray-800 outline-none focus:border-[#5A5A40]"
+            />
           </div>
 
           {/* Quick Notes */}

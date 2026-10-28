@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   ArrowLeft, 
@@ -23,13 +23,18 @@ import {
   CreditCard,
   TrendingUp,
   AlertCircle,
-  BarChart3
+  BarChart3,
+  Printer,
+  RotateCcw
 } from 'lucide-react';
 import { Client, Task, User } from '../types';
 import { cn } from '../lib/utils';
 import { format, parseISO } from 'date-fns';
 import { it } from 'date-fns/locale';
 import ClientSalesHistory from '../components/ClientSalesHistory';
+import { calculateOrderInstallments } from '../utils/statsUtils';
+import SectionPagination from '../components/SectionPagination';
+import { printOrderDocument } from '../utils/printAndCopyOrder';
 
 function parseClientNotes(notesStr: string | null | undefined) {
   if (!notesStr) return { rawNotes: '', daneaData: {} as Record<string, string> };
@@ -99,15 +104,41 @@ interface ClientDetailProps {
 
 export default function ClientDetail({ user: propUser }: ClientDetailProps = {}) {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [currentUser, setCurrentUser] = useState<User | null>(propUser || null);
   const [client, setClient] = useState<(Client & { activities: Task[] }) | null>(null);
   const [orders, setOrders] = useState<any[]>([]);
+  const [salesHistory, setSalesHistory] = useState<any[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [copiedText, setCopiedText] = useState<string | null>(null);
   const [hidePastDeadlines, setHidePastDeadlines] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
   const [activeTab, setActiveTab] = useState<'anagrafica' | 'analytics'>('anagrafica');
+
+  // Pagination states (10 items per page limit)
+  const [ordersPage, setOrdersPage] = useState(1);
+  const [deadlinesPage, setDeadlinesPage] = useState(1);
+  const [activitiesPage, setActivitiesPage] = useState(1);
+  const [modalItemsPage, setModalItemsPage] = useState(1);
+
+  useEffect(() => {
+    setDeadlinesPage(1);
+  }, [hidePastDeadlines]);
+
+  useEffect(() => {
+    setModalItemsPage(1);
+  }, [selectedOrder]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedOrder) {
+        setSelectedOrder(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedOrder]);
 
   useEffect(() => {
     if (propUser) {
@@ -130,11 +161,13 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
     Promise.all([
       fetch(`/api/clients/${id}`).then(res => res.ok ? res.json() : null),
       fetch(`/api/easyfatt/orders?clientId=${id}`).then(res => res.ok ? res.json() : []),
-      fetch(`/api/payment-methods`).then(res => res.ok ? res.json() : [])
-    ]).then(([clientData, ordersData, pmData]) => {
+      fetch(`/api/payment-methods`).then(res => res.ok ? res.json() : []),
+      fetch(`/api/clients/${id}/sales-history`).then(res => res.ok ? res.json() : [])
+    ]).then(([clientData, ordersData, pmData, historyData]) => {
       setClient(clientData);
       setOrders(Array.isArray(ordersData) ? ordersData : []);
       setPaymentMethods(Array.isArray(pmData) ? pmData : []);
+      setSalesHistory(Array.isArray(historyData) ? historyData : []);
       setLoading(false);
     }).catch(err => {
       console.error("Error loading client detail data:", err);
@@ -142,57 +175,15 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
     });
   }, [id]);
 
-  // Helper to calculate order installment dates
-  const calculateOrderInstallments = (order: any, pms: any[]) => {
-    const pm = pms.find(p => p.name === order.payment_name);
-    const installmentsNum = pm ? (pm.installments || 1) : 1;
-    const offsetDays = pm ? (pm.offset_days || 0) : 0;
-    const fineMese = pm ? (pm.fine_mese === 1 || pm.fine_mese === true) : false;
+  const { rawNotes, daneaData } = useMemo(() => {
+    return parseClientNotes(client?.notes);
+  }, [client?.notes]);
 
-    const orderInstallments: { date: string; amount: number }[] = [];
-    if (installmentsNum > 1) {
-      const baseAmount = Math.floor((order.total / installmentsNum) * 100) / 100;
-      const difference = Math.round((order.total - (baseAmount * installmentsNum)) * 100) / 100;
+  const clientFallbackPayment = useMemo(() => {
+    return (client as any)?.payment_name || daneaData['Pagamento'] || daneaData['Modalità pagamento'] || '';
+  }, [client, daneaData]);
 
-      for (let i = 0; i < installmentsNum; i++) {
-        let amt = baseAmount;
-        if (i === installmentsNum - 1) {
-          amt = Math.round((baseAmount + difference) * 100) / 100;
-        }
-        let currentDate = new Date(order.date);
-        let dateStr = order.date;
-        if (!isNaN(currentDate.getTime())) {
-          const gap = offsetDays === 0 ? 30 : offsetDays;
-          let d = new Date(currentDate.getTime() + offsetDays * 24 * 60 * 60 * 1000);
-          if (fineMese) {
-            d = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-          }
-          for (let j = 1; j <= i; j++) {
-            d = new Date(d.getTime() + gap * 24 * 60 * 60 * 1000);
-            if (fineMese) {
-              d = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-            }
-          }
-          dateStr = d.toISOString().split('T')[0];
-        }
-        orderInstallments.push({ date: dateStr, amount: amt });
-      }
-    } else {
-      let currentDate = new Date(order.date);
-      let dateStr = order.date;
-      if (!isNaN(currentDate.getTime())) {
-        let d = new Date(currentDate.getTime() + offsetDays * 24 * 60 * 60 * 1000);
-        if (fineMese) {
-          d = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-        }
-        dateStr = d.toISOString().split('T')[0];
-      }
-      orderInstallments.push({ date: dateStr, amount: order.total });
-    }
-    return orderInstallments;
-  };
-
-  // Compute all installment deadlines across this client's orders
+  // Compute all installment deadlines across this client's orders using unified stats engine
   const allDeadlines = useMemo(() => {
     const deadlines: {
       orderId: number;
@@ -210,7 +201,7 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
     const todayStr = new Date().toISOString().split('T')[0];
 
     orders.forEach(order => {
-      const insts = calculateOrderInstallments(order, paymentMethods);
+      const insts = calculateOrderInstallments(order, paymentMethods, clientFallbackPayment);
       if (insts && insts.length > 0) {
         insts.forEach((inst, index) => {
           const isPast = inst.date < todayStr;
@@ -222,7 +213,7 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
             amount: inst.amount,
             installmentIndex: index + 1,
             totalInstallments: insts.length,
-            paymentName: order.payment_name || 'N/D',
+            paymentName: order.payment_name || clientFallbackPayment || 'Standard',
             isOverdue: isPast,
             orderObj: order
           });
@@ -232,7 +223,7 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
 
     deadlines.sort((a, b) => a.date.localeCompare(b.date));
     return deadlines;
-  }, [orders, paymentMethods]);
+  }, [orders, paymentMethods, clientFallbackPayment]);
 
   const visibleDeadlines = useMemo(() => {
     if (hidePastDeadlines) {
@@ -257,15 +248,49 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
     return Object.values(groups).sort((a, b) => a.month.localeCompare(b.month));
   }, [visibleDeadlines]);
 
+  // Comprehensive Total Turnover: unifies CRM app orders and historical imported sales
   const totalTurnover = useMemo(() => {
-    return orders.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
-  }, [orders]);
+    const ordersSum = orders.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+    // Add imported historical documents that are not part of orders
+    const importedHistoryItems = salesHistory.filter((item: any) => item.is_imported);
+    const importedSum = importedHistoryItems.reduce((sum: number, it: any) => sum + (Number(it.total_amount) || 0), 0);
+    return ordersSum + importedSum;
+  }, [orders, salesHistory]);
+
+  const totalDocumentsCount = useMemo(() => {
+    const importedDocs = new Set<string>();
+    salesHistory.filter(i => i.is_imported).forEach(i => {
+      if (i.document_number) importedDocs.add(`${i.document_number}_${i.document_date || ''}`);
+    });
+    return orders.length + importedDocs.size;
+  }, [orders, salesHistory]);
+
+  const paginatedRecentOrders = useMemo(() => {
+    const start = (ordersPage - 1) * 10;
+    return orders.slice(start, start + 10);
+  }, [orders, ordersPage]);
+
+  const paginatedDeadlines = useMemo(() => {
+    const start = (deadlinesPage - 1) * 10;
+    return visibleDeadlines.slice(start, start + 10);
+  }, [visibleDeadlines, deadlinesPage]);
+
+  const clientActivities = client?.activities || [];
+  const paginatedActivities = useMemo(() => {
+    const start = (activitiesPage - 1) * 10;
+    return clientActivities.slice(start, start + 10);
+  }, [clientActivities, activitiesPage]);
+
+  const modalItems = selectedOrder?.items || [];
+  const paginatedModalItems = useMemo(() => {
+    const start = (modalItemsPage - 1) * 10;
+    return modalItems.slice(start, start + 10);
+  }, [modalItems, modalItemsPage]);
 
   if (loading) return <div className="p-8 text-center text-gray-500 font-bold">Caricamento scheda cliente...</div>;
   if (!client) return <div className="p-8 text-center text-rose-600 font-bold">Cliente non trovato</div>;
 
-  const { rawNotes, daneaData } = parseClientNotes(client.notes);
-  const hasDaneaData = Object.keys(daneaData).length > 0;
+  const hasDaneaData = Object.keys(daneaData || {}).length > 0;
 
   const copyToClipboard = (text: string, fieldId: string) => {
     navigator.clipboard.writeText(text);
@@ -412,13 +437,13 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                 Sintesi Ordini Cliente
               </h2>
               <span className="text-xs font-black bg-[#5A5A40]/10 text-[#5A5A40] px-2.5 py-1 rounded-full">
-                {orders.length} {orders.length === 1 ? 'ordine' : 'ordini'}
+                {totalDocumentsCount} {totalDocumentsCount === 1 ? 'doc / ordine' : 'doc / ordini'}
               </span>
             </div>
 
             <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-gray-100 flex items-center justify-between">
               <div>
-                <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Fatturato Ordini Generato</span>
+                <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Fatturato Complessivo (Ordini + Storico)</span>
                 <p className="text-xl font-serif font-black text-[#111827]">
                   € {totalTurnover.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
@@ -430,12 +455,17 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
 
             {/* Quick Orders List */}
             <div className="space-y-3">
-              <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 block">Storico Ordini Recenti</span>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 block">Storico Ordini Recenti</span>
+                <span className="text-[10px] font-mono font-bold text-gray-500">
+                  {orders.length} ordini
+                </span>
+              </div>
               {orders.length === 0 ? (
                 <p className="text-xs text-gray-400 italic">Nessun ordine registrato per questo cliente.</p>
               ) : (
-                <div className="space-y-2.5 max-h-[260px] overflow-y-auto pr-1">
-                  {orders.map((ord: any) => (
+                <div className="space-y-2.5">
+                  {paginatedRecentOrders.map((ord: any) => (
                     <div 
                       key={ord.id}
                       onClick={() => setSelectedOrder(ord)}
@@ -467,6 +497,14 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                       </div>
                     </div>
                   ))}
+
+                  <SectionPagination
+                    currentPage={ordersPage}
+                    totalItems={orders.length}
+                    pageSize={10}
+                    onPageChange={setOrdersPage}
+                    itemLabel="ordini"
+                  />
                 </div>
               )}
             </div>
@@ -582,7 +620,7 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 text-xs">
-                      {visibleDeadlines.map((d, idx) => (
+                      {paginatedDeadlines.map((d, idx) => (
                         <tr key={`${d.orderId}-${d.installmentIndex}-${idx}`} className={cn(
                           "hover:bg-gray-50/50 transition-colors",
                           d.isOverdue ? "bg-amber-50/20" : ""
@@ -631,6 +669,14 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                     </tbody>
                   </table>
                 </div>
+
+                <SectionPagination
+                  currentPage={deadlinesPage}
+                  totalItems={visibleDeadlines.length}
+                  pageSize={10}
+                  onPageChange={setDeadlinesPage}
+                  itemLabel="rate"
+                />
 
                 {/* MONTHLY CASHFLOW AGGREGATION CARD */}
                 {monthlyPayments.length > 0 && (
@@ -896,7 +942,7 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                 </Link>
               </div>
               <div className="space-y-4">
-                {client.activities && client.activities.map((activity: any) => (
+                {paginatedActivities.map((activity: any) => (
                   <Link 
                     key={`${activity.activity_source}-${activity.id}`}
                     to={activity.activity_source === 'task' ? `/tasks/${activity.id}` : '#'}
@@ -948,11 +994,19 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                     )}
                   </Link>
                 ))}
-                {(!client.activities || client.activities.length === 0) && (
+                {clientActivities.length === 0 && (
                   <div className="text-center py-12 bg-[#F9FAFB] rounded-3xl border border-dashed border-[#E5E7EB]">
                     <p className="text-sm text-[#9CA3AF] font-medium">Nessuna attività registrata per questo cliente</p>
                   </div>
                 )}
+
+                <SectionPagination
+                  currentPage={activitiesPage}
+                  totalItems={clientActivities.length}
+                  pageSize={10}
+                  onPageChange={setActivitiesPage}
+                  itemLabel="attività"
+                />
               </div>
             </div>
           )}
@@ -963,14 +1017,20 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
       )}
 
       {/* ORDER DETAIL MODAL */}
+      {/* ORDER DETAIL MODAL */}
       <AnimatePresence>
         {selectedOrder && (
-          <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div 
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setSelectedOrder(null);
+            }}
+            className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50"
+          >
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white rounded-3xl p-6 md:p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto space-y-6 shadow-2xl border border-gray-100"
+              className="bg-white rounded-3xl p-6 md:p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto space-y-6 shadow-2xl border border-gray-100"
             >
               <div className="flex items-center justify-between border-b border-gray-100 pb-4">
                 <div>
@@ -985,13 +1045,14 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                 <button
                   onClick={() => setSelectedOrder(null)}
                   className="p-2 hover:bg-gray-100 rounded-full text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
+                  title="Chiudi (Esc)"
                 >
                   <X size={20} />
                 </button>
               </div>
 
               {/* Order Metadata */}
-              <div className="grid grid-cols-2 gap-4 p-4 bg-[#F9FAFB] rounded-2xl border border-gray-100 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 bg-[#F9FAFB] rounded-2xl border border-gray-100 text-xs">
                 <div>
                   <span className="text-[10px] font-black uppercase text-gray-400 block tracking-wider">Cliente</span>
                   <span className="font-bold text-gray-800">{client.name}</span>
@@ -1017,45 +1078,62 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
 
               {/* Order Items */}
               <div className="space-y-3">
-                <h4 className="text-xs font-black uppercase tracking-wider text-gray-500">
-                  Articoli in Ordine ({selectedOrder.items ? selectedOrder.items.length : 0})
-                </h4>
-                {selectedOrder.items && selectedOrder.items.length > 0 ? (
-                  <div className="border border-gray-100 rounded-2xl overflow-hidden text-xs">
-                    <table className="w-full text-left">
-                      <thead className="bg-gray-50 text-[10px] font-black uppercase tracking-wider text-gray-400 border-b border-gray-100">
-                        <tr>
-                          <th className="p-3">Codice</th>
-                          <th className="p-3">Descrizione</th>
-                          <th className="p-3 text-center">Qtà</th>
-                          <th className="p-3 text-right">Prezzo</th>
-                          <th className="p-3 text-right">Totale</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100 font-mono">
-                        {selectedOrder.items.map((item: any, idx: number) => (
-                          <tr key={idx} className="hover:bg-gray-50/50">
-                            <td className="p-3 font-bold text-gray-700">{item.product_code}</td>
-                            <td className="p-3 font-sans font-medium text-gray-800">{item.description}</td>
-                            <td className="p-3 text-center font-bold">{item.qty} {item.um || 'pz'}</td>
-                            <td className="p-3 text-right">€ {Number(item.price).toFixed(2)}</td>
-                            <td className="p-3 text-right font-bold text-gray-900">
-                              € {(Number(item.qty) * Number(item.price)).toFixed(2)}
-                            </td>
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black uppercase tracking-wider text-gray-500">
+                    Articoli in Ordine ({modalItems.length})
+                  </h4>
+                  {modalItems.length > 10 && (
+                    <span className="text-[11px] font-mono text-gray-400">
+                      10 per pagina
+                    </span>
+                  )}
+                </div>
+                {modalItems.length > 0 ? (
+                  <div className="space-y-3">
+                    <div className="border border-gray-100 rounded-2xl overflow-hidden text-xs">
+                      <table className="w-full text-left">
+                        <thead className="bg-gray-50 text-[10px] font-black uppercase tracking-wider text-gray-400 border-b border-gray-100">
+                          <tr>
+                            <th className="p-3">Codice</th>
+                            <th className="p-3">Descrizione</th>
+                            <th className="p-3 text-center">Qtà</th>
+                            <th className="p-3 text-right">Prezzo</th>
+                            <th className="p-3 text-right">Totale</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 font-mono">
+                          {paginatedModalItems.map((item: any, idx: number) => (
+                            <tr key={idx} className="hover:bg-gray-50/50">
+                              <td className="p-3 font-bold text-gray-700">{item.product_code || item.code || 'N/D'}</td>
+                              <td className="p-3 font-sans font-medium text-gray-800">{item.description || item.product_description || 'Articolo'}</td>
+                              <td className="p-3 text-center font-bold">{item.qty || item.quantity || 1} {item.um || 'pz'}</td>
+                              <td className="p-3 text-right">€ {Number(item.price || 0).toFixed(2)}</td>
+                              <td className="p-3 text-right font-bold text-gray-900">
+                                € {(Number(item.qty || item.quantity || 1) * Number(item.price || 0)).toFixed(2)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <SectionPagination
+                      currentPage={modalItemsPage}
+                      totalItems={modalItems.length}
+                      pageSize={10}
+                      onPageChange={setModalItemsPage}
+                      itemLabel="articoli"
+                    />
                   </div>
                 ) : (
-                  <p className="text-xs text-gray-400 italic">Nessun articolo associato.</p>
+                  <p className="text-xs text-gray-400 italic">Nessun articolo associato a questo ordine.</p>
                 )}
               </div>
 
               {/* Order Total & Notes */}
               <div className="pt-4 border-t border-gray-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 {selectedOrder.notes ? (
-                  <div className="text-xs text-gray-500 italic max-w-xs">
+                  <div className="text-xs text-gray-500 italic max-w-sm">
                     <strong>Note:</strong> "{selectedOrder.notes}"
                   </div>
                 ) : <div />}
@@ -1067,13 +1145,39 @@ export default function ClientDetail({ user: propUser }: ClientDetailProps = {})
                 </div>
               </div>
 
-              <div className="flex justify-end pt-2">
+              {/* Modal Actions Footer: Close, Print, and Quick Reorder */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-gray-100">
                 <button
+                  type="button"
                   onClick={() => setSelectedOrder(null)}
                   className="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold text-xs transition-colors cursor-pointer"
                 >
                   Chiudi
                 </button>
+
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => printOrderDocument(selectedOrder, client)}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#5A5A40] hover:bg-[#4E4E37] text-white rounded-xl font-bold text-xs transition-colors cursor-pointer shadow-xs"
+                    title="Stampa Documento Ordine"
+                  >
+                    <Printer size={15} />
+                    <span>Stampa Ordine</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigate(`/crea-ordine?clientId=${client.id}&duplicateOrderId=${selectedOrder.id}`);
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs transition-colors cursor-pointer shadow-xs"
+                    title="Crea un nuovo ordine duplicando gli articoli per questo cliente"
+                  >
+                    <RotateCcw size={15} />
+                    <span>Riordina per Cliente</span>
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>

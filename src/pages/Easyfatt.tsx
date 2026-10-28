@@ -158,6 +158,11 @@ interface Client {
   region?: string;
   notes: string;
   agente?: string;
+  payment_name?: string;
+  payment_bank?: string;
+  vat_code?: string;
+  fiscal_code?: string;
+  sdi_pec?: string;
 }
 
 function parseClientNotes(notesStr: string | null | undefined) {
@@ -1647,7 +1652,11 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...orderForm, status })
+        body: JSON.stringify({ 
+          ...orderForm, 
+          status,
+          items: (orderForm.items || []).map(it => ({ ...it, stock: true }))
+        })
       });
       const data = await res.json();
       if (res.ok) {
@@ -2603,7 +2612,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
                               {/* Sort Selector */}
                               <select
-                                value={orderProductSortBy}
+                                value={orderProductSortBy || 'description'}
                                 onChange={(e: any) => setOrderProductSortBy(e.target.value)}
                                 className="bg-gray-50 border border-gray-200 px-3 py-2 rounded-xl text-xs font-bold text-gray-700 outline-none cursor-pointer"
                               >
@@ -2857,7 +2866,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                                 else if (clientPm) newPayment = clientPm;
                                               }
                                             }
-                                            setOrderForm(prev => ({ ...prev, client_id: String(c.id), payment_name: newPayment }));
+                                            const newBank = c.payment_bank || '';
+                                            const clientPayment = (c.payment_name && c.payment_name.trim()) ? c.payment_name.trim() : newPayment;
+                                            setOrderForm(prev => ({ ...prev, client_id: String(c.id), payment_name: clientPayment, payment_bank: newBank }));
                                             setClientSearchQuery('');
                                           }}
                                           className="w-full text-left px-3 py-2 hover:bg-[#FDFDFB] transition-colors flex items-center justify-between text-xs"
@@ -2922,7 +2933,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                                   Pagamento *
                                 </label>
                                 <select
-                                  value={orderForm.payment_name}
+                                  value={orderForm.payment_name || ''}
                                   onChange={(e) => setOrderForm({ ...orderForm, payment_name: e.target.value })}
                                   className="w-full px-2 py-2 bg-gray-50 border border-gray-200 rounded-lg outline-none font-bold text-xs cursor-pointer"
                                 >
@@ -3662,7 +3673,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                       <label className="text-[10px] font-black uppercase tracking-wider text-gray-400 block">Ordinamento</label>
                       <div className="relative">
                         <select
-                          value={productSortBy}
+                          value={productSortBy || 'description'}
                           onChange={(e: any) => setProductSortBy(e.target.value)}
                           className="w-full bg-[#F4F5F6] border border-[#E5E7EB] px-3 py-2 rounded-xl text-xs font-semibold text-gray-700 outline-none appearance-none cursor-pointer focus:ring-2 focus:ring-[#5A5A40]/15"
                         >
@@ -5101,7 +5112,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                         </label>
                       </div>
                       <select 
-                        value={productLinkFilter}
+                        value={productLinkFilter || 'all'}
                         onChange={(e) => setProductLinkFilter(e.target.value as 'all' | 'only_with_link' | 'hide_with_link')}
                         className="w-full bg-white border border-[#E5E7EB] px-4 py-3 rounded-xl font-bold text-xs text-[#111827] shadow-xs focus:ring-2 focus:ring-[#5A5A40]/10 focus:border-[#5A5A40] outline-none transition-all cursor-pointer"
                       >
@@ -5122,7 +5133,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                         </label>
                       </div>
                       <select 
-                        value={productCommissionFilter}
+                        value={productCommissionFilter || 'all'}
                         onChange={(e) => setProductCommissionFilter(e.target.value as 'all' | 'only_with_commission' | 'hide_with_commission')}
                         className="w-full bg-white border border-[#E5E7EB] px-4 py-3 rounded-xl font-bold text-xs text-[#111827] shadow-xs focus:ring-2 focus:ring-[#5A5A40]/10 focus:border-[#5A5A40] outline-none transition-all cursor-pointer"
                       >
@@ -8641,7 +8652,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                           else if (clientPm) newPayment = clientPm;
                         }
                       }
-                      setOrderForm(prev => ({ ...prev, client_id: selectedClientId, payment_name: newPayment }));
+                      const newBank = selectedClientObj?.payment_bank || '';
+                      const clientPayment = (selectedClientObj?.payment_name && selectedClientObj.payment_name.trim()) ? selectedClientObj.payment_name.trim() : newPayment;
+                      setOrderForm(prev => ({ ...prev, client_id: selectedClientId, payment_name: clientPayment, payment_bank: newBank }));
                     }}
                     className="w-full px-3.5 py-2.5 bg-white border border-gray-300 rounded-xl text-xs font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/30 shadow-2xs cursor-pointer"
                   >

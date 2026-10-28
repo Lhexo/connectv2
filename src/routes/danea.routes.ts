@@ -261,9 +261,9 @@ export async function handleDownloadOrders(req: Request, res: Response) {
 
     queryStr += " AND (o.status != 'Bozza' OR o.status IS NULL)";
 
-    // Finestra di grazia per Danea Easyfatt: non sincronizzati oppure sincronizzati nelle ultime 30 ore
+    // Finestra di grazia per Danea Easyfatt: non sincronizzati oppure sincronizzati nelle ultime 48 ore
     if (!req.query.all && !req.body?.all) {
-      queryStr += " AND (o.is_synced = false OR o.is_synced IS NULL OR o.synced_at >= (NOW() - INTERVAL '30 hours'))";
+      queryStr += " AND (o.is_synced = false OR o.is_synced IS NULL OR o.synced_at >= (NOW() - INTERVAL '48 hours'))";
     }
 
     queryStr += " ORDER BY o.id ASC";
@@ -431,14 +431,34 @@ export async function buildEasyfattOrdersXml(ordersList: any[], appver: string =
         }
       }
 
+      const qty = Number(r.qty || 1);
+      const price = Number(r.price || 0);
+      let discPerc = 0;
+      if (r.discount_perc !== undefined && r.discount_perc !== null && Number(r.discount_perc) > 0) {
+        discPerc = Number(r.discount_perc);
+      } else if (r.discount !== undefined && r.discount !== null && Number(r.discount) > 0) {
+        discPerc = Number(r.discount);
+      } else if (discountStr) {
+        const parsed = parseFloat(discountStr.replace('%', '').trim());
+        if (!isNaN(parsed) && parsed > 0) discPerc = parsed;
+      }
+      const lineTotal = (r.total !== undefined && r.total !== null && Number(r.total) !== 0)
+        ? Number(r.total)
+        : (discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price));
+      const vatCodeVal = r.vat_code || '22';
+      const vatPerc = r.vat_perc || 22;
+      const stockVal = (r.stock === false || r.stock === 'false' || r.stock === 0) ? 'false' : 'true';
+
       xml += `        <Row>\n` +
         `          <Code>${escapeXml(r.product_code || '')}</Code>\n` +
         `          <Description>${escapeXml(r.description || '')}</Description>\n` +
-        `          <Qty>${Number(r.qty || 1)}</Qty>\n` +
-        `          <Price>${Number(r.price || 0).toFixed(2)}</Price>\n` +
+        `          <Qty>${qty}</Qty>\n` +
+        `          <Um>${escapeXml(r.um || 'pz')}</Um>\n` +
+        `          <Price>${price.toFixed(2)}</Price>\n` +
         (discountStr ? `          <Discounts>${escapeXml(discountStr)}</Discounts>\n` : `          <Discounts/>\n`) +
-        `          <VatCode Perc="${r.vat_perc || 22}">${escapeXml(r.vat_code || '22')}</VatCode>\n` +
-        `          <Stock>${r.stock ? 'true' : 'false'}</Stock>\n` +
+        `          <VatCode Perc="${vatPerc}">${escapeXml(vatCodeVal)}</VatCode>\n` +
+        `          <Total>${lineTotal.toFixed(2)}</Total>\n` +
+        `          <Stock>${stockVal}</Stock>\n` +
         `        </Row>\n`;
     }
     xml += `      </Rows>\n`;
@@ -465,7 +485,7 @@ export async function buildEasyfattOrdersXml(ordersList: any[], appver: string =
         UPDATE orders 
         SET is_synced = true, 
             synced_at = CASE 
-              WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '30 hours') THEN synced_at 
+              WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '48 hours') THEN synced_at 
               ELSE NOW() 
             END,
             status = 'Esportato' 

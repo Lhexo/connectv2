@@ -568,7 +568,7 @@ app.get('/api/clients', authMiddleware, async (req: any, res) => {
     const pgTotal = pgCountRes.rows[0] ? Number(pgCountRes.rows[0].total) : 0;
 
     if (pgTotal > 0 || pgConditions.length > 0) {
-      let pgQuery = `SELECT id, code, name, contact, phone, email, address, city, postcode, province, country, fiscal_code, vat_code, agente, price_list, payment_name FROM clients ${pgWhere} ORDER BY name ASC`;
+      let pgQuery = `SELECT id, code, web_login, name, contact, phone, cell_phone, fax, email, pec, address, postcode, city, province, country, fiscal_code, vat_code, sdi_pec, delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country, price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente FROM clients ${pgWhere} ORDER BY name ASC`;
       if (isPaginated) {
         pgQuery += ` LIMIT $${pIdx++} OFFSET $${pIdx++}`;
         pgParams.push(limit, offset);
@@ -642,7 +642,7 @@ app.get('/api/clients', authMiddleware, async (req: any, res) => {
     const totalItems = countRow ? Number(countRow.total) : 0;
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
 
-    let query = `SELECT id, code, name, contact, phone, email, address, city, postcode, province, country, fiscal_code, vat_code, agente, price_list, payment_name FROM clients ${whereClause} ORDER BY name ASC`;
+    let query = `SELECT id, code, web_login, name, contact, phone, cell_phone, fax, email, pec, address, postcode, city, province, country, fiscal_code, vat_code, sdi_pec, delivery_name, delivery_address, delivery_postcode, delivery_city, delivery_province, delivery_country, price_list, payment_name, payment_bank, custom_field1, custom_field2, custom_field3, custom_field4, notes, agente FROM clients ${whereClause} ORDER BY name ASC`;
     let clients: any[] = [];
     if (isPaginated) {
       clients = await queryAll(`${query} LIMIT ? OFFSET ?`, [...params, limit, offset]) as any[];
@@ -791,9 +791,10 @@ app.get('/api/clients/:id/sales-history', authMiddleware, async (req: any, res) 
         unit_of_measure: matchedCatalogItem ? (matchedCatalogItem.um || r.unit_of_measure || 'pz') : (r.unit_of_measure || 'pz'),
         unit_price: Number(r.unit_price) || (Number(r.quantity) > 0 ? (Number(r.amount) / Number(r.quantity)) : Number(r.amount) || 0),
         total_amount: Number(r.amount) || Number(r.total_amount) || 0,
-        category: matchedCatalogItem ? (matchedCatalogItem.category || r.category || 'Catalogo') : (r.category || (r.type === 'document' ? 'Documenti' : 'Importati')),
+        category: matchedCatalogItem ? (matchedCatalogItem.category || r.category || 'Generale') : (r.category || (r.type === 'document' ? 'Documenti' : 'Storico Fuori Catalogo')),
         created_at: r.created_at,
-        is_imported: true
+        is_imported: true,
+        in_catalog: Boolean(matchedCatalogItem)
       });
     }
 
@@ -824,21 +825,34 @@ app.get('/api/clients/:id/sales-history', authMiddleware, async (req: any, res) 
           const qty = Number(item.qty) || 1;
           const price = Number(item.price) || 0;
           const total = price * qty;
+          const itemCode = (item.product_code || '').toString().trim().toLowerCase();
+          const itemDesc = (item.description || '').toString().trim().toLowerCase();
+          
+          const matchedInCatalog = catalogProducts.find(p => 
+            (itemCode && (
+              (p.code && String(p.code).trim().toLowerCase() === itemCode) ||
+              (p.barcode && String(p.barcode).trim().toLowerCase() === itemCode) ||
+              (p.supplier_product_code && String(p.supplier_product_code).trim().toLowerCase() === itemCode)
+            )) ||
+            (itemDesc && p.description && String(p.description).trim().toLowerCase() === itemDesc)
+          );
+
           mappedSystemOrders.push({
             id: 1000000 + Number(item.id),
             client_id: Number(order.client_id),
             document_type: `Ordine App (${docStatus})`,
             document_number: docNum,
             document_date: docDate,
-            product_code: item.product_code || '',
-            product_description: item.description || 'Prodotto',
+            product_code: item.product_code || (matchedInCatalog ? matchedInCatalog.code : ''),
+            product_description: item.description || (matchedInCatalog ? matchedInCatalog.description : 'Prodotto'),
             quantity: qty,
-            unit_of_measure: item.um || 'pz',
+            unit_of_measure: item.um || (matchedInCatalog ? matchedInCatalog.um : 'pz'),
             unit_price: price,
             total_amount: total,
-            category: 'Ordini App',
+            category: matchedInCatalog?.category || item.category || 'Ordini App',
             created_at: order.created_at,
-            is_imported: false
+            is_imported: false,
+            in_catalog: Boolean(matchedInCatalog)
           });
         }
       } else {
@@ -856,7 +870,8 @@ app.get('/api/clients/:id/sales-history', authMiddleware, async (req: any, res) 
           total_amount: Number(order.total) || 0,
           category: 'Ordini App',
           created_at: order.created_at,
-          is_imported: false
+          is_imported: false,
+          in_catalog: true
         });
       }
     }
@@ -1388,25 +1403,47 @@ app.all(['/api/girovisite/ical/:token', '/api/girovisite/ical/:token.ics'], asyn
     }
 
     const userId = agent.id;
-    const rawVisits = await queryAll(`
-      SELECT v.*, 
-             c.name as client_name, c.address as client_address, c.city as client_city, 
-             c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
-             u.name as agent_name, 
-             hu.name as host_agent_name,
-             gu.name as guest_agent_name,
-             gu.id as guest_agent_id
-      FROM agent_visits v
-      LEFT JOIN clients c ON v.client_id = c.id
-      LEFT JOIN users u ON v.agent_id = u.id
-      LEFT JOIN users hu ON v.host_agent_id = hu.id
-      LEFT JOIN co_visit_invites i ON (i.visit_id = v.id AND i.status = 'ACCEPTED')
-      LEFT JOIN users gu ON i.guest_agent_id = gu.id
-      WHERE v.agent_id = ? 
-         OR v.host_agent_id = ?
-         OR v.id IN (SELECT visit_id FROM co_visit_invites WHERE guest_agent_id = ? AND status = 'ACCEPTED')
-      ORDER BY v.visit_date ASC, v.time_slot ASC
-    `, [userId, userId, userId]);
+    const admin = isUserAdmin(agent);
+
+    let rawVisits;
+    if (admin) {
+      rawVisits = await queryAll(`
+        SELECT v.*, 
+               c.name as client_name, c.address as client_address, c.city as client_city, 
+               c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
+               u.name as agent_name, 
+               hu.name as host_agent_name,
+               gu.name as guest_agent_name,
+               gu.id as guest_agent_id
+        FROM agent_visits v
+        LEFT JOIN clients c ON v.client_id = c.id
+        LEFT JOIN users u ON v.agent_id = u.id
+        LEFT JOIN users hu ON v.host_agent_id = hu.id
+        LEFT JOIN co_visit_invites i ON (i.visit_id = v.id AND i.status = 'ACCEPTED')
+        LEFT JOIN users gu ON i.guest_agent_id = gu.id
+        ORDER BY v.visit_date ASC, v.time_slot ASC
+      `);
+    } else {
+      rawVisits = await queryAll(`
+        SELECT v.*, 
+               c.name as client_name, c.address as client_address, c.city as client_city, 
+               c.contact as client_contact, c.phone as client_phone, c.email as client_email, c.agente as client_agente, c.notes as client_notes,
+               u.name as agent_name, 
+               hu.name as host_agent_name,
+               gu.name as guest_agent_name,
+               gu.id as guest_agent_id
+        FROM agent_visits v
+        LEFT JOIN clients c ON v.client_id = c.id
+        LEFT JOIN users u ON v.agent_id = u.id
+        LEFT JOIN users hu ON v.host_agent_id = hu.id
+        LEFT JOIN co_visit_invites i ON (i.visit_id = v.id AND i.status = 'ACCEPTED')
+        LEFT JOIN users gu ON i.guest_agent_id = gu.id
+        WHERE v.agent_id = ? 
+           OR v.host_agent_id = ?
+           OR v.id IN (SELECT visit_id FROM co_visit_invites WHERE guest_agent_id = ? AND status = 'ACCEPTED')
+        ORDER BY v.visit_date ASC, v.time_slot ASC
+      `, [userId, userId, userId]);
+    }
 
     const nowIso = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
 
@@ -1475,6 +1512,11 @@ app.all(['/api/girovisite/ical/:token', '/api/girovisite/ical/:token.ics'], asyn
       }
       lines.push(`DESCRIPTION:${escapeIcalText(descParts.join('\n'))}`);
       lines.push('STATUS:CONFIRMED');
+      lines.push('BEGIN:VALARM');
+      lines.push('ACTION:DISPLAY');
+      lines.push('DESCRIPTION:Promemoria Visita Girovisite');
+      lines.push('TRIGGER:-PT15M');
+      lines.push('END:VALARM');
       lines.push('END:VEVENT');
     }
 
@@ -1482,6 +1524,7 @@ app.all(['/api/girovisite/ical/:token', '/api/girovisite/ical/:token.ics'], asyn
 
     const icsContent = lines.join('\r\n');
 
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
     res.setHeader('Content-Disposition', `inline; filename="girovisite_${agent.id}.ics"`);
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, s-maxage=0');
@@ -3978,6 +4021,10 @@ app.post('/api/easyfatt/orders', authMiddleware, async (req: any, res) => {
 
   const orderStatus = status || 'Nuovo';
 
+  if (payment_name && String(payment_name).trim()) {
+    ensurePaymentMethodExists(String(payment_name).trim()).catch(() => {});
+  }
+
   try {
     const result = await createOrderInPostgres({
       client_id: validClientId,
@@ -4111,7 +4158,7 @@ app.patch('/api/easyfatt/orders/:id/status', authMiddleware, async (req: any, re
           SET status = $1, 
               is_synced = true, 
               synced_at = CASE 
-                WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '30 hours') THEN synced_at 
+                WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '48 hours') THEN synced_at 
                 ELSE NOW() 
               END 
           WHERE id = $2
@@ -4641,14 +4688,34 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
         }
       }
 
+      const qty = Number(r.qty || 1);
+      const price = Number(r.price || 0);
+      let discPerc = 0;
+      if (r.discount_perc !== undefined && r.discount_perc !== null && Number(r.discount_perc) > 0) {
+        discPerc = Number(r.discount_perc);
+      } else if (r.discount !== undefined && r.discount !== null && Number(r.discount) > 0) {
+        discPerc = Number(r.discount);
+      } else if (discountStr) {
+        const parsed = parseFloat(discountStr.replace('%', '').trim());
+        if (!isNaN(parsed) && parsed > 0) discPerc = parsed;
+      }
+      const lineTotal = (r.total !== undefined && r.total !== null && Number(r.total) !== 0)
+        ? Number(r.total)
+        : (discPerc > 0 ? (qty * price * (1 - discPerc / 100)) : (qty * price));
+      const vatCodeVal = r.vat_code || '22';
+      const vatPerc = r.vat_perc || 22;
+      const stockVal = (r.stock === false || r.stock === 'false' || r.stock === 0) ? 'false' : 'true';
+
       xml += `        <Row>\n` +
         `          <Code>${escapeXml(r.product_code || '')}</Code>\n` +
         `          <Description>${escapeXml(r.description || '')}</Description>\n` +
-        `          <Qty>${Number(r.qty || 1)}</Qty>\n` +
-        `          <Price>${Number(r.price || 0).toFixed(2)}</Price>\n` +
+        `          <Qty>${qty}</Qty>\n` +
+        `          <Um>${escapeXml(r.um || 'pz')}</Um>\n` +
+        `          <Price>${price.toFixed(2)}</Price>\n` +
         (discountStr ? `          <Discounts>${escapeXml(discountStr)}</Discounts>\n` : `          <Discounts/>\n`) +
-        `          <VatCode Perc="${r.vat_perc || 22}">${escapeXml(r.vat_code || '22')}</VatCode>\n` +
-        `          <Stock>${r.stock ? 'true' : 'false'}</Stock>\n` +
+        `          <VatCode Perc="${vatPerc}">${escapeXml(vatCodeVal)}</VatCode>\n` +
+        `          <Total>${lineTotal.toFixed(2)}</Total>\n` +
+        `          <Stock>${stockVal}</Stock>\n` +
         `        </Row>\n`;
     }
     xml += `      </Rows>\n`;
@@ -4700,7 +4767,7 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
         UPDATE orders 
         SET is_synced = true, 
             synced_at = CASE 
-              WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '30 hours') THEN synced_at 
+              WHEN synced_at IS NOT NULL AND synced_at >= (NOW() - INTERVAL '48 hours') THEN synced_at 
               ELSE NOW() 
             END,
             status = 'Esportato' 
@@ -4711,7 +4778,7 @@ async function buildEasyfattOrdersXml(ordersList: any[], appver: string = '2', m
         UPDATE orders 
         SET is_synced = true, 
             synced_at = CASE 
-              WHEN synced_at IS NOT NULL AND synced_at >= NOW() - INTERVAL '30 hours' THEN synced_at 
+              WHEN synced_at IS NOT NULL AND synced_at >= NOW() - INTERVAL '48 hours' THEN synced_at 
               ELSE NOW() 
             END,
             status = 'Esportato' 
@@ -4876,13 +4943,13 @@ async function handleEasyfattOrderDownload(req: any, res: any) {
     // Esclude categoricamente gli ordini storici importati da file XML (utilizzati esclusivamente per fini statistici o consultazione interna)
     query += " AND (o.is_imported IS FALSE OR o.is_imported IS NULL)";
 
-    // Finestra temporale di 30 ore per ordini creati in App (is_imported = false / NULL):
+    // Finestra temporale di 48 ore per ordini creati in App (is_imported = false / NULL):
     // Gli ordini generati dalla rete agenti sono disponibili per lo scarico da parte di Danea
-    // entro e non oltre 30 ore dal momento della loro creazione (oppure fino a sincronizzazione / entro 30h dalla sync).
+    // entro e non oltre 48 ore dal momento della loro creazione (oppure fino a sincronizzazione / entro 48h dalla sync).
     if (!req.query.all && !req.body?.all) {
       query += ` AND (
-        ( (o.is_synced IS FALSE OR o.is_synced IS NULL) AND (o.created_at IS NULL OR o.created_at >= (NOW() - INTERVAL '30 hours')) )
-        OR (o.synced_at IS NOT NULL AND o.synced_at >= (NOW() - INTERVAL '30 hours'))
+        ( (o.is_synced IS FALSE OR o.is_synced IS NULL) AND (o.created_at IS NULL OR o.created_at >= (NOW() - INTERVAL '48 hours')) )
+        OR (o.synced_at IS NOT NULL AND o.synced_at >= (NOW() - INTERVAL '48 hours'))
       )`;
     }
 

@@ -225,7 +225,7 @@ export default function Dashboard({ user }: { user: User | null }) {
             <div className="flex items-center gap-2 bg-white px-4 py-2.5 rounded-full border border-[rgba(26,26,26,0.05)] shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
               <Briefcase size={16} className="text-[#6366f1]" />
               <select 
-                value={selectedMacroCategoryId}
+                value={selectedMacroCategoryId || ''}
                 onChange={(e) => setSelectedMacroCategoryId(e.target.value)}
                 className="bg-transparent border-none outline-none text-xs font-semibold text-[#1a1a1a] cursor-pointer pr-4 font-sans"
               >
@@ -239,7 +239,7 @@ export default function Dashboard({ user }: { user: User | null }) {
             <div className="flex items-center gap-2 bg-white px-4 py-2.5 rounded-full border border-[rgba(26,26,26,0.05)] shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
               <Users size={16} className="text-[#6366f1]" />
               <select 
-                value={selectedUserId}
+                value={selectedUserId || ''}
                 onChange={(e) => setSelectedUserId(e.target.value)}
                 className="bg-transparent border-none outline-none text-xs font-semibold text-[#1a1a1a] cursor-pointer pr-4 font-sans"
               >

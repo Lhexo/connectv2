@@ -28,7 +28,9 @@ import {
   MapPin, 
   Layers, 
   FileSpreadsheet, 
-  SlidersHorizontal 
+  SlidersHorizontal,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -59,6 +61,7 @@ import {
   isUserAgent 
 } from '../utils/statsUtils';
 import { cn } from '../lib/utils';
+import SectionPagination from '../components/SectionPagination';
 
 export default function AgentStats({ user, currentUser }: { user?: any; currentUser?: any }) {
   const activeUser = user || currentUser;
@@ -86,6 +89,16 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
   const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | 'Bozza' | 'Nuovo' | 'Confermato'>('all');
   const [orderSearchQuery, setOrderSearchQuery] = useState('');
   const [hidePastDeadlines, setHidePastDeadlines] = useState(true);
+
+  // Section Pagination States (10 items per page limit)
+  const [deadlinesPage, setDeadlinesPage] = useState(1);
+  const [leaderboardPage, setLeaderboardPage] = useState(1);
+  const [categoriesPage, setCategoriesPage] = useState(1);
+  const [topClientsPage, setTopClientsPage] = useState(1);
+  const [inactiveClientsPage, setInactiveClientsPage] = useState(1);
+  const [topProductsPage, setTopProductsPage] = useState(1);
+  const [paymentBreakdownPage, setPaymentBreakdownPage] = useState(1);
+  const [ordersPage, setOrdersPage] = useState(1);
 
   // Target states
   const userStorageKey = `agent_monthly_target_${activeUser?.id || 'default'}`;
@@ -269,6 +282,69 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
     return stats.allDeadlines.filter(d => !hidePastDeadlines || !d.isOverdue);
   }, [stats.allDeadlines, hidePastDeadlines]);
 
+  // Reset pagination when search query or status filter changes
+  useEffect(() => {
+    setOrdersPage(1);
+  }, [orderSearchQuery, orderStatusFilter]);
+
+  // Reset deadlines pagination when toggle changes
+  useEffect(() => {
+    setDeadlinesPage(1);
+  }, [hidePastDeadlines]);
+
+  // Reset all pagination when main filters change
+  useEffect(() => {
+    setDeadlinesPage(1);
+    setLeaderboardPage(1);
+    setCategoriesPage(1);
+    setTopClientsPage(1);
+    setInactiveClientsPage(1);
+    setTopProductsPage(1);
+    setPaymentBreakdownPage(1);
+    setOrdersPage(1);
+  }, [timeRangeFilter, selectedAgentFilter]);
+
+  // Sliced data for 10-item pagination
+  const paginatedDeadlines = useMemo(() => {
+    const start = (deadlinesPage - 1) * 10;
+    return visibleDeadlines.slice(start, start + 10);
+  }, [visibleDeadlines, deadlinesPage]);
+
+  const paginatedLeaderboard = useMemo(() => {
+    const start = (leaderboardPage - 1) * 10;
+    return stats.agentsLeaderboard.slice(start, start + 10);
+  }, [stats.agentsLeaderboard, leaderboardPage]);
+
+  const paginatedCategories = useMemo(() => {
+    const start = (categoriesPage - 1) * 10;
+    return stats.categoryBreakdown.slice(start, start + 10);
+  }, [stats.categoryBreakdown, categoriesPage]);
+
+  const paginatedTopClients = useMemo(() => {
+    const start = (topClientsPage - 1) * 10;
+    return stats.topClients.slice(start, start + 10);
+  }, [stats.topClients, topClientsPage]);
+
+  const paginatedInactiveClients = useMemo(() => {
+    const start = (inactiveClientsPage - 1) * 10;
+    return stats.inactiveClients.slice(start, start + 10);
+  }, [stats.inactiveClients, inactiveClientsPage]);
+
+  const paginatedTopProducts = useMemo(() => {
+    const start = (topProductsPage - 1) * 10;
+    return stats.topProducts.slice(start, start + 10);
+  }, [stats.topProducts, topProductsPage]);
+
+  const paginatedPaymentBreakdown = useMemo(() => {
+    const start = (paymentBreakdownPage - 1) * 10;
+    return stats.paymentBreakdown.slice(start, start + 10);
+  }, [stats.paymentBreakdown, paymentBreakdownPage]);
+
+  const paginatedOrders = useMemo(() => {
+    const start = (ordersPage - 1) * 10;
+    return filteredOrders.slice(start, start + 10);
+  }, [filteredOrders, ordersPage]);
+
   // Duplicate / Re-order action
   const handleDuplicateOrder = (order: Order) => {
     navigate(`/ordine?duplicateOrderId=${order.id}${order.client_id ? `&clientId=${order.client_id}` : ''}`);
@@ -408,7 +484,7 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
           {!isAgent ? (
             <div className="flex items-center gap-2">
               <select
-                value={selectedAgentFilter}
+                value={selectedAgentFilter || 'all'}
                 onChange={(e) => setSelectedAgentFilter(e.target.value)}
                 className="bg-gray-50 border border-gray-200 text-gray-900 text-xs font-bold rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-[#5A5A40] cursor-pointer"
               >
@@ -790,57 +866,66 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
             )}
           </div>
         ) : (
-          <div className="overflow-x-auto border border-gray-100 rounded-2xl">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-gray-50/80 text-[10px] uppercase font-black tracking-wider text-gray-500 border-b border-gray-100">
-                  <th className="p-3.5">Ordine #</th>
-                  <th className="p-3.5">Cliente</th>
-                  <th className="p-3.5">Rata / Condizioni</th>
-                  <th className="p-3.5">Data Scadenza</th>
-                  <th className="p-3.5 text-right">Importo Rata</th>
-                  <th className="p-3.5 text-center">Stato</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 text-xs">
-                {visibleDeadlines.slice(0, 15).map((d, idx) => (
-                  <tr key={`${d.orderId}-${d.installmentIndex}-${idx}`} className={cn(
-                    "hover:bg-gray-50/50 transition-colors",
-                    d.isOverdue ? "bg-amber-50/20" : ""
-                  )}>
-                    <td className="p-3.5 font-mono font-bold text-gray-800">
-                      #{d.orderNumber}
-                    </td>
-                    <td className="p-3.5 font-bold text-gray-900">
-                      {d.clientName}
-                    </td>
-                    <td className="p-3.5 text-gray-600">
-                      <span className="font-bold text-[#5A5A40]">Rata {d.installmentIndex}/{d.totalInstallments}</span>
-                      <span className="text-[10px] text-gray-400 block truncate max-w-[200px]">{d.paymentName}</span>
-                    </td>
-                    <td className="p-3.5 font-mono font-bold text-gray-700">
-                      {d.date.split('-').reverse().join('/')}
-                    </td>
-                    <td className="p-3.5 text-right font-mono font-bold text-gray-900">
-                      € {d.amount.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </td>
-                    <td className="p-3.5 text-center">
-                      {d.isOverdue ? (
-                        <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
-                          <Clock size={10} />
-                          Scaduta
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
-                          <CheckCircle2 size={10} />
-                          In Essere
-                        </span>
-                      )}
-                    </td>
+          <div className="space-y-4">
+            <div className="overflow-x-auto border border-gray-100 rounded-2xl">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-gray-50/80 text-[10px] uppercase font-black tracking-wider text-gray-500 border-b border-gray-100">
+                    <th className="p-3.5">Ordine #</th>
+                    <th className="p-3.5">Cliente</th>
+                    <th className="p-3.5">Rata / Condizioni</th>
+                    <th className="p-3.5">Data Scadenza</th>
+                    <th className="p-3.5 text-right">Importo Rata</th>
+                    <th className="p-3.5 text-center">Stato</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-gray-100 text-xs">
+                  {paginatedDeadlines.map((d, idx) => (
+                    <tr key={`${d.orderId}-${d.installmentIndex}-${idx}`} className={cn(
+                      "hover:bg-gray-50/50 transition-colors",
+                      d.isOverdue ? "bg-amber-50/20" : ""
+                    )}>
+                      <td className="p-3.5 font-mono font-bold text-gray-800">
+                        #{d.orderNumber}
+                      </td>
+                      <td className="p-3.5 font-bold text-gray-900">
+                        {d.clientName}
+                      </td>
+                      <td className="p-3.5 text-gray-600">
+                        <span className="font-bold text-[#5A5A40]">Rata {d.installmentIndex}/{d.totalInstallments}</span>
+                        <span className="text-[10px] text-gray-400 block truncate max-w-[200px]">{d.paymentName}</span>
+                      </td>
+                      <td className="p-3.5 font-mono font-bold text-gray-700">
+                        {d.date.split('-').reverse().join('/')}
+                      </td>
+                      <td className="p-3.5 text-right font-mono font-bold text-gray-900">
+                        € {d.amount.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="p-3.5 text-center">
+                        {d.isOverdue ? (
+                          <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
+                            <Clock size={10} />
+                            Scaduta
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                            <CheckCircle2 size={10} />
+                            In Essere
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <SectionPagination
+              currentPage={deadlinesPage}
+              totalItems={visibleDeadlines.length}
+              pageSize={10}
+              onPageChange={setDeadlinesPage}
+              itemLabel="rate"
+            />
           </div>
         )}
       </div>
@@ -874,44 +959,54 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {stats.agentsLeaderboard.map((ag, idx) => (
-                  <tr key={ag.name} className="hover:bg-gray-50/80 transition-colors">
-                    <td className="py-3 px-3 font-bold text-gray-400">
-                      <span className={cn(
-                        "w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black",
-                        idx === 0 ? "bg-amber-100 text-amber-800" : idx === 1 ? "bg-gray-200 text-gray-800" : idx === 2 ? "bg-orange-100 text-orange-800" : "text-gray-500"
-                      )}>
-                        {idx + 1}
-                      </span>
-                    </td>
-                    <td className="py-3 px-3 font-bold text-gray-900">
-                      {ag.name}
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono font-bold text-gray-700">
-                      {ag.ordersCount}
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono font-bold text-gray-700">
-                      {ag.activeClients}
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono font-bold text-gray-700">
-                      € {ag.aov.toFixed(2)}
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono font-black text-[#5A5A40] text-sm">
-                      € {ag.totalRevenue.toLocaleString('it-IT', { minimumFractionDigits: 2 })}
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedAgentFilter(ag.name)}
-                        className="text-[11px] font-bold text-[#5A5A40] hover:underline cursor-pointer"
-                      >
-                        Ispeziona Scheda →
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {paginatedLeaderboard.map((ag, idx) => {
+                  const globalRank = (leaderboardPage - 1) * 10 + idx + 1;
+                  return (
+                    <tr key={ag.name} className="hover:bg-gray-50/80 transition-colors">
+                      <td className="py-3 px-3 font-bold text-gray-400">
+                        <span className={cn(
+                          "w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black",
+                          globalRank === 1 ? "bg-amber-100 text-amber-800" : globalRank === 2 ? "bg-gray-200 text-gray-800" : globalRank === 3 ? "bg-orange-100 text-orange-800" : "text-gray-500"
+                        )}>
+                          {globalRank}
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 font-bold text-gray-900">
+                        {ag.name}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono font-bold text-gray-700">
+                        {ag.ordersCount}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono font-bold text-gray-700">
+                        {ag.activeClients}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono font-bold text-gray-700">
+                        € {ag.aov.toFixed(2)}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono font-black text-[#5A5A40] text-sm">
+                        € {ag.totalRevenue.toLocaleString('it-IT', { minimumFractionDigits: 2 })}
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedAgentFilter(ag.name)}
+                          className="text-[11px] font-bold text-[#5A5A40] hover:underline cursor-pointer"
+                        >
+                          Ispeziona Scheda →
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+            <SectionPagination
+              currentPage={leaderboardPage}
+              totalItems={stats.agentsLeaderboard.length}
+              pageSize={10}
+              onPageChange={setLeaderboardPage}
+              itemLabel="agenti"
+            />
           </div>
         </div>
       )}
@@ -933,42 +1028,55 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
               {stats.topClients.length === 0 ? (
                 <p className="text-xs text-gray-400 py-6 text-center">Nessun ordine registrato per questo ambito.</p>
               ) : (
-                stats.topClients.slice(0, 6).map((item, idx) => (
-                  <div 
-                    key={item.client.id}
-                    className="flex items-center justify-between p-3 rounded-2xl bg-gray-50/70 border border-gray-100 hover:border-gray-200 transition-colors"
-                  >
-                    <div className="flex items-center gap-3 min-w-0 pr-2">
-                      <span className="w-6 h-6 rounded-full bg-gray-200 text-gray-700 text-xs font-black flex items-center justify-center shrink-0">
-                        {idx + 1}
-                      </span>
-                      <div className="min-w-0">
-                        <span className="text-xs font-bold text-gray-900 block truncate">
-                          {item.client.name}
+                paginatedTopClients.map((item, idx) => {
+                  const globalRank = (topClientsPage - 1) * 10 + idx + 1;
+                  return (
+                    <div 
+                      key={item.client.id}
+                      className="flex items-center justify-between p-3 rounded-2xl bg-gray-50/70 border border-gray-100 hover:border-gray-200 transition-colors"
+                    >
+                      <div className="flex items-center gap-3 min-w-0 pr-2">
+                        <span className={cn(
+                          "w-6 h-6 rounded-full text-xs font-black flex items-center justify-center shrink-0",
+                          globalRank === 1 ? "bg-amber-100 text-amber-800" : globalRank === 2 ? "bg-gray-200 text-gray-800" : globalRank === 3 ? "bg-orange-100 text-orange-800" : "bg-gray-100 text-gray-600"
+                        )}>
+                          {globalRank}
                         </span>
-                        <span className="text-[11px] text-gray-400 block truncate">
-                          {item.orderCount} ordini • {item.client.city || 'Sede non specificata'}
+                        <div className="min-w-0">
+                          <span className="text-xs font-bold text-gray-900 block truncate">
+                            {item.client.name}
+                          </span>
+                          <span className="text-[11px] text-gray-400 block truncate">
+                            {item.orderCount} ordini • {item.client.city || 'Sede non specificata'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <span className="text-sm font-black font-mono text-gray-900 block">
+                          € {item.totalSpent.toLocaleString('it-IT', { minimumFractionDigits: 2 })}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/ordine?clientId=${item.client.id}`)}
+                          className="text-[11px] font-bold text-[#5A5A40] hover:underline cursor-pointer"
+                        >
+                          Nuovo Ordine +
+                        </button>
                       </div>
                     </div>
-
-                    <div className="text-right shrink-0">
-                      <span className="text-sm font-black font-mono text-gray-900 block">
-                        € {item.totalSpent.toLocaleString('it-IT', { minimumFractionDigits: 2 })}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => navigate(`/ordine?clientId=${item.client.id}`)}
-                        className="text-[11px] font-bold text-[#5A5A40] hover:underline cursor-pointer"
-                      >
-                        Nuovo Ordine +
-                      </button>
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
+          <SectionPagination
+            currentPage={topClientsPage}
+            totalItems={stats.topClients.length}
+            pageSize={10}
+            onPageChange={setTopClientsPage}
+            itemLabel="clienti"
+          />
         </div>
 
         {/* Inactive Clients: "Da Riattivare" (60+ days without orders) */}
@@ -990,7 +1098,7 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
                   Ottimo lavoro! Tutti i clienti del portafoglio hanno ordinato di recente.
                 </p>
               ) : (
-                stats.inactiveClients.slice(0, 6).map((item) => (
+                paginatedInactiveClients.map((item) => (
                   <div 
                     key={item.client.id}
                     className="flex items-center justify-between p-3 rounded-2xl bg-amber-50/50 border border-amber-200/60"
@@ -1021,77 +1129,207 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
             </div>
           </div>
 
+          <SectionPagination
+            currentPage={inactiveClientsPage}
+            totalItems={stats.inactiveClients.length}
+            pageSize={10}
+            onPageChange={setInactiveClientsPage}
+            itemLabel="clienti inattivi"
+          />
+
           <p className="text-[11px] text-gray-400 mt-4 pt-3 border-t border-gray-100">
             Suggerimento: Contatta o programma una visita con questi clienti per proporre il riordino catalogo.
           </p>
         </div>
       </div>
 
+      {/* TOP CATEGORIE PRODOTTI VENDUTE */}
+      <div className="bg-white rounded-3xl p-6 border border-gray-200/80 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-[#5A5A40]/10 text-[#5A5A40] rounded-xl">
+              <Layers size={20} />
+            </div>
+            <div>
+              <h3 className="text-base font-black text-gray-900">Top Categorie Prodotti Vendute</h3>
+              <p className="text-xs text-gray-500">
+                Classifica categorie per fatturato generato, quota percentuale e volumi nel periodo selezionato.
+              </p>
+            </div>
+          </div>
+          <div className="text-xs font-bold text-gray-400">
+            {stats.categoryBreakdown.length} categorie rilevate
+          </div>
+        </div>
+
+        {stats.categoryBreakdown.length === 0 ? (
+          <p className="text-xs text-gray-400 py-8 text-center">Nessuna categoria rilevata nel periodo selezionato.</p>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              {paginatedCategories.map((cat, idx) => {
+                const globalRank = (categoriesPage - 1) * 10 + idx + 1;
+                return (
+                  <div
+                    key={cat.category}
+                    className="p-4 rounded-2xl bg-gray-50/70 border border-gray-100 hover:border-gray-200 hover:bg-gray-50 transition-all flex flex-col justify-between gap-3 shadow-2xs"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span
+                          className={cn(
+                            "w-6 h-6 rounded-full flex items-center justify-center text-xs font-black shrink-0",
+                            globalRank === 1
+                              ? "bg-amber-100 text-amber-800 border border-amber-200"
+                              : globalRank === 2
+                              ? "bg-slate-200 text-slate-800 border border-slate-300"
+                              : globalRank === 3
+                              ? "bg-orange-100 text-orange-800 border border-orange-200"
+                              : "bg-gray-100 text-gray-600 border border-gray-200"
+                          )}
+                        >
+                          {globalRank}
+                        </span>
+                        <div className="min-w-0">
+                          <h4 className="text-xs font-bold text-gray-900 truncate" title={cat.category}>
+                            {cat.category}
+                          </h4>
+                          <span className="text-[11px] text-gray-400 font-medium">
+                            {cat.qty} pz venduti
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <span className="text-sm font-black font-mono text-gray-900 block">
+                          € {cat.revenue.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                        <span className="inline-block text-[10px] font-black px-2 py-0.5 rounded-md bg-[#5A5A40]/10 text-[#5A5A40]">
+                          {cat.percentage}% del totale
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Progress Bar */}
+                    <div className="space-y-1">
+                      <div className="w-full h-2 bg-gray-200/80 rounded-full overflow-hidden">
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${Math.min(100, Math.max(2, cat.percentage))}%` }}
+                          transition={{ duration: 0.5, ease: 'easeOut' }}
+                          className="h-full bg-gradient-to-r from-[#5A5A40] to-[#7A7A58] rounded-full"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <SectionPagination
+              currentPage={categoriesPage}
+              totalItems={stats.categoryBreakdown.length}
+              pageSize={10}
+              onPageChange={setCategoriesPage}
+              itemLabel="categorie"
+            />
+          </div>
+        )}
+      </div>
+
       {/* Top Products & Payment Methods Breakdown */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {/* Top Products */}
-        <div className="bg-white rounded-3xl p-6 border border-gray-200/80 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3">
-            <div className="flex items-center gap-2">
-              <Package size={18} className="text-[#5A5A40]" />
-              <h3 className="text-base font-black text-gray-900">Articoli più Venduti</h3>
+        <div className="bg-white rounded-3xl p-6 border border-gray-200/80 shadow-xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3">
+              <div className="flex items-center gap-2">
+                <Package size={18} className="text-[#5A5A40]" />
+                <h3 className="text-base font-black text-gray-900">Articoli più Venduti</h3>
+              </div>
+              <span className="text-xs text-gray-400 font-bold">Nel periodo selezionato</span>
             </div>
-            <span className="text-xs text-gray-400 font-bold">Nel periodo selezionato</span>
+
+            {stats.topProducts.length === 0 ? (
+              <p className="text-xs text-gray-400 py-6 text-center">Nessun articolo venduto nel periodo selezionato.</p>
+            ) : (
+              <div className="space-y-3">
+                {paginatedTopProducts.map((p, idx) => {
+                  const globalRank = (topProductsPage - 1) * 10 + idx + 1;
+                  return (
+                    <div key={p.code} className="flex items-center justify-between text-xs p-2.5 rounded-xl hover:bg-gray-50 transition-colors">
+                      <div className="flex items-center gap-3 min-w-0 pr-2">
+                        <span className={cn(
+                          "w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-mono font-bold shrink-0",
+                          globalRank === 1 ? "bg-amber-100 text-amber-800" : globalRank === 2 ? "bg-gray-200 text-gray-800" : globalRank === 3 ? "bg-orange-100 text-orange-800" : "bg-gray-100 text-gray-500"
+                        )}>
+                          #{globalRank}
+                        </span>
+                        <div className="min-w-0">
+                          <span className="font-bold text-gray-900 block truncate">{p.description}</span>
+                          <span className="font-mono text-[10px] text-gray-400">Cod. {p.code}</span>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className="font-black font-mono text-gray-900 block">€ {p.revenue.toFixed(2)}</span>
+                        <span className="text-[11px] text-gray-500 font-bold">{p.qty} pz</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {stats.topProducts.length === 0 ? (
-            <p className="text-xs text-gray-400 py-6 text-center">Nessun articolo venduto nel periodo selezionato.</p>
-          ) : (
-            <div className="space-y-3">
-              {stats.topProducts.slice(0, 6).map((p, idx) => (
-                <div key={p.code} className="flex items-center justify-between text-xs p-2.5 rounded-xl hover:bg-gray-50 transition-colors">
-                  <div className="flex items-center gap-3 min-w-0 pr-2">
-                    <span className="font-mono font-bold text-gray-400 text-[11px]">#{idx + 1}</span>
-                    <div className="min-w-0">
-                      <span className="font-bold text-gray-900 block truncate">{p.description}</span>
-                      <span className="font-mono text-[10px] text-gray-400">Cod. {p.code}</span>
-                    </div>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <span className="font-black font-mono text-gray-900 block">€ {p.revenue.toFixed(2)}</span>
-                    <span className="text-[11px] text-gray-500 font-bold">{p.qty} pz</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <SectionPagination
+            currentPage={topProductsPage}
+            totalItems={stats.topProducts.length}
+            pageSize={10}
+            onPageChange={setTopProductsPage}
+            itemLabel="articoli"
+          />
         </div>
 
         {/* Payment Methods Breakdown */}
-        <div className="bg-white rounded-3xl p-6 border border-gray-200/80 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3">
-            <div className="flex items-center gap-2">
-              <CreditCard size={18} className="text-[#5A5A40]" />
-              <h3 className="text-base font-black text-gray-900">Ripartizione Pagamenti</h3>
+        <div className="bg-white rounded-3xl p-6 border border-gray-200/80 shadow-xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3">
+              <div className="flex items-center gap-2">
+                <CreditCard size={18} className="text-[#5A5A40]" />
+                <h3 className="text-base font-black text-gray-900">Ripartizione Pagamenti</h3>
+              </div>
+              <span className="text-xs text-gray-400 font-bold">Nel periodo selezionato</span>
             </div>
-            <span className="text-xs text-gray-400 font-bold">Nel periodo selezionato</span>
+
+            {stats.paymentBreakdown.length === 0 ? (
+              <p className="text-xs text-gray-400 py-6 text-center">Nessun pagamento registrato nel periodo selezionato.</p>
+            ) : (
+              <div className="space-y-3">
+                {paginatedPaymentBreakdown.map((pm) => (
+                  <div key={pm.name} className="space-y-1">
+                    <div className="flex justify-between text-xs font-bold">
+                      <span className="text-gray-800">{pm.name} ({pm.count} ordini)</span>
+                      <span className="font-mono text-gray-900">€ {pm.total.toFixed(2)} ({pm.percentage}%)</span>
+                    </div>
+                    <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-[#5A5A40] rounded-full transition-all duration-500" 
+                        style={{ width: `${pm.percentage}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          {stats.paymentBreakdown.length === 0 ? (
-            <p className="text-xs text-gray-400 py-6 text-center">Nessun pagamento registrato nel periodo selezionato.</p>
-          ) : (
-            <div className="space-y-3">
-              {stats.paymentBreakdown.slice(0, 6).map((pm) => (
-                <div key={pm.name} className="space-y-1">
-                  <div className="flex justify-between text-xs font-bold">
-                    <span className="text-gray-800">{pm.name} ({pm.count} ordini)</span>
-                    <span className="font-mono text-gray-900">€ {pm.total.toFixed(2)} ({pm.percentage}%)</span>
-                  </div>
-                  <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
-                    <div 
-                      className="h-full bg-[#5A5A40] rounded-full" 
-                      style={{ width: `${pm.percentage}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <SectionPagination
+            currentPage={paymentBreakdownPage}
+            totalItems={stats.paymentBreakdown.length}
+            pageSize={10}
+            onPageChange={setPaymentBreakdownPage}
+            itemLabel="metodi"
+          />
         </div>
       </div>
 
@@ -1171,26 +1409,27 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
         </div>
 
         {/* Orders Table */}
-        <div className="overflow-x-auto">
-          {filteredOrders.length === 0 ? (
-            <div className="text-center py-12 text-gray-400">
-              <FileText size={36} className="mx-auto text-gray-300 mb-2" />
-              <p className="text-sm font-bold text-gray-700">Nessun ordine trovato con questi criteri</p>
-            </div>
-          ) : (
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-gray-200 text-gray-400 font-bold uppercase tracking-wider text-[10px]">
-                  <th className="py-3 px-3">Data / N.</th>
-                  <th className="py-3 px-3">Cliente</th>
-                  <th className="py-3 px-3">Agente</th>
-                  <th className="py-3 px-3">Stato</th>
-                  <th className="py-3 px-3 text-right">Totale</th>
-                  <th className="py-3 px-3 text-right">Azioni</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {filteredOrders.map(order => {
+        {filteredOrders.length === 0 ? (
+          <div className="text-center py-12 text-gray-400">
+            <FileText size={36} className="mx-auto text-gray-300 mb-2" />
+            <p className="text-sm font-bold text-gray-700">Nessun ordine trovato con questi criteri</p>
+          </div>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-gray-200 text-gray-400 font-bold uppercase tracking-wider text-[10px]">
+                    <th className="py-3 px-3">Data / N.</th>
+                    <th className="py-3 px-3">Cliente</th>
+                    <th className="py-3 px-3">Agente</th>
+                    <th className="py-3 px-3">Stato</th>
+                    <th className="py-3 px-3 text-right">Totale</th>
+                    <th className="py-3 px-3 text-right">Azioni</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {paginatedOrders.map(order => {
                   const isDraft = order.status === 'Bozza';
                   return (
                     <tr key={order.id} className="hover:bg-gray-50/80 transition-colors">
@@ -1334,8 +1573,16 @@ export default function AgentStats({ user, currentUser }: { user?: any; currentU
                 })}
               </tbody>
             </table>
-          )}
-        </div>
+          </div>
+          <SectionPagination
+            currentPage={ordersPage}
+            totalItems={filteredOrders.length}
+            pageSize={10}
+            onPageChange={setOrdersPage}
+            itemLabel="ordini"
+          />
+        </>
+        )}
       </div>
 
       {/* Order Details Modal */}
