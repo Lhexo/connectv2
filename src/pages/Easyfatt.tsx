@@ -356,11 +356,29 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const [ordersXmlLogs, setOrdersXmlLogs] = useState<{
     success: boolean;
     importedCount: number;
+    skippedDuplicatesCount?: number;
     skippedOrdersCount: number;
     skippedRowsCount: number;
     autoCreatedPaymentMethods: number;
     logs: { level: 'success' | 'warning' | 'info' | 'error'; message: string }[];
   } | null>(null);
+
+  // States for Universal Import Visual Feedback Modal (Products & Clients)
+  const [importReportModal, setImportReportModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    type: 'products' | 'clients' | 'products-xlsx';
+    stats: {
+      total: number;
+      imported: number;
+      updated: number;
+      deleted?: number;
+      ignored?: number;
+    };
+    logs: Array<{ level: 'success' | 'warning' | 'info' | 'error'; message: string }>;
+  } | null>(null);
+  const [importLogSearch, setImportLogSearch] = useState('');
+  const [isExporting, setIsExporting] = useState<string | null>(null);
   
   // New order form states
   const [orderForm, setOrderForm] = useState({
@@ -846,12 +864,48 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     }
   }, [paymentMethods, defaultPayment]);
 
+  // Helper safely fetch JSON with auth header and content-type checking
+  const fetchJsonSafe = async <T = any>(
+    url: string,
+    options?: RequestInit
+  ): Promise<{ ok: boolean; data: T | null; error?: string; status: number }> => {
+    try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      const headers = new Headers(options?.headers || {});
+      if (token && !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+      const res = await fetch(url, { ...options, headers });
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok) {
+        let errDetail = `Status ${res.status}`;
+        if (contentType.includes('application/json')) {
+          try {
+            const errBody = await res.json();
+            if (errBody?.error || errBody?.message) {
+              errDetail = errBody.error || errBody.message;
+            }
+          } catch {}
+        }
+        return { ok: false, data: null, error: errDetail, status: res.status };
+      }
+      if (!contentType.includes('application/json')) {
+        console.warn(`[Easyfatt] Expected JSON from ${url} but received "${contentType}"`);
+        return { ok: false, data: null, error: `Risposta non JSON (${contentType})`, status: res.status };
+      }
+      const data = await res.json();
+      return { ok: true, data, status: res.status };
+    } catch (err: any) {
+      console.error(`[Easyfatt] Network/parsing error for ${url}:`, err);
+      return { ok: false, data: null, error: err?.message || 'Errore di rete', status: 0 };
+    }
+  };
+
   const fetchEasyfattLogs = async () => {
     try {
-      const res = await fetch('/api/easyfatt/logs');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.logs) setEasyfattLogs(data.logs);
+      const res = await fetchJsonSafe<{ logs?: any[] }>('/api/easyfatt/logs');
+      if (res.ok && res.data?.logs) {
+        setEasyfattLogs(res.data.logs);
       }
     } catch (err) {
       console.error('Error fetching easyfatt logs:', err);
@@ -860,10 +914,12 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const handleClearEasyfattLogs = async () => {
     try {
-      const res = await fetch('/api/easyfatt/logs/clear', { method: 'POST' });
+      const res = await fetchJsonSafe('/api/easyfatt/logs/clear', { method: 'POST' });
       if (res.ok) {
         showStatus('Log di diagnostica ripuliti con successo!', 'success');
         fetchEasyfattLogs();
+      } else {
+        showStatus(res.error || 'Errore durante la pulizia dei log', 'error');
       }
     } catch (err) {
       console.error('Error clearing easyfatt logs:', err);
@@ -872,9 +928,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const fetchEasyfattSettings = async () => {
     try {
-      const res = await fetch('/api/easyfatt/settings');
-      if (res.ok) {
-        const data = await res.json();
+      const res = await fetchJsonSafe<any>('/api/easyfatt/settings');
+      if (res.ok && res.data) {
+        const data = res.data;
         if (data.username) setEasyfattUsername(data.username);
         if (data.password) setEasyfattPassword(data.password);
         if (data.default_payment) setDefaultPayment(data.default_payment);
@@ -893,7 +949,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/easyfatt/settings', {
+      const res = await fetchJsonSafe<any>('/api/easyfatt/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -911,8 +967,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
       if (res.ok) {
         showStatus('Impostazioni Easyfatt salvate con successo!', 'success');
       } else {
-        const err = await res.json();
-        showStatus(err.error || 'Errore durante il salvataggio delle impostazioni', 'error');
+        showStatus(res.error || 'Errore durante il salvataggio delle impostazioni', 'error');
       }
     } catch (err) {
       console.error('Error saving easyfatt settings:', err);
@@ -923,7 +978,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const handleUpdateCommissionFilter = async (filter: 'all' | 'only_with_commission' | 'hide_with_commission') => {
     setProductCommissionFilter(filter);
     try {
-      const res = await fetch('/api/easyfatt/settings', {
+      const res = await fetchJsonSafe<any>('/api/easyfatt/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -953,18 +1008,10 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const fetchCompanyHeader = async () => {
     try {
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      const res = await fetch('/api/easyfatt/company-header', {
-        headers: {
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data && (data.company_name || data.company_vat_code)) {
-          setCompanyHeader(prev => ({ ...prev, ...data }));
-          setCachedCompanyHeader(data);
-        }
+      const res = await fetchJsonSafe<any>('/api/easyfatt/company-header');
+      if (res.ok && res.data && (res.data.company_name || res.data.company_vat_code)) {
+        setCompanyHeader(prev => ({ ...prev, ...res.data }));
+        setCachedCompanyHeader(res.data);
       }
     } catch (err) {
       console.error('Error fetching company header:', err);
@@ -975,27 +1022,21 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     e.preventDefault();
     setSavingCompanyHeader(true);
     try {
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      const res = await fetch('/api/easyfatt/company-header', {
+      const res = await fetchJsonSafe<any>('/api/easyfatt/company-header', {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(companyHeader)
       });
       if (res.ok) {
-        const data = await res.json();
-        if (data?.data) {
-          setCompanyHeader(prev => ({ ...prev, ...data.data }));
-          setCachedCompanyHeader(data.data);
+        if (res.data?.data) {
+          setCompanyHeader(prev => ({ ...prev, ...res.data.data }));
+          setCachedCompanyHeader(res.data.data);
         } else {
           setCachedCompanyHeader(companyHeader);
         }
         showStatus('Intestazione aziendale e logo salvati con successo!', 'success');
       } else {
-        const errData = await res.json().catch(() => ({}));
-        showStatus('Errore durante il salvataggio: ' + (errData.error || 'Errore generico'), 'error');
+        showStatus('Errore durante il salvataggio: ' + (res.error || 'Errore generico'), 'error');
       }
     } catch (err: any) {
       showStatus('Errore di connessione: ' + err.message, 'error');
@@ -1064,7 +1105,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const handleUpdateLinkFilter = async (newFilter: 'all' | 'only_with_link' | 'hide_with_link') => {
     setProductLinkFilter(newFilter);
     try {
-      const res = await fetch('/api/easyfatt/settings', {
+      const res = await fetchJsonSafe<any>('/api/easyfatt/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -1086,6 +1127,8 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
           hide_with_link: 'Nascosti a tutti gli utenti i prodotti con Link Scheda'
         };
         showStatus(`Filtro applicato: ${labelMap[newFilter]}`, 'success');
+      } else {
+        showStatus(res.error || 'Errore durante l\'aggiornamento del filtro', 'error');
       }
     } catch (err) {
       console.error('Error updating link filter:', err);
@@ -1141,10 +1184,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   // Fetch functions
   const fetchProducts = async () => {
     try {
-      const res = await fetch('/api/easyfatt/products');
-      if (res.ok) {
-        const data = await res.json();
-        setProducts(data);
+      const res = await fetchJsonSafe<Product[]>('/api/easyfatt/products');
+      if (res.ok && res.data && Array.isArray(res.data)) {
+        setProducts(res.data);
       }
     } catch (err) {
       console.error('Error fetching products:', err);
@@ -1153,10 +1195,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const fetchClients = async () => {
     try {
-      const res = await fetch('/api/clients');
-      if (res.ok) {
-        const data = await res.json();
-        setClients(data);
+      const res = await fetchJsonSafe<Client[]>('/api/clients');
+      if (res.ok && res.data && Array.isArray(res.data)) {
+        setClients(res.data);
       }
     } catch (err) {
       console.error('Error fetching clients:', err);
@@ -1166,9 +1207,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const fetchAgentOrders = useCallback(async () => {
     setIsAgentOrdersLoading(true);
     try {
-      const res = await fetch(`/api/easyfatt/orders?${agentOrdersPagination.queryString}`);
-      if (res.ok) {
-        const json = await res.json();
+      const res = await fetchJsonSafe<any>(`/api/easyfatt/orders?${agentOrdersPagination.queryString}`);
+      if (res.ok && res.data) {
+        const json = res.data;
         if (json && json.data && json.pagination) {
           setAgentOrdersData(json.data);
           agentOrdersPagination.updatePagination(json.pagination);
@@ -1186,9 +1227,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
   const fetchAdminOrders = useCallback(async () => {
     setIsAdminOrdersLoading(true);
     try {
-      const res = await fetch(`/api/easyfatt/orders?${adminOrdersPagination.queryString}`);
-      if (res.ok) {
-        const json = await res.json();
+      const res = await fetchJsonSafe<any>(`/api/easyfatt/orders?${adminOrdersPagination.queryString}`);
+      if (res.ok && res.data) {
+        const json = res.data;
         if (json && json.data && json.pagination) {
           setAdminOrdersData(json.data);
           adminOrdersPagination.updatePagination(json.pagination);
@@ -1213,9 +1254,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const fetchOrders = async () => {
     try {
-      const res = await fetch('/api/easyfatt/orders');
-      if (res.ok) {
-        const data = await res.json();
+      const res = await fetchJsonSafe<any>('/api/easyfatt/orders');
+      if (res.ok && res.data) {
+        const data = res.data;
         if (data && Array.isArray(data.data)) {
           setOrders(data.data);
         } else if (Array.isArray(data)) {
@@ -1231,10 +1272,9 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const fetchPaymentMethods = async () => {
     try {
-      const res = await fetch('/api/payment-methods');
-      if (res.ok) {
-        const data = await res.json();
-        setPaymentMethods(data);
+      const res = await fetchJsonSafe<any[]>('/api/payment-methods');
+      if (res.ok && res.data && Array.isArray(res.data)) {
+        setPaymentMethods(res.data);
       }
     } catch (err) {
       console.error('Error fetching payment methods:', err);
@@ -1268,7 +1308,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     }
 
     try {
-      const res = await fetch(url, {
+      const res = await fetchJsonSafe<any>(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1280,9 +1320,8 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         })
       });
 
-      const data = await res.json();
       if (res.ok) {
-        showStatus(data.message || (editingPmId ? 'Metodo di pagamento aggiornato' : 'Metodo di pagamento creato'));
+        showStatus(res.data?.message || (editingPmId ? 'Metodo di pagamento aggiornato' : 'Metodo di pagamento creato'));
         setPmForm({
           id: null,
           name: '',
@@ -1295,7 +1334,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         setEditingPmId(null);
         fetchPaymentMethods();
       } else {
-        showStatus(data.error || 'Errore durante il salvataggio del metodo di pagamento', 'error');
+        showStatus(res.error || 'Errore durante il salvataggio del metodo di pagamento', 'error');
       }
     } catch (err) {
       showStatus('Si è verificato un errore di rete', 'error');
@@ -1306,13 +1345,12 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const handleDeletePaymentMethod = async (id: number) => {
     try {
-      const res = await fetch(`/api/admin/payment-methods/${id}`, { method: 'DELETE' });
-      const data = await res.json();
+      const res = await fetchJsonSafe<any>(`/api/admin/payment-methods/${id}`, { method: 'DELETE' });
       if (res.ok) {
-        showStatus(data.message || 'Metodo di pagamento eliminato con successo');
+        showStatus(res.data?.message || 'Metodo di pagamento eliminato con successo');
         fetchPaymentMethods();
       } else {
-        showStatus(data.error || 'Impossibile eliminare il metodo di pagamento', 'error');
+        showStatus(res.error || 'Impossibile eliminare il metodo di pagamento', 'error');
       }
     } catch (err) {
       showStatus('Errore durante l\'eliminazione del metodo di pagamento', 'error');
@@ -1327,7 +1365,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     const url = editingProduct ? `/api/easyfatt/products/${editingProduct.id}` : '/api/easyfatt/products';
     
     try {
-      const res = await fetch(url, {
+      const res = await fetchJsonSafe<any>(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1355,7 +1393,6 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
           online_customized: productForm.online_customized ? 1 : 0
         })
       });
-      const data = await res.json();
       if (res.ok) {
         showStatus(editingProduct ? 'Prodotto aggiornato con successo' : 'Prodotto inserito con successo');
         setIsProductModalOpen(false);
@@ -1368,7 +1405,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         });
         fetchProducts();
       } else {
-        showStatus(data.error || 'Errore durante il salvataggio del prodotto', 'error');
+        showStatus(res.error || 'Errore durante il salvataggio del prodotto', 'error');
       }
     } catch (err) {
       showStatus('Si è verificato un errore di rete', 'error');
@@ -1379,12 +1416,12 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const handleDeleteProduct = async (id: number) => {
     try {
-      const res = await fetch(`/api/easyfatt/products/${id}`, { method: 'DELETE' });
+      const res = await fetchJsonSafe<any>(`/api/easyfatt/products/${id}`, { method: 'DELETE' });
       if (res.ok) {
         showStatus('Prodotto eliminato con successo');
         fetchProducts();
       } else {
-        showStatus('Impossibile eliminare il prodotto', 'error');
+        showStatus(res.error || 'Impossibile eliminare il prodotto', 'error');
       }
     } catch (err) {
       showStatus('Errore durante l\'eliminazione del prodotto', 'error');
@@ -1649,7 +1686,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         : '/api/easyfatt/orders';
       const method = editingOrderId ? 'PUT' : 'POST';
 
-      const res = await fetch(url, {
+      const res = await fetchJsonSafe<any>(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -1658,7 +1695,6 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
           items: (orderForm.items || []).map(it => ({ ...it, stock: true }))
         })
       });
-      const data = await res.json();
       if (res.ok) {
         showStatus(
           status === 'Bozza' 
@@ -1683,7 +1719,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         fetchOrders();
         fetchProducts(); // Refresh stock quantities
       } else {
-        showStatus(data.error || 'Errore durante la creazione dell\'ordine', 'error');
+        showStatus(res.error || 'Errore durante la creazione dell\'ordine', 'error');
       }
     } catch (err) {
       showStatus('Errore di connessione al server', 'error');
@@ -1791,7 +1827,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     if (!orderToDelete) return;
     setIsDeletingOrder(true);
     try {
-      const res = await fetch(`/api/easyfatt/orders/${orderToDelete.id}`, { method: 'DELETE' });
+      const res = await fetchJsonSafe<any>(`/api/easyfatt/orders/${orderToDelete.id}`, { method: 'DELETE' });
       if (res.ok) {
         showStatus(`Ordine #${orderToDelete.number || orderToDelete.id} eliminato con successo!`, 'success');
         if (selectedOrder && selectedOrder.id === orderToDelete.id) {
@@ -1802,8 +1838,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         fetchOrders();
         fetchAdminOrders();
       } else {
-        const data = await res.json().catch(() => ({}));
-        showStatus(data.error || 'Impossibile cancellare l\'ordine', 'error');
+        showStatus(res.error || 'Impossibile cancellare l\'ordine', 'error');
       }
     } catch (err) {
       showStatus('Errore durante la cancellazione dell\'ordine', 'error');
@@ -1823,14 +1858,13 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
       return;
     }
     try {
-      const res = await fetch(`/api/easyfatt/orders/${id}`, { method: 'DELETE' });
+      const res = await fetchJsonSafe<any>(`/api/easyfatt/orders/${id}`, { method: 'DELETE' });
       if (res.ok) {
         showStatus('Ordine cancellato con successo dal sistema', 'success');
         fetchOrders();
         fetchAdminOrders();
       } else {
-        const data = await res.json().catch(() => ({}));
-        showStatus(data.error || 'Impossibile cancellare l\'ordine', 'error');
+        showStatus(res.error || 'Impossibile cancellare l\'ordine', 'error');
       }
     } catch (err) {
       showStatus('Errore durante la cancellazione dell\'ordine', 'error');
@@ -1850,7 +1884,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     }
     setIsSavingOrderNumber(true);
     try {
-      const res = await fetch(`/api/easyfatt/orders/${orderToEditNumber.id}/number`, {
+      const res = await fetchJsonSafe<any>(`/api/easyfatt/orders/${orderToEditNumber.id}/number`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ number: newOrderNumberInput.trim() })
@@ -1864,8 +1898,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         fetchOrders();
         fetchAdminOrders();
       } else {
-        const err = await res.json().catch(() => ({}));
-        showStatus(err.error || 'Impossibile aggiornare la numerazione', 'error');
+        showStatus(res.error || 'Impossibile aggiornare la numerazione', 'error');
       }
     } catch (e: any) {
       showStatus('Errore durante il salvataggio della numerazione', 'error');
@@ -1880,7 +1913,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     try {
       let successCount = 0;
       for (const id of selectedOrderIds) {
-        const res = await fetch(`/api/easyfatt/orders/${id}`, { method: 'DELETE' });
+        const res = await fetchJsonSafe<any>(`/api/easyfatt/orders/${id}`, { method: 'DELETE' });
         if (res.ok) successCount++;
       }
       showStatus(`${successCount} ordini eliminati definitivamente con successo!`, 'success');
@@ -1897,7 +1930,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
 
   const handleTransmitDraft = async (id: number) => {
     try {
-      const res = await fetch(`/api/easyfatt/orders/${id}/status`, {
+      const res = await fetchJsonSafe<any>(`/api/easyfatt/orders/${id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'Nuovo' })
@@ -1906,8 +1939,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
         showStatus('Ordine trasmesso con successo!', 'success');
         fetchOrders();
       } else {
-        const err = await res.json();
-        showStatus(err.error || 'Impossibile trasmettere l\'ordine', 'error');
+        showStatus(res.error || 'Impossibile trasmettere l\'ordine', 'error');
       }
     } catch (err) {
       showStatus('Errore durante la trasmissione dell\'ordine', 'error');
@@ -1932,39 +1964,78 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     }
   };
 
-  // Export functions
+  // Export helper with direct blob download and real-time visual feedback
+  const handleExportWithFeedback = async (url: string, defaultFilename: string, entityLabel: string) => {
+    setIsExporting(entityLabel);
+    showStatus(`Generazione file ${entityLabel} in corso... Attendere.`);
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Errore durante l'esportazione (HTTP ${response.status})`);
+      }
+
+      // Check count from custom header
+      const countHeader = response.headers.get('x-total-count');
+      const count = countHeader ? parseInt(countHeader, 10) : undefined;
+
+      // Extract filename from Content-Disposition if present
+      let filename = defaultFilename;
+      const disposition = response.headers.get('content-disposition');
+      if (disposition && disposition.includes('filename=')) {
+        const match = disposition.match(/filename=["']?([^"';]+)["']?/);
+        if (match && match[1]) filename = match[1].trim();
+      }
+
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+
+      const countMsg = count !== undefined ? `${count} elementi esportati` : 'Esportazione completata';
+      showStatus(`File "${filename}" scaricato con successo! (${countMsg})`, 'success');
+    } catch (err: any) {
+      console.error('Export error:', err);
+      showStatus(err.message || 'Errore durante il download del file esportato', 'error');
+    } finally {
+      setIsExporting(null);
+    }
+  };
+
+  // Export functions with real-time visual feedback
   const handleExportClients = () => {
-    window.open('/api/easyfatt/export-clients', '_blank');
-    showStatus('Anagrafiche esportate in formato Easyfatt-XML');
+    handleExportWithFeedback('/api/easyfatt/export-clients', 'anagrafica_clienti_easyfatt.xml', 'Anagrafiche Clienti (XML)');
   };
 
   const handleExportClientsXlsx = () => {
-    window.open('/api/easyfatt/export-clients?format=xlsx', '_blank');
-    showStatus('Anagrafiche esportate in formato Easyfatt-XLSX');
+    handleExportWithFeedback('/api/easyfatt/export-clients?format=xlsx', 'anagrafica_clienti_easyfatt.xlsx', 'Anagrafiche Clienti (Excel)');
   };
 
   const handleExportProducts = () => {
-    window.open('/api/easyfatt/export-products', '_blank');
-    showStatus('Catalogo prodotti esportato in formato Easyfatt-XML');
+    handleExportWithFeedback('/api/easyfatt/export-products', 'catalogo_prodotti_easyfatt.xml', 'Catalogo Prodotti (XML)');
   };
 
-  const handleExportSelectedOrders = () => {
+  const handleExportSelectedOrders = async () => {
     if (selectedOrderIds.length === 0) {
       showStatus('Seleziona almeno un ordine da trasmettere', 'error');
       return;
     }
-    window.open(`/api/easyfatt/export-orders?ids=${selectedOrderIds.join(',')}`, '_blank');
-    showStatus(`Esportati ${selectedOrderIds.length} ordini in formato Easyfatt-XML per l'importazione`);
+    const ids = selectedOrderIds.join(',');
+    await handleExportWithFeedback(`/api/easyfatt/export-orders?ids=${ids}`, `ordini_easyfatt_${new Date().toISOString().split('T')[0]}.xml`, `${selectedOrderIds.length} Ordini Clienti`);
     setSelectedOrderIds([]);
-    setTimeout(fetchOrders, 1500); // refresh orders statuses (will be updated to "Esportato")
+    fetchOrders();
+    fetchAdminOrders();
   };
 
   const handleTestDownloadOrders = () => {
-    window.open('/api/easyfatt/download-orders?appver=2', '_blank');
-    showStatus('Anteprima tracciato XML ordini generata');
+    handleExportWithFeedback('/api/easyfatt/download-orders?appver=2', 'anteprima_ordini_easyfatt.xml', 'Anteprima Tracciato Ordini (XML)');
   };
 
-  // Import file processing
+  // Import file processing with rich summary modal & audit logs
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>, type: 'products' | 'clients') => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1976,17 +2047,35 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     const url = type === 'products' ? '/api/easyfatt/import-products' : '/api/easyfatt/import-clients';
 
     try {
-      const res = await fetch(url, {
+      const res = await fetchJsonSafe<any>(url, {
         method: 'POST',
+        headers: {
+          'Accept': 'application/json'
+        },
         body: formData
       });
-      const data = await res.json();
       if (res.ok) {
-        showStatus(`Importazione completata con successo! Nuovi inseriti: ${data.imported || 0}, Aggiornati: ${data.updated || 0}`);
+        const data = res.data;
+        const total = data?.total || ((data?.imported || 0) + (data?.updated || 0) + (data?.deleted || 0));
+        setImportReportModal({
+          isOpen: true,
+          title: type === 'products' ? 'Esito Importazione Catalogo Prodotti (XML)' : 'Esito Importazione Anagrafiche Clienti (XML/XLSX)',
+          type,
+          stats: {
+            total,
+            imported: data?.imported || 0,
+            updated: data?.updated || 0,
+            deleted: data?.deleted || 0
+          },
+          logs: data?.logs && Array.isArray(data.logs) && data.logs.length > 0 ? data.logs : [
+            { level: 'success', message: `Elaborazione completata: ${data?.imported || 0} nuovi record inseriti, ${data?.updated || 0} aggiornati.` }
+          ]
+        });
+        showStatus(`Importazione ${type === 'products' ? 'catalogo' : 'clienti'} completata! Inseriti: ${data?.imported || 0}, Aggiornati: ${data?.updated || 0}`, 'success');
         if (type === 'products') fetchProducts();
         else fetchClients();
       } else {
-        showStatus(data.error || 'Errore durante l\'importazione dei dati XML', 'error');
+        showStatus(res.error || 'Errore durante l\'importazione dei dati XML', 'error');
       }
     } catch (err) {
       showStatus('Errore di connessione o formato non valido', 'error');
@@ -2005,20 +2094,34 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     formData.append('file', file);
 
     try {
-      const res = await fetch('/api/easyfatt/import-products-xlsx', {
+      const res = await fetchJsonSafe<any>('/api/easyfatt/import-products-xlsx', {
         method: 'POST',
+        headers: {
+          'Accept': 'application/json'
+        },
         body: formData
       });
-      const data = await res.json();
       if (res.ok) {
-        let msg = `Importazione Excel completata! Articoli aggiornati/arricchiti: ${data.updated || 0}. Righe senza corrispondenza (ignorate): ${data.ignored || 0}.`;
-        if (data.createdColumns && data.createdColumns.length > 0) {
-          msg += ` Nuovi campi creati nel CRM: ${data.createdColumns.join(', ')}.`;
-        }
-        showStatus(msg, 'success');
+        const data = res.data;
+        const total = data?.total || ((data?.updated || 0) + (data?.ignored || 0));
+        setImportReportModal({
+          isOpen: true,
+          title: 'Esito Arricchimento Catalogo da Excel (.xlsx)',
+          type: 'products-xlsx',
+          stats: {
+            total,
+            imported: 0,
+            updated: data?.updated || 0,
+            ignored: data?.ignored || 0
+          },
+          logs: data?.logs && Array.isArray(data.logs) && data.logs.length > 0 ? data.logs : [
+            { level: 'success', message: `Importazione completata: ${data?.updated || 0} articoli aggiornati/arricchiti, ${data?.ignored || 0} righe ignorate.` }
+          ]
+        });
+        showStatus(`Importazione Excel completata! Articoli aggiornati: ${data?.updated || 0}`, 'success');
         fetchProducts();
       } else {
-        showStatus(data.error || 'Errore durante l\'importazione del file Excel (.xlsx)', 'error');
+        showStatus(res.error || 'Errore durante l\'importazione del file Excel (.xlsx)', 'error');
       }
     } catch (err) {
       showStatus('Errore di connessione o formato file non valido', 'error');
@@ -2038,18 +2141,26 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
     formData.append('file', file);
 
     try {
-      const res = await fetch('/api/easyfatt/import-orders-xml', {
+      const res = await fetchJsonSafe<any>('/api/easyfatt/import-orders-xml', {
         method: 'POST',
         body: formData
       });
-      const data = await res.json();
       if (res.ok) {
-        setOrdersXmlLogs(data);
+        setOrdersXmlLogs(res.data);
         setIsOrdersXmlModalOpen(true);
-        showStatus(`Importazione ordini completata! ${data.importedCount || 0} ordini elaborati con successo.`, 'success');
+        const imported = res.data?.importedCount || 0;
+        const dupes = res.data?.skippedDuplicatesCount || 0;
+        const newPms = res.data?.autoCreatedPaymentMethods || 0;
+        const nonCatalogRows = res.data?.skippedRowsCount || 0;
+        let toastMsg = `Importazione ordini completata! ${imported} importati con successo.`;
+        if (dupes > 0) toastMsg += ` ${dupes} duplicati già presenti saltati.`;
+        if (nonCatalogRows > 0) toastMsg += ` ${nonCatalogRows} righe fuori catalogo conteggiate nel totale.`;
+        if (newPms > 0) toastMsg += ` ${newPms} nuovi metodi di pagamento registrati.`;
+        showStatus(toastMsg, 'success');
         fetchOrders();
+        fetchPaymentMethods();
       } else {
-        showStatus(data.error || 'Errore durante l\'importazione del file XML ordini', 'error');
+        showStatus(res.error || 'Errore durante l\'importazione del file XML ordini', 'error');
       }
     } catch (err) {
       showStatus('Errore di connessione o formato XML ordini non valido', 'error');
@@ -5225,26 +5336,54 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                     <div className="space-y-2.5 pt-4 border-t border-gray-100">
                       <button
                         onClick={() => productFileInputRef.current?.click()}
-                        disabled={loading}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-[#5A5A40] hover:bg-[#4E4E37] text-white rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer"
+                        disabled={loading || !!isExporting}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-[#5A5A40] hover:bg-[#4E4E37] text-white rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer disabled:opacity-50"
                       >
-                        <Upload size={16} />
-                        Carica File XML Prodotti (Sincronizzazione Completa)
+                        {loading ? (
+                          <>
+                            <RefreshCw size={16} className="animate-spin" />
+                            <span>Importazione XML Prodotti in corso...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Upload size={16} />
+                            <span>Carica File XML Prodotti (Sincronizzazione Completa)</span>
+                          </>
+                        )}
                       </button>
                       <button
                         onClick={() => productXlsxFileInputRef.current?.click()}
-                        disabled={loading}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer"
+                        disabled={loading || !!isExporting}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer disabled:opacity-50"
                       >
-                        <FileSpreadsheet size={16} />
-                        Carica File XLSX Prodotti (Aggiornamento / Arricchimento Catalogo)
+                        {loading ? (
+                          <>
+                            <RefreshCw size={16} className="animate-spin" />
+                            <span>Importazione Excel in corso...</span>
+                          </>
+                        ) : (
+                          <>
+                            <FileSpreadsheet size={16} />
+                            <span>Carica File XLSX Prodotti (Aggiornamento / Arricchimento Catalogo)</span>
+                          </>
+                        )}
                       </button>
                       <button
                         onClick={handleExportProducts}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-[#F9FAFB] text-[#111827] border border-[#E5E7EB] rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer"
+                        disabled={loading || !!isExporting}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-[#F9FAFB] text-[#111827] border border-[#E5E7EB] rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer disabled:opacity-50"
                       >
-                        <Download size={16} />
-                        Scarica Catalogo XML Easyfatt
+                        {isExporting === 'Catalogo Prodotti (XML)' ? (
+                          <>
+                            <RefreshCw size={16} className="animate-spin text-[#5A5A40]" />
+                            <span className="text-[#5A5A40]">Generazione catalogo XML in corso...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Download size={16} />
+                            <span>Scarica Catalogo XML Easyfatt</span>
+                          </>
+                        )}
                       </button>
                     </div>
                   </div>
@@ -5284,25 +5423,54 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                     <div className="space-y-2.5 pt-4 border-t border-gray-100">
                       <button
                         onClick={() => clientFileInputRef.current?.click()}
-                        disabled={loading}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-[#5A5A40] hover:bg-[#4E4E37] text-white rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer"
+                        disabled={loading || !!isExporting}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-[#5A5A40] hover:bg-[#4E4E37] text-white rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer disabled:opacity-50"
                       >
-                        <Upload size={16} />
-                        Carica File XML / XLSX Clienti
+                        {loading ? (
+                          <>
+                            <RefreshCw size={16} className="animate-spin" />
+                            <span>Importazione Anagrafiche Clienti in corso...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Upload size={16} />
+                            <span>Carica File XML / XLSX Clienti</span>
+                          </>
+                        )}
                       </button>
                       <button
                         onClick={handleExportClients}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-[#F9FAFB] text-[#111827] border border-[#E5E7EB] rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer"
+                        disabled={loading || !!isExporting}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-[#F9FAFB] text-[#111827] border border-[#E5E7EB] rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer disabled:opacity-50"
                       >
-                        <Download size={16} />
-                        Scarica Clienti XML Easyfatt
+                        {isExporting === 'Anagrafiche Clienti (XML)' ? (
+                          <>
+                            <RefreshCw size={16} className="animate-spin text-[#5A5A40]" />
+                            <span className="text-[#5A5A40]">Generazione clienti XML in corso...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Download size={16} />
+                            <span>Scarica Clienti XML Easyfatt</span>
+                          </>
+                        )}
                       </button>
                       <button
                         onClick={handleExportClientsXlsx}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-[#F9FAFB] text-[#111827] border border-[#E5E7EB] rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer"
+                        disabled={loading || !!isExporting}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-[#F9FAFB] text-[#111827] border border-[#E5E7EB] rounded-xl text-xs font-bold transition-all active:scale-95 shadow-xs cursor-pointer disabled:opacity-50"
                       >
-                        <Download size={16} />
-                        Scarica Clienti XLSX Easyfatt (Struttura Originale)
+                        {isExporting === 'Anagrafiche Clienti (Excel)' ? (
+                          <>
+                            <RefreshCw size={16} className="animate-spin text-[#5A5A40]" />
+                            <span className="text-[#5A5A40]">Generazione clienti Excel in corso...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Download size={16} />
+                            <span>Scarica Clienti XLSX Easyfatt (Struttura Originale)</span>
+                          </>
+                        )}
                       </button>
                     </div>
                   </div>
@@ -5638,7 +5806,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                         if (selectedOrderIds.length === 0) return;
                         if (!confirm(`Vuoi segnare come "Nuovo" (pronto al download) gli ${selectedOrderIds.length} ordini selezionati?`)) return;
                         for (const id of selectedOrderIds) {
-                          await fetch(`/api/easyfatt/orders/${id}/status`, {
+                          await fetchJsonSafe(`/api/easyfatt/orders/${id}/status`, {
                             method: 'PATCH',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ status: 'Nuovo' })
@@ -5665,7 +5833,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                         if (selectedOrderIds.length === 0) return;
                         if (!confirm(`Vuoi segnare come "Esportato" gli ${selectedOrderIds.length} ordini selezionati?`)) return;
                         for (const id of selectedOrderIds) {
-                          await fetch(`/api/easyfatt/orders/${id}/status`, {
+                          await fetchJsonSafe(`/api/easyfatt/orders/${id}/status`, {
                             method: 'PATCH',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ status: 'Esportato' })
@@ -8947,10 +9115,15 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
               </div>
 
               {/* Summary KPIs */}
-              <div className="p-6 bg-white border-b border-gray-100 grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-6 bg-white border-b border-gray-100 grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <div className="p-3.5 bg-emerald-50/80 border border-emerald-100 rounded-2xl text-center">
                   <div className="text-[10px] font-black uppercase text-emerald-800 tracking-wider">Ordini Importati</div>
                   <div className="text-xl font-mono font-black text-emerald-700 mt-1">{ordersXmlLogs.importedCount}</div>
+                </div>
+
+                <div className="p-3.5 bg-slate-50/80 border border-slate-200 rounded-2xl text-center">
+                  <div className="text-[10px] font-black uppercase text-slate-700 tracking-wider">Duplicati Saltati</div>
+                  <div className="text-xl font-mono font-black text-slate-800 mt-1">{ordersXmlLogs.skippedDuplicatesCount || 0}</div>
                 </div>
 
                 <div className="p-3.5 bg-amber-50/80 border border-amber-100 rounded-2xl text-center">
@@ -8959,7 +9132,7 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
                 </div>
 
                 <div className="p-3.5 bg-blue-50/80 border border-blue-100 rounded-2xl text-center">
-                  <div className="text-[10px] font-black uppercase text-blue-800 tracking-wider">Righe Scartate</div>
+                  <div className="text-[10px] font-black uppercase text-blue-800 tracking-wider">Righe Fuori Catalogo</div>
                   <div className="text-xl font-mono font-black text-blue-700 mt-1">{ordersXmlLogs.skippedRowsCount}</div>
                 </div>
 
@@ -9007,6 +9180,141 @@ export default function Easyfatt({ user, initialTab }: { user?: any; initialTab?
               <div className="p-4 border-t border-gray-100 bg-gray-50/80 flex justify-end">
                 <button
                   onClick={() => setIsOrdersXmlModalOpen(false)}
+                  className="px-5 py-2.5 bg-[#5A5A40] hover:bg-[#4E4E37] text-white font-bold text-xs rounded-xl shadow-xs transition-all cursor-pointer active:scale-95"
+                >
+                  Chiudi & Aggiorna Vista
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Universal Import Report Modal (Products XML, Clients XML/XLSX, Products XLSX) */}
+      <AnimatePresence>
+        {importReportModal && importReportModal.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-3xl shadow-2xl border border-gray-100 w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden"
+            >
+              {/* Modal Header */}
+              <div className="p-6 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+                <div className="flex items-center gap-3">
+                  <div className={cn(
+                    "p-2.5 rounded-2xl",
+                    importReportModal.type === 'products' ? "bg-indigo-100 text-indigo-700" :
+                    importReportModal.type === 'products-xlsx' ? "bg-emerald-100 text-emerald-700" :
+                    "bg-amber-100 text-amber-700"
+                  )}>
+                    {importReportModal.type === 'products' ? <Package size={22} /> :
+                     importReportModal.type === 'products-xlsx' ? <FileSpreadsheet size={22} /> :
+                     <Users size={22} />}
+                  </div>
+                  <div>
+                    <h3 className="text-base font-serif font-black text-gray-900">
+                      {importReportModal.title}
+                    </h3>
+                    <p className="text-xs text-gray-500">
+                      Riepilogo statistico dell'elaborazione e registro dettagliato delle operazioni.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setImportReportModal(null)}
+                  className="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Summary KPIs */}
+              <div className="p-6 bg-white border-b border-gray-100 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3.5 bg-gray-50 border border-gray-200 rounded-2xl text-center">
+                  <div className="text-[10px] font-black uppercase text-gray-600 tracking-wider">Totale Rilevati</div>
+                  <div className="text-xl font-mono font-black text-gray-800 mt-1">{importReportModal.stats.total}</div>
+                </div>
+
+                <div className="p-3.5 bg-emerald-50/80 border border-emerald-100 rounded-2xl text-center">
+                  <div className="text-[10px] font-black uppercase text-emerald-800 tracking-wider">Nuovi Inseriti</div>
+                  <div className="text-xl font-mono font-black text-emerald-700 mt-1">{importReportModal.stats.imported}</div>
+                </div>
+
+                <div className="p-3.5 bg-blue-50/80 border border-blue-100 rounded-2xl text-center">
+                  <div className="text-[10px] font-black uppercase text-blue-800 tracking-wider">Aggiornati</div>
+                  <div className="text-xl font-mono font-black text-blue-700 mt-1">{importReportModal.stats.updated}</div>
+                </div>
+
+                <div className="p-3.5 bg-amber-50/80 border border-amber-100 rounded-2xl text-center">
+                  <div className="text-[10px] font-black uppercase text-amber-800 tracking-wider">
+                    {importReportModal.type === 'products-xlsx' ? 'Ignorati (Senza Cod.)' : 'Rimossi / Saltati'}
+                  </div>
+                  <div className="text-xl font-mono font-black text-amber-700 mt-1">
+                    {importReportModal.stats.deleted || importReportModal.stats.ignored || 0}
+                  </div>
+                </div>
+              </div>
+
+              {/* Scrollable Detailed Logs with Search */}
+              <div className="p-6 flex-1 overflow-y-auto space-y-2.5 max-h-[45vh] bg-gray-50/30">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                  <span className="text-xs font-bold text-gray-700">
+                    Registro Dettagliato ({importReportModal.logs.length} messaggi):
+                  </span>
+                  <div className="relative">
+                    <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      placeholder="Filtra registro..."
+                      value={importLogSearch}
+                      onChange={(e) => setImportLogSearch(e.target.value)}
+                      className="pl-7 pr-3 py-1 bg-white border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-[#5A5A40] w-full sm:w-44"
+                    />
+                  </div>
+                </div>
+
+                {importReportModal.logs
+                  .filter(l => !importLogSearch || l.message.toLowerCase().includes(importLogSearch.toLowerCase()))
+                  .length === 0 ? (
+                  <p className="text-xs text-gray-400 italic py-4 text-center">Nessun log corrisponde ai criteri di ricerca.</p>
+                ) : (
+                  importReportModal.logs
+                    .filter(l => !importLogSearch || l.message.toLowerCase().includes(importLogSearch.toLowerCase()))
+                    .map((log, idx) => (
+                      <div
+                        key={idx}
+                        className={cn(
+                          "p-3 rounded-xl border text-xs leading-relaxed font-mono font-medium flex items-start gap-2.5",
+                          log.level === 'success'
+                            ? "bg-emerald-50/60 border-emerald-200 text-emerald-900"
+                            : log.level === 'warning'
+                            ? "bg-amber-50/60 border-amber-200 text-amber-900"
+                            : log.level === 'info'
+                            ? "bg-blue-50/60 border-blue-200 text-blue-900"
+                            : "bg-rose-50/60 border-rose-200 text-rose-900"
+                        )}
+                      >
+                        <span className="shrink-0 mt-0.5">
+                          {log.level === 'success' && <CheckSquare size={14} className="text-emerald-600" />}
+                          {log.level === 'warning' && <AlertTriangle size={14} className="text-amber-600" />}
+                          {log.level === 'info' && <Info size={14} className="text-blue-600" />}
+                          {log.level === 'error' && <XCircle size={14} className="text-rose-600" />}
+                        </span>
+                        <span className="flex-1 break-words">{log.message}</span>
+                      </div>
+                    ))
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 border-t border-gray-100 bg-gray-50/80 flex items-center justify-between">
+                <span className="text-[11px] text-gray-500 font-medium">
+                  Operazione completata con allineamento del database.
+                </span>
+                <button
+                  onClick={() => setImportReportModal(null)}
                   className="px-5 py-2.5 bg-[#5A5A40] hover:bg-[#4E4E37] text-white font-bold text-xs rounded-xl shadow-xs transition-all cursor-pointer active:scale-95"
                 >
                   Chiudi & Aggiorna Vista

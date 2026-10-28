@@ -4205,42 +4205,62 @@ app.get('/api/database/status', authMiddleware, async (req, res) => {
   }
 });
 
-// 8. Export Products to Easyfatt-XML
+// 8. Export Products to Easyfatt-XML (Standard Danea Prodotti.xsd)
 app.get('/api/easyfatt/export-products', authMiddleware, async (req, res) => {
   try {
-    const products = await queryAll('SELECT * FROM products') as any[];
+    const products = await queryAll('SELECT * FROM products ORDER BY code ASC') as any[];
     
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
-    xml += `<EasyfattDocuments AppVersion="2" Creator="Connect" CreatorUrl="https://connect.com">\n`;
-    xml += `  <Company>\n`;
-    xml += `    <Name>Connect Beauty Srl</Name>\n`;
-    xml += `    <Country>Italia</Country>\n`;
-    xml += `  </Company>\n`;
-    xml += `  <Documents>\n`;
-    xml += `    <Document>\n`;
-    xml += `      <DocumentType>C</DocumentType>\n`;
-    xml += `      <CustomerName>Catalogo Prodotti Connect</CustomerName>\n`;
-    xml += `      <Date>${new Date().toISOString().split('T')[0]}</Date>\n`;
-    xml += `      <Rows>\n`;
+    xml += `<EasyfattProducts AppVersion="2" Mode="full">\n`;
+    xml += `  <Products>\n`;
     
     for (const p of products) {
-      xml += `        <Row>\n`;
-      xml += `          <Code>${escapeXml(p.code)}</Code>\n`;
-      xml += `          <Description>${escapeXml(p.description)}</Description>\n`;
-      xml += `          <Qty>${p.stock}</Qty>\n`;
-      xml += `          <Um>${escapeXml(p.um)}</Um>\n`;
-      xml += `          <Price>${p.price}</Price>\n`;
-      xml += `          <VatCode Perc="22" Class="Imponibile">${escapeXml(p.vat_code)}</VatCode>\n`;
-      xml += `        </Row>\n`;
+      const pPrice = Number(p.price) || 0;
+      const vatCodeVal = String(p.vat_code || '22').trim();
+      const vatPerc = parseFloat(vatCodeVal.replace(/[^0-9.]/g, '')) || 22;
+      const grossPrice = Math.round(pPrice * (1 + vatPerc / 100) * 100) / 100;
+      const qty = Number(p.stock) || 0;
+      const suppNetPrice = p.supplier_net_price !== null && p.supplier_net_price !== undefined ? Number(p.supplier_net_price) : null;
+      const suppGrossPrice = suppNetPrice !== null ? Math.round(suppNetPrice * (1 + vatPerc / 100) * 100) / 100 : null;
+
+      xml += `    <Product>\n`;
+      xml += `      <InternalID>${p.id}</InternalID>\n`;
+      xml += `      <Code>${escapeXml(p.code)}</Code>\n`;
+      xml += `      <Description>${escapeXml(p.description || '')}</Description>\n`;
+      if (p.description_html) xml += `      <DescriptionHtml>${escapeXml(p.description_html)}</DescriptionHtml>\n`;
+      if (p.category) xml += `      <Category>${escapeXml(p.category)}</Category>\n`;
+      if (p.subcategory) xml += `      <Subcategory>${escapeXml(p.subcategory)}</Subcategory>\n`;
+      xml += `      <Vat Perc="${vatPerc}" Class="Imponibile" Description="Aliquota ${vatPerc}%">${escapeXml(vatCodeVal)}</Vat>\n`;
+      xml += `      <Um>${escapeXml(p.um || 'pz')}</Um>\n`;
+      xml += `      <NetPrice1>${pPrice.toFixed(2)}</NetPrice1>\n`;
+      xml += `      <GrossPrice1>${grossPrice.toFixed(2)}</GrossPrice1>\n`;
+      if (p.barcode) xml += `      <Barcode>${escapeXml(p.barcode)}</Barcode>\n`;
+      if (p.producer_name) xml += `      <ProducerName>${escapeXml(p.producer_name)}</ProducerName>\n`;
+      if (p.link) xml += `      <Link>${escapeXml(p.link)}</Link>\n`;
+      if (p.custom_field1 || p.custom_field_1) xml += `      <CustomField1>${escapeXml(p.custom_field1 || p.custom_field_1)}</CustomField1>\n`;
+      if (p.custom_field2 || p.custom_field_2) xml += `      <CustomField2>${escapeXml(p.custom_field2 || p.custom_field_2)}</CustomField2>\n`;
+      if (p.custom_field3 || p.custom_field_3) xml += `      <CustomField3>${escapeXml(p.custom_field3 || p.custom_field_3)}</CustomField3>\n`;
+      if (p.custom_field4 || p.custom_field_4) xml += `      <CustomField4>${escapeXml(p.custom_field4 || p.custom_field_4)}</CustomField4>\n`;
+      if (p.supplier_code) xml += `      <SupplierCode>${escapeXml(p.supplier_code)}</SupplierCode>\n`;
+      if (p.supplier_name) xml += `      <SupplierName>${escapeXml(p.supplier_name)}</SupplierName>\n`;
+      if (p.supplier_product_code) xml += `      <SupplierProductCode>${escapeXml(p.supplier_product_code)}</SupplierProductCode>\n`;
+      if (suppNetPrice !== null) xml += `      <SupplierNetPrice>${suppNetPrice.toFixed(2)}</SupplierNetPrice>\n`;
+      if (suppGrossPrice !== null) xml += `      <SupplierGrossPrice>${suppGrossPrice.toFixed(2)}</SupplierGrossPrice>\n`;
+      if (p.supplier_notes) xml += `      <SupplierNotes>${escapeXml(p.supplier_notes)}</SupplierNotes>\n`;
+      xml += `      <ManageWarehouse>true</ManageWarehouse>\n`;
+      xml += `      <AvailableQty>${qty}</AvailableQty>\n`;
+      if (p.notes) xml += `      <Notes>${escapeXml(p.notes)}</Notes>\n`;
+      if (p.image_file_name) xml += `      <ImageFileName>${escapeXml(p.image_file_name)}</ImageFileName>\n`;
+      xml += `    </Product>\n`;
     }
     
-    xml += `      </Rows>\n`;
-    xml += `    </Document>\n`;
-    xml += `  </Documents>\n`;
-    xml += `</EasyfattDocuments>\n`;
+    xml += `  </Products>\n`;
+    xml += `</EasyfattProducts>\n`;
 
-    res.header('Content-Type', 'text/xml');
-    res.header('Content-Disposition', 'attachment; filename="catalogo_prodotti_easyfatt.xml"');
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="catalogo_prodotti_easyfatt.xml"');
+    res.setHeader('X-Total-Count', String(products.length));
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Total-Count');
     res.send(xml);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -4444,8 +4464,10 @@ app.get('/api/easyfatt/export-clients', authMiddleware, async (req: any, res: an
       
       const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
       
-      res.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.header('Content-Disposition', 'attachment; filename="anagrafica_clienti_easyfatt.xlsx"');
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="anagrafica_clienti_easyfatt.xlsx"');
+      res.setHeader('X-Total-Count', String(clients.length));
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Total-Count');
       return res.send(excelBuffer);
     }
 
@@ -4531,8 +4553,10 @@ app.get('/api/easyfatt/export-clients', authMiddleware, async (req: any, res: an
     xml += `  </Documents>\n`;
     xml += `</EasyfattDocuments>\n`;
 
-    res.header('Content-Type', 'text/xml');
-    res.header('Content-Disposition', 'attachment; filename="anagrafica_clienti_easyfatt.xml"');
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="anagrafica_clienti_easyfatt.xml"');
+    res.setHeader('X-Total-Count', String(clients.length));
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Total-Count');
     res.send(xml);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -4849,8 +4873,10 @@ app.get('/api/easyfatt/export-orders', authMiddleware, async (req: any, res: any
 
     const xml = await buildEasyfattOrdersXml(ordersList, '2', true);
 
-    res.header('Content-Type', 'text/xml; charset=utf-8');
-    res.header('Content-Disposition', `attachment; filename="ordini_clienti_easyfatt_${new Date().toISOString().split('T')[0]}.xml"`);
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="ordini_clienti_easyfatt_${new Date().toISOString().split('T')[0]}.xml"`);
+    res.setHeader('X-Total-Count', String(ordersList.length));
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Total-Count');
     res.send(xml.trimStart());
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -5792,10 +5818,39 @@ app.delete('/api/payments/:id', authMiddleware, async (req: any, res: any) => {
 
 // Helper to check authorization for Easyfatt direct desktop integrations
 async function checkEasyfattAuth(req: any): Promise<boolean> {
-  // Support cookie session
-  if (req.cookies && req.cookies.userId) {
-    const user = await queryGet('SELECT id FROM users WHERE id = ?', [req.cookies.userId]);
-    if (user) return true;
+  // Support existing authMiddleware / authenticated user
+  if (req.user) {
+    return true;
+  }
+
+  // Support cookie or header session
+  const candidateUser = req.cookies?.userId || req.headers?.['x-user-id'] || req.headers?.['x-simulation-user'];
+  if (candidateUser) {
+    const isNum = !isNaN(Number(candidateUser));
+    const user = isNum
+      ? await queryGet('SELECT id, role FROM users WHERE id = ?', [Number(candidateUser)])
+      : await queryGet('SELECT id, role FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(name) = LOWER(?)', [candidateUser, candidateUser]);
+    if (user) {
+      req.user = user;
+      return true;
+    }
+  }
+
+  const authHeader = req.headers.authorization;
+
+  // Support Bearer token from web app / API clients
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    const tokenVal = authHeader.substring(7).trim();
+    if (tokenVal) {
+      const isNum = !isNaN(Number(tokenVal));
+      const user = isNum
+        ? await queryGet('SELECT id, role FROM users WHERE id = ?', [Number(tokenVal)])
+        : await queryGet('SELECT id, role FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(name) = LOWER(?)', [tokenVal, tokenVal]);
+      if (user) {
+        req.user = user;
+        return true;
+      }
+    }
   }
 
   let email = '';
@@ -5803,7 +5858,6 @@ async function checkEasyfattAuth(req: any): Promise<boolean> {
   let hasCredentials = false;
 
   // 1. Support HTTP Basic Authentication
-  const authHeader = req.headers.authorization;
   if (authHeader && authHeader.toLowerCase().startsWith('basic ')) {
     try {
       const creds = Buffer.from(authHeader.split(' ')[1], 'base64').toString('ascii').split(':');
@@ -6062,13 +6116,44 @@ const handleEasyfattImport = async (req: any, res: any) => {
         }
       }
 
+      const clientLogs: Array<{ level: 'success' | 'warning' | 'info' | 'error'; message: string }> = [];
+      clientLogs.push({
+        level: 'info',
+        message: `[LETTURA XML] Trovate ${customersToUpsert.length} anagrafiche nel flusso XML clienti.`
+      });
+      for (let i = 0; i < Math.min(mappedClients.length, 40); i++) {
+        const c = mappedClients[i];
+        clientLogs.push({
+          level: 'info',
+          message: `[ELABORATO] Anagrafica "${c.name}" (Cod: ${c.code || '-'}, Città: ${c.city || '-'}, P.IVA: ${c.vat_code || '-'})`
+        });
+      }
+      if (mappedClients.length > 40) {
+        clientLogs.push({
+          level: 'info',
+          message: `...ed altre ${mappedClients.length - 40} anagrafiche elaborate regolarmente.`
+        });
+      }
+      clientLogs.push({
+        level: 'success',
+        message: `[IMPORTAZIONE COMPLETATA] Anagrafiche allineate: ${importedCount} nuove inserite, ${updatedCount} aggiornate.`
+      });
+
       // Cleanup uploaded file
       try { if (tempFilePathToUnlink) fs.unlinkSync(tempFilePathToUnlink); } catch (e) {}
 
       // Check request type for response format (Browser form upload vs desktop software)
-      const isBrowserRequest = req.headers['accept'] && req.headers['accept'].includes('json');
+      const isBrowserRequest = (req.headers['accept'] && req.headers['accept'].includes('json')) || req.query.format === 'json' || req.body?.format === 'json';
       if (isBrowserRequest) {
-        return res.json({ success: true, mode, imported: importedCount, updated: updatedCount, deleted: 0 });
+        return res.json({ 
+          success: true, 
+          mode, 
+          imported: importedCount, 
+          updated: updatedCount, 
+          deleted: 0, 
+          total: mappedClients.length,
+          logs: clientLogs 
+        });
       } else {
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         return res.status(200).send("OK");
@@ -6129,13 +6214,50 @@ const handleEasyfattImport = async (req: any, res: any) => {
       // Products processed in PostgreSQL Neon batch upsert
     }
 
+    const prodLogs: Array<{ level: 'success' | 'warning' | 'info' | 'error'; message: string }> = [];
+    prodLogs.push({
+      level: 'info',
+      message: `[LETTURA XML] Trovati ${productsToUpsert.length} articoli nel tracciato XML (Modalità: ${mode.toUpperCase()}).`
+    });
+    if (codesToDelete.length > 0) {
+      prodLogs.push({
+        level: 'warning',
+        message: `[RIMOZIONE] Rimosse ${codesToDelete.length} voci a catalogo non più presenti nella trasmissione completa (preservate personalizzazioni online).`
+      });
+    }
+    for (let i = 0; i < Math.min(mappedProducts.length, 40); i++) {
+      const p = mappedProducts[i];
+      prodLogs.push({
+        level: 'info',
+        message: `[ELABORATO] Articolo "${p.code}" - ${p.description || 'Senza descrizione'} (Prezzo: €${Number(p.price || 0).toFixed(2)}, Giacenza: ${p.stock || 0})`
+      });
+    }
+    if (mappedProducts.length > 40) {
+      prodLogs.push({
+        level: 'info',
+        message: `...ed altri ${mappedProducts.length - 40} articoli elaborati regolarmente.`
+      });
+    }
+    prodLogs.push({
+      level: 'success',
+      message: `[IMPORTAZIONE COMPLETATA] Catalogo aggiornato con successo: ${importedCount} nuovi articoli inseriti, ${updatedCount} articoli aggiornati, ${deletedCount} rimossi.`
+    });
+
     // Cleanup uploaded file
     try { if (tempFilePathToUnlink) fs.unlinkSync(tempFilePathToUnlink); } catch (e) {}
 
     // Check request type for response format (Browser form upload vs desktop software)
-    const isBrowserRequest = req.headers['accept'] && req.headers['accept'].includes('json');
+    const isBrowserRequest = (req.headers['accept'] && req.headers['accept'].includes('json')) || req.query.format === 'json' || req.body?.format === 'json';
     if (isBrowserRequest) {
-      res.json({ success: true, mode, imported: importedCount, updated: updatedCount, deleted: deletedCount });
+      res.json({ 
+        success: true, 
+        mode, 
+        imported: importedCount, 
+        updated: updatedCount, 
+        deleted: deletedCount, 
+        total: mappedProducts.length,
+        logs: prodLogs 
+      });
     } else {
       // Determine protocol version (AppVersion 1 vs 2+)
       let appVerNum = 2;
@@ -6264,6 +6386,7 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
 
   const logs: { level: 'success' | 'warning' | 'info' | 'error'; message: string }[] = [];
   let importedCount = 0;
+  let skippedDuplicatesCount = 0;
   let skippedOrdersCount = 0;
   let skippedRowsCount = 0;
   let autoCreatedPaymentMethods = 0;
@@ -6293,6 +6416,7 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
       const rawNum = String(doc.Number || doc.number || `INC-${i + 1}`).trim();
       const rawNumRing = String(doc.Numbering || doc.numbering || '').trim();
       const docNumber = rawNumRing ? (rawNumRing.startsWith('/') ? `${rawNum}${rawNumRing}` : `${rawNum}/${rawNumRing}`) : rawNum;
+      const docDate = String(doc.Date || doc.date || new Date().toISOString().split('T')[0]).trim();
 
       // Extract Customer Identification Fields
       const cCode = normalizeCode(doc.CustomerCode || doc.customercode) || '';
@@ -6330,7 +6454,22 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
         skippedOrdersCount++;
         logs.push({
           level: 'warning',
-          message: `[ORDINE SCARTATO] Ordine #${docNumber}: Impossibile associare il cliente "${cName}" (Cod: "${cCode || '-'}", P.IVA: "${cVat || '-'}", CF: "${cFiscal || '-'}", Email: "${cEmail || '-'}").`
+          message: `[ORDINE SCARTATO] Ordine #${docNumber} del ${docDate}: Impossibile associare il cliente "${cName}" (Cod: "${cCode || '-'}", P.IVA: "${cVat || '-'}", CF: "${cFiscal || '-'}", Email: "${cEmail || '-'}").`
+        });
+        continue;
+      }
+
+      // Anti-duplicate check: Document Number + Document Date + Client
+      const existingOrder = await queryGet(
+        'SELECT id, number, date FROM orders WHERE TRIM(number) = TRIM(?) AND date = ? AND client_id = ?',
+        [docNumber, docDate, clientMatch.id]
+      ) as any;
+
+      if (existingOrder) {
+        skippedDuplicatesCount++;
+        logs.push({
+          level: 'info',
+          message: `[ORDINE DUPLICATO IGNORATO] Ordine #${docNumber} del ${docDate} per "${clientMatch.name}" già presente a sistema (ID #${existingOrder.id}). Documento saltato.`
         });
         continue;
       }
@@ -6343,15 +6482,17 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
           autoCreatedPaymentMethods++;
           logs.push({
             level: 'info',
-            message: `[METODO PAGAMENTO REGISTRATO] Creato nuovo metodo di pagamento "${pName}" (GG: ${pmResult.offset_days}, Rate: ${pmResult.installments}, Fine Mese: ${pmResult.fine_mese === 1 ? 'Sì' : 'No'}).`
+            message: `[METODO PAGAMENTO REGISTRATO] Creato nuovo metodo di pagamento "${pName}" (GG: ${pmResult.offset_days}, Rate: ${pmResult.installments}, Fine Mese: ${pmResult.fine_mese === 1 || pmResult.fine_mese === true ? 'Sì' : 'No'}).`
           });
         }
       }
 
       // Product Rows Handling
       const rawRows = doc.Rows?.Row || doc.rows?.row || doc.Row || doc.row || [];
-      const rowsList = Array.isArray(rawRows) ? rawRows : [rawRows];
+      const rowsList = Array.isArray(rawRows) ? rawRows : (rawRows && typeof rawRows === 'object' ? [rawRows] : []);
       const validItems: any[] = [];
+      let calcTotal = 0;
+      let nonCatalogRowsInDoc = 0;
 
       for (const row of rowsList) {
         if (!row) continue;
@@ -6368,19 +6509,42 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
           productMatch = await queryGet('SELECT * FROM products WHERE LOWER(TRIM(description)) = LOWER(TRIM(?))', [pDesc]);
         }
 
-        // Strict Requirement: Discard ONLY the row if product is not found
+        const qty = parseFloat(getVal(row.Qty || row.qty || '1')) || 1;
+        const price = parseFloat(getVal(row.Price || row.price || (productMatch ? productMatch.price : '0'))) || 0;
+        const discountsStr = getVal(row.Discounts || row.discounts || '');
+        const explicitRowTotal = parseFloat(getVal(row.Total || row.total));
+
+        let rowAmount = 0;
+        if (!isNaN(explicitRowTotal) && explicitRowTotal > 0) {
+          rowAmount = explicitRowTotal;
+        } else {
+          let lineTotal = qty * price;
+          if (discountsStr) {
+            const parts = discountsStr.replace(/%/g, '').split('+');
+            for (const part of parts) {
+              const d = parseFloat(part.trim());
+              if (!isNaN(d)) {
+                lineTotal = lineTotal * (1 - d / 100);
+              }
+            }
+          }
+          rowAmount = lineTotal;
+        }
+        rowAmount = Math.round(rowAmount * 100) / 100;
+        calcTotal += rowAmount;
+
+        // Unknown / non-catalog products: count in total order amount, but do not insert into order_items
         if (!productMatch) {
           skippedRowsCount++;
+          nonCatalogRowsInDoc++;
           logs.push({
-            level: 'warning',
-            message: `[RIGA SCARTATA] Prodotto "${pCode || pDesc}" non presente a catalogo nell'ordine #${docNumber}. Riga ignorata.`
+            level: 'info',
+            message: `[RIGA FUORI CATALOGO] Articolo "${pCode || pDesc || 'Senza codice'}" (€${rowAmount.toFixed(2)}) non presente a catalogo nell'ordine #${docNumber}. Importo conteggiato nel totale, riga dettaglio omessa.`
           });
           continue;
         }
 
-        const qty = parseFloat(getVal(row.Qty || row.qty || '1')) || 1;
-        const price = parseFloat(getVal(row.Price || row.price || productMatch.price || '0')) || 0;
-        let vatCode = getVal(row.VatCode || row.vatcode) || productMatch.vat_code || '22';
+        const vatCode = getVal(row.VatCode || row.vatcode) || productMatch.vat_code || '22';
 
         validItems.push({
           product_code: productMatch.code,
@@ -6392,45 +6556,48 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
         });
       }
 
+      // Add additional costs if present in document header (e.g. shipping fees)
+      const costAmount = parseFloat(String(doc.CostAmount || doc.costamount || '0')) || 0;
+      if (costAmount > 0) {
+        calcTotal += costAmount;
+      }
+
+      // If document had no rows or total is 0 but XML header has explicit Total, preserve it
+      const docHeaderTotal = parseFloat(String(doc.Total || doc.total || '0')) || 0;
+      if (calcTotal === 0 && docHeaderTotal > 0) {
+        calcTotal = docHeaderTotal;
+      }
+      calcTotal = Math.round(calcTotal * 100) / 100;
+
+      // Notice: If validItems is empty, import order anyway to maintain accounting history as requested
       if (validItems.length === 0) {
-        skippedOrdersCount++;
         logs.push({
-          level: 'warning',
-          message: `[ORDINE SCARTATO] Ordine #${docNumber} per "${clientMatch.name}": Nessuna riga prodotto valida trovata a catalogo.`
+          level: 'info',
+          message: `[ORDINE STORICO] Ordine #${docNumber} del ${docDate} per "${clientMatch.name}": Importato per continuità contabile senza articoli a catalogo (Totale: €${calcTotal.toFixed(2)}, ${nonCatalogRowsInDoc} righe fuori catalogo conteggiate).`
         });
-        continue;
       }
 
-      // Calculate Total
-      let calcTotal = 0;
-      for (const item of validItems) {
-        calcTotal += item.qty * item.price;
-      }
-      if (doc.Total || doc.total) {
-        const xmlTot = parseFloat(String(doc.Total || doc.total));
-        if (!isNaN(xmlTot) && xmlTot > 0) calcTotal = xmlTot;
-      }
-
-      const docDate = String(doc.Date || doc.date || new Date().toISOString().split('T')[0]).trim();
       const paymentBank = String(doc.PaymentBank || doc.paymentbank || '').trim();
       const internalComment = String(doc.InternalComment || doc.internalcomment || doc.Notes || doc.notes || '').trim();
 
-      // Insert Historical Order (is_imported = true, is_synced = true) in SQLite
+      // Insert Historical Order (is_imported = true, is_synced = true) into PostgreSQL
       const insertOrderResult = await queryRun(`
         INSERT INTO orders (client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported, is_synced, synced_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Esportato', 1, 1, '2000-01-01 00:00:00')
-      `, [clientMatch.id,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Esportato', true, true, '2000-01-01 00:00:00')
+      `, [
+        clientMatch.id,
         user.id,
         docDate,
         docNumber,
         pName || 'Bonifico bancario',
         paymentBank,
         internalComment || 'Ordine Storico Importato da XML Easyfatt',
-        calcTotal]);
+        calcTotal
+      ]);
 
       const newOrderId = Number(insertOrderResult.lastInsertRowid);
 
-      // Insert Order Items in PostgreSQL
+      // Insert Order Items
       for (const item of validItems) {
         await queryRun(`
           INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um)
@@ -6446,7 +6613,7 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
         ]);
       }
 
-      // Extract & Insert Payments into order_payments (Section 3 A)
+      // Extract & Insert Payments into order_payments
       const rawPayments = doc.Payments?.Payment || doc.payments?.payment || doc.Payment || doc.payment || [];
       const paymentsList = Array.isArray(rawPayments) ? rawPayments : (rawPayments && typeof rawPayments === 'object' ? [rawPayments] : []);
       const parsedPayments: any[] = [];
@@ -6455,19 +6622,19 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
       if (paymentsList.length > 0) {
         for (const p of paymentsList) {
           if (!p) continue;
-          const isAdvance = String(p.Advance || p.advance || 'false').toLowerCase() === 'true' || p.Advance === 1;
+          const isAdvance = String(p.Advance || p.advance || 'false').toLowerCase() === 'true' || p.Advance === 1 || p.Advance === true;
           const payDate = String(p.Date || p.date || docDate).trim();
           const payAmount = parseFloat(String(p.Amount || p.amount || '0')) || 0;
-          const isPaid = String(p.Paid || p.paid || 'false').toLowerCase() === 'true' || p.Paid === 1;
+          const isPaid = String(p.Paid || p.paid || 'false').toLowerCase() === 'true' || p.Paid === 1 || p.Paid === true;
           const payNotes = String(p.Notes || p.notes || '').trim();
 
           parsedPayments.push({
-            advance: isAdvance ? 1 : 0,
-            is_advance: isAdvance,
+            advance: Boolean(isAdvance),
+            is_advance: Boolean(isAdvance),
             due_date: payDate,
             amount: payAmount,
-            paid: isPaid ? 1 : 0,
-            is_paid: isPaid,
+            paid: Boolean(isPaid),
+            is_paid: Boolean(isPaid),
             paid_date: isPaid ? payDate : null,
             payment_method: pName || 'Bonifico bancario',
             notes: payNotes,
@@ -6475,17 +6642,16 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
           });
         }
       } else {
-        // Automatically schedule installments if none provided in XML
         paymentSourceType = 'AUTO';
         const autoInstallments = calculateInstallments(calcTotal, docDate, pName || 'Bonifico bancario', 'AUTO');
         for (const inst of autoInstallments) {
           parsedPayments.push({
-            advance: inst.is_advance ? 1 : 0,
-            is_advance: inst.is_advance,
+            advance: Boolean(inst.is_advance),
+            is_advance: Boolean(inst.is_advance),
             due_date: inst.due_date,
             amount: inst.amount,
-            paid: inst.is_paid ? 1 : 0,
-            is_paid: inst.is_paid,
+            paid: Boolean(inst.is_paid),
+            is_paid: Boolean(inst.is_paid),
             paid_date: inst.paid_date,
             payment_method: inst.payment_method || pName || 'Bonifico bancario',
             notes: inst.notes || '',
@@ -6510,99 +6676,21 @@ async function handleXmlOrdersImportLogic(req: any, res: any) {
           pay.paid_date,
           pay.payment_method,
           pay.notes,
-          pay.source_type
+          pay.source_type || paymentSourceType
         ]);
-      }
-
-      // Mirror to PostgreSQL
-      try {
-        const pgClient = await pool.connect();
-        try {
-          await pgClient.query('BEGIN');
-          const pgOrderRes = await pgClient.query(`
-            INSERT INTO orders (id, client_id, agent_id, date, number, payment_name, payment_bank, notes, total, status, is_imported, is_synced, synced_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Esportato', true, true, '2000-01-01 00:00:00')
-            ON CONFLICT (id) DO UPDATE SET
-              client_id = EXCLUDED.client_id,
-              agent_id = EXCLUDED.agent_id,
-              date = EXCLUDED.date,
-              number = EXCLUDED.number,
-              payment_name = EXCLUDED.payment_name,
-              payment_bank = EXCLUDED.payment_bank,
-              notes = EXCLUDED.notes,
-              total = EXCLUDED.total,
-              status = 'Esportato',
-              is_imported = true,
-              is_synced = true,
-              synced_at = '2000-01-01 00:00:00'
-            RETURNING id
-          `, [
-            newOrderId,
-            clientMatch.id,
-            user.id,
-            docDate,
-            docNumber,
-            pName || 'Bonifico bancario',
-            paymentBank,
-            internalComment || 'Ordine Storico Importato da XML Easyfatt',
-            calcTotal
-          ]);
-
-          const pgOrderId = pgOrderRes.rows[0].id;
-          await pgClient.query('DELETE FROM order_items WHERE order_id = $1', [pgOrderId]);
-          for (const item of validItems) {
-            await pgClient.query(`
-              INSERT INTO order_items (order_id, product_code, description, qty, price, vat_code, um)
-              VALUES ($1, $2, $3, $4, $5, $6, $7)
-            `, [pgOrderId, item.product_code, item.description, item.qty, item.price, item.vat_code, item.um]);
-          }
-
-          await pgClient.query('DELETE FROM order_payments WHERE order_id = $1', [pgOrderId]);
-          for (const pay of parsedPayments) {
-            await pgClient.query(`
-              INSERT INTO order_payments (
-                order_id, client_id, due_date, amount,
-                is_advance, advance,
-                is_paid, paid,
-                paid_date, payment_method, notes, source_type
-              )
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            `, [
-              pgOrderId,
-              clientMatch.id,
-              pay.due_date,
-              pay.amount,
-              Boolean(pay.is_advance),
-              Boolean(pay.is_advance),
-              Boolean(pay.is_paid),
-              Boolean(pay.is_paid),
-              pay.paid_date,
-              pay.payment_method,
-              pay.notes,
-              pay.source_type || paymentSourceType
-            ]);
-          }
-          await pgClient.query('COMMIT');
-        } catch (pgTxErr) {
-          await pgClient.query('ROLLBACK');
-          console.warn('[handleXmlOrdersImportLogic] PostgreSQL error syncing order:', pgTxErr);
-        } finally {
-          pgClient.release();
-        }
-      } catch (pgConnErr) {
-        console.warn('[handleXmlOrdersImportLogic] PostgreSQL connection warning:', pgConnErr);
       }
 
       importedCount++;
       logs.push({
         level: 'success',
-        message: `[IMPORTATO] Ordine #${docNumber} importato con successo per "${clientMatch.name}" (€${calcTotal.toFixed(2)}, ${validItems.length} righe, ${parsedPayments.length} scadenze).`
+        message: `[IMPORTATO] Ordine #${docNumber} del ${docDate} importato con successo per "${clientMatch.name}" (€${calcTotal.toFixed(2)}, ${validItems.length} righe a catalogo, ${nonCatalogRowsInDoc} righe fuori catalogo conteggiate nel totale, ${parsedPayments.length} scadenze).`
       });
     }
 
     res.json({
       success: true,
       importedCount,
+      skippedDuplicatesCount,
       skippedOrdersCount,
       skippedRowsCount,
       autoCreatedPaymentMethods,
@@ -7225,12 +7313,18 @@ app.post('/api/easyfatt/import-clients', authMiddleware, upload.single('file'), 
 
     let importedCount = 0;
     let updatedCount = 0;
+    const clientLogs: Array<{ level: 'success' | 'warning' | 'info' | 'error'; message: string }> = [];
 
     if (isExcel) {
       const workbook = XLSX.readFile(req.file.path);
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' }) as any[];
+
+      clientLogs.push({
+        level: 'info',
+        message: `[LETTURA EXCEL] Individuate ${rows.length} righe nel foglio "${sheetName}".`
+      });
 
       const CHUNK_SIZE = 30;
       for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
@@ -7240,13 +7334,43 @@ app.post('/api/easyfatt/import-clients', authMiddleware, upload.single('file'), 
             const clientData = mapCustomerNode(row);
             if (!clientData.name) continue;
             const res = await upsertClientInDb(clientData);
-            if (res && res.status === 'inserted') importedCount++;
-            if (res && res.status === 'updated') updatedCount++;
+            if (res && res.status === 'inserted') {
+              importedCount++;
+              if (clientLogs.length < 50) {
+                clientLogs.push({
+                  level: 'success',
+                  message: `[NUOVA ANAGRAFICA] Inserito "${clientData.name}" (Cod: ${clientData.code || '-'}, Città: ${clientData.city || '-'})`
+                });
+              }
+            } else if (res && res.status === 'updated') {
+              updatedCount++;
+              if (clientLogs.length < 50) {
+                clientLogs.push({
+                  level: 'info',
+                  message: `[AGGIORNATA] Aggiornati dati per "${clientData.name}" (Cod: ${clientData.code || '-'})`
+                });
+              }
+            }
           } catch (err: any) {
             console.error('[Neon Import Warning]', err?.message || err);
           }
         }
       }
+
+      if (rows.length > 50) {
+        clientLogs.push({
+          level: 'info',
+          message: `...ed altre ${rows.length - 50} anagrafiche elaborate regolarmente.`
+        });
+      }
+      clientLogs.push({
+        level: 'success',
+        message: `[IMPORTAZIONE COMPLETATA] Elaborazione Excel terminata: ${importedCount} nuove anagrafiche inserite, ${updatedCount} aggiornate.`
+      });
+
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+
+      return res.json({ success: true, imported: importedCount, updated: updatedCount, total: rows.length, logs: clientLogs });
     } else {
       const xmlContent = fs.readFileSync(req.file.path, 'utf8');
       const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "", parseTagValue: false });
@@ -7267,6 +7391,11 @@ app.post('/api/easyfatt/import-clients', authMiddleware, upload.single('file'), 
         return res.status(400).json({ error: "Mancano clienti validi nel file." });
       }
 
+      clientLogs.push({
+        level: 'info',
+        message: `[LETTURA XML] Individuate ${items.length} anagrafiche nel flusso XML clienti.`
+      });
+
       const CHUNK_SIZE = 30;
       for (let i = 0; i < items.length; i += CHUNK_SIZE) {
         const chunk = items.slice(i, i + CHUNK_SIZE);
@@ -7275,19 +7404,44 @@ app.post('/api/easyfatt/import-clients', authMiddleware, upload.single('file'), 
             const clientData = mapCustomerNode(item);
             if (!clientData.name) continue;
             const res = await upsertClientInDb(clientData);
-            if (res && res.status === 'inserted') importedCount++;
-            if (res && res.status === 'updated') updatedCount++;
+            if (res && res.status === 'inserted') {
+              importedCount++;
+              if (clientLogs.length < 50) {
+                clientLogs.push({
+                  level: 'success',
+                  message: `[NUOVA ANAGRAFICA] Inserita "${clientData.name}" (Cod: ${clientData.code || '-'}, P.IVA: ${clientData.vat_code || '-'})`
+                });
+              }
+            } else if (res && res.status === 'updated') {
+              updatedCount++;
+              if (clientLogs.length < 50) {
+                clientLogs.push({
+                  level: 'info',
+                  message: `[AGGIORNATA] Aggiornati dati per "${clientData.name}" (Cod: ${clientData.code || '-'})`
+                });
+              }
+            }
           } catch (err: any) {
             console.error('[Neon Import Warning]', err?.message || err);
           }
         }
       }
+
+      if (items.length > 50) {
+        clientLogs.push({
+          level: 'info',
+          message: `...ed altre ${items.length - 50} anagrafiche elaborate regolarmente.`
+        });
+      }
+      clientLogs.push({
+        level: 'success',
+        message: `[IMPORTAZIONE COMPLETATA] Elaborazione XML terminata: ${importedCount} nuove anagrafiche inserite, ${updatedCount} aggiornate.`
+      });
+
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+
+      return res.json({ success: true, imported: importedCount, updated: updatedCount, total: items.length, logs: clientLogs });
     }
-
-    // Cleanup uploaded file
-    try { fs.unlinkSync(req.file.path); } catch (e) {}
-
-    res.json({ success: true, imported: importedCount, updated: updatedCount });
   } catch (err: any) {
     console.error('Client import error:', err);
     res.status(500).json({ error: err.message || 'Errore durante la lettura e l\'importazione del file' });
@@ -7576,12 +7730,43 @@ async function handleExcelProductsImportLogic(req: any, res: any) {
       processedCount += batch.length;
     }
 
+    const excelLogs: Array<{ level: 'success' | 'warning' | 'info' | 'error'; message: string }> = [];
+    excelLogs.push({
+      level: 'info',
+      message: `[LETTURA EXCEL] Individuate ${rows.length} righe nel foglio "${sheetName}".`
+    });
+    for (let i = 0; i < Math.min(enrichedRecords.length, 40); i++) {
+      const it = enrichedRecords[i];
+      excelLogs.push({
+        level: 'info',
+        message: `[ARRICCHITO] Articolo "${it.code}" (Provv: ${it.classe_provvigione || '-'}, Forn: ${it.supplier_name || '-'})`
+      });
+    }
+    if (enrichedRecords.length > 40) {
+      excelLogs.push({
+        level: 'info',
+        message: `...ed altri ${enrichedRecords.length - 40} articoli aggiornati regolarmente.`
+      });
+    }
+    if (ignoredCount > 0) {
+      excelLogs.push({
+        level: 'warning',
+        message: `[IGNORATE] ${ignoredCount} righe saltate poiché prive di codice articolo identificativo.`
+      });
+    }
+    excelLogs.push({
+      level: 'success',
+      message: `[IMPORTAZIONE COMPLETATA] Catalogo arricchito con successo: ${processedCount} articoli aggiornati.`
+    });
+
     return res.json({
       success: true,
+      imported: 0,
       updated: processedCount,
       enriched: processedCount,
       ignored: ignoredCount,
-      total: rows.length
+      total: rows.length,
+      logs: excelLogs
     });
 
   } catch (err: any) {
@@ -7620,29 +7805,15 @@ async function startServer() {
     (typeof __filename !== 'undefined' && __filename.includes(path.join('dist', 'server'))) ||
     (import.meta.url && (import.meta.url.includes('/dist/server.js') || import.meta.url.includes('/dist/server.cjs')));
 
-  const isRailway = Boolean(
-    process.env.RAILWAY_ENVIRONMENT || 
-    process.env.RAILWAY_PROJECT_ID || 
-    process.env.RAILWAY_SERVICE_ID || 
-    process.env.RAILWAY_STATIC_URL ||
-    process.env.RAILWAY_PUBLIC_DOMAIN
-  );
+  const isRunningSource = 
+    (typeof process !== 'undefined' && (process.argv[1]?.endsWith('server.ts') || process.argv.some(a => a.includes('server.ts')))) ||
+    (import.meta.url && import.meta.url.includes('server.ts'));
 
-  const isCloudPlatform = Boolean(
-    isRailway ||
-    process.env.RENDER ||
-    process.env.FLY_APP_NAME ||
-    process.env.HEROKU_APP_ID ||
-    process.env.KUBERNETES_SERVICE_HOST
-  );
+  const isProduction = isRunningFromDist || (process.env.NODE_ENV === 'production' && !isRunningSource);
 
-  const isProduction = 
-    process.env.NODE_ENV === 'production' ||
-    Boolean(isRunningFromDist) ||
-    Boolean(isCloudPlatform && process.env.NODE_ENV !== 'development') ||
-    (process.env.NODE_ENV !== 'development' && fs.existsSync(path.join(process.cwd(), 'dist', 'index.html')));
-
-  if (isProduction && process.env.NODE_ENV !== 'production') {
+  if (!isProduction && process.env.NODE_ENV !== 'development') {
+    process.env.NODE_ENV = 'development';
+  } else if (isProduction && process.env.NODE_ENV !== 'production') {
     process.env.NODE_ENV = 'production';
   }
 
